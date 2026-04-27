@@ -100,7 +100,7 @@ export default async function DashboardPage() {
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {recentRfqs.map((rfq) => (
-                  <tr key={rfq.id} className="hover:bg-gray-50 transition-colors">
+                  <tr key={rfq.id} className="hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => window.location.href = `/rfqs/${rfq.id}`}>
                     <td className="px-6 py-3 font-medium text-gray-900">{rfq.rfq_code}</td>
                     <td className="px-6 py-3 text-gray-600">{rfq.buyer_name ?? "—"}</td>
                     <td className="px-6 py-3">

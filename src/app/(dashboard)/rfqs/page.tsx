@@ -64,8 +64,8 @@ export default async function RfqsPage() {
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {rfqs.map((rfq) => (
-                  <tr key={rfq.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="px-6 py-3 font-semibold text-blue-600">{rfq.rfq_code}</td>
+                  <tr key={rfq.id} className="hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => window.location.href = `/rfqs/${rfq.id}`}>
+                    <td className="px-6 py-3 font-semibold text-blue-600 hover:underline">{rfq.rfq_code}</td>
                     <td className="px-6 py-3">
                       <p className="text-gray-800 font-medium">{rfq.buyer_name ?? "—"}</p>
                       {rfq.buyer_email && (
