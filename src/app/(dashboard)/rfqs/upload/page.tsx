@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
-import { Upload, FileText, ImageIcon, Table2, Loader2, CheckCircle, AlertCircle } from "lucide-react";
+import { Upload, FileText, ImageIcon, Table2, Loader2, ClipboardPaste, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,26 +12,63 @@ import { cn } from "@/lib/utils";
 
 const ACCEPTED = ".pdf,.xlsx,.xls,.csv,.txt,.jpg,.jpeg,.png,.webp";
 
-type UploadState = "idle" | "uploading" | "processing" | "done" | "error";
+type UploadState = "idle" | "uploading" | "processing" | "error";
 
 export default function UploadPage() {
-  const router = useRouter();
+  const router   = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const [file, setFile]           = useState<File | null>(null);
-  const [dragging, setDragging]   = useState(false);
-  const [buyerName, setBuyerName] = useState("");
-  const [buyerEmail, setBuyerEmail] = useState("");
-  const [priority, setPriority]   = useState<"normal" | "urgent">("normal");
-  const [state, setState]         = useState<UploadState>("idle");
-  const [error, setError]         = useState("");
-  const [rfqId, setRfqId]         = useState("");
+  const [file,        setFile]        = useState<File | null>(null);
+  const [preview,     setPreview]     = useState<string | null>(null);
+  const [dragging,    setDragging]    = useState(false);
+  const [buyerName,   setBuyerName]   = useState("");
+  const [buyerEmail,  setBuyerEmail]  = useState("");
+  const [priority,    setPriority]    = useState<"normal" | "urgent">("normal");
+  const [state,       setState]       = useState<UploadState>("idle");
+  const [error,       setError]       = useState("");
 
   function pickFile(f: File) {
     setFile(f);
     setError("");
     setState("idle");
+    // Generate preview for images
+    if (f.type.startsWith("image/")) {
+      const url = URL.createObjectURL(f);
+      setPreview(url);
+    } else {
+      setPreview(null);
+    }
   }
+
+  function clearFile() {
+    setFile(null);
+    setPreview(null);
+    setState("idle");
+    setError("");
+    if (inputRef.current) inputRef.current.value = "";
+  }
+
+  // Ctrl+V paste from clipboard
+  const handlePaste = useCallback((e: ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith("image/")) {
+        const blob = item.getAsFile();
+        if (blob) {
+          const named = new File([blob], `paste-${Date.now()}.png`, { type: blob.type });
+          pickFile(named);
+          toast.success("Screenshot pasted! Ready to upload.");
+          return;
+        }
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    document.addEventListener("paste", handlePaste);
+    return () => document.removeEventListener("paste", handlePaste);
+  }, [handlePaste]);
 
   function onDrop(e: React.DragEvent) {
     e.preventDefault();
@@ -56,20 +93,19 @@ export default function UploadPage() {
 
     const form = new FormData();
     form.append("file", file);
-    form.append("buyerName", buyerName);
+    form.append("buyerName",  buyerName);
     form.append("buyerEmail", buyerEmail);
-    form.append("priority", priority);
+    form.append("priority",   priority);
 
     try {
       setState("processing");
-      const res = await fetch("/api/rfqs/upload", { method: "POST", body: form });
+      const res  = await fetch("/api/rfqs/upload", { method: "POST", body: form });
       const json = await res.json();
-
       if (!res.ok) throw new Error(json.error ?? "Upload failed");
 
-      setRfqId(json.rfqId);
-      setState("done");
       toast.success(`${json.itemCount} items extracted and categorised!`);
+      // Go straight to the RFQ detail page
+      router.push(`/rfqs/${json.rfqId}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Something went wrong";
       setError(msg);
@@ -78,32 +114,7 @@ export default function UploadPage() {
     }
   }
 
-  if (state === "done") {
-    return (
-      <>
-        <DashboardHeader title="Upload RFQ" />
-        <main className="flex-1 flex items-center justify-center p-8">
-          <div className="bg-white rounded-2xl border border-gray-100 p-10 text-center max-w-md w-full shadow-sm">
-            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <CheckCircle className="w-8 h-8 text-green-600" />
-            </div>
-            <h2 className="text-xl font-bold text-gray-900 mb-2">RFQ processed!</h2>
-            <p className="text-gray-500 text-sm mb-6">
-              Items have been extracted and categorised. Review them in the RFQ detail view.
-            </p>
-            <div className="flex gap-3 justify-center">
-              <Button onClick={() => router.push("/rfqs")} className="bg-blue-600 hover:bg-blue-700 text-white">
-                View all RFQs
-              </Button>
-              <Button variant="outline" onClick={() => { setFile(null); setState("idle"); }}>
-                Upload another
-              </Button>
-            </div>
-          </div>
-        </main>
-      </>
-    );
-  }
+  const busy = state === "uploading" || state === "processing";
 
   return (
     <>
@@ -112,30 +123,71 @@ export default function UploadPage() {
         <div className="max-w-2xl mx-auto">
           <form onSubmit={handleSubmit} className="space-y-6">
 
-            {/* Drop zone */}
+            {/* Drop / paste zone */}
             <div
-              onClick={() => inputRef.current?.click()}
+              onClick={() => !file && inputRef.current?.click()}
               onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
               onDragLeave={() => setDragging(false)}
               onDrop={onDrop}
               className={cn(
-                "bg-white border-2 border-dashed rounded-2xl p-10 flex flex-col items-center justify-center cursor-pointer transition-colors",
-                dragging ? "border-blue-400 bg-blue-50" : "border-gray-200 hover:border-blue-300 hover:bg-blue-50/40"
+                "bg-white border-2 border-dashed rounded-2xl transition-colors relative overflow-hidden",
+                !file && "cursor-pointer hover:border-blue-300 hover:bg-blue-50/40",
+                dragging ? "border-blue-400 bg-blue-50" : "border-gray-200",
+                file ? "p-0" : "p-10 flex flex-col items-center justify-center"
               )}
             >
-              {fileIcon()}
-              {file ? (
-                <>
-                  <p className="mt-3 font-semibold text-gray-800">{file.name}</p>
-                  <p className="text-sm text-gray-400">{(file.size / 1024).toFixed(0)} KB · Click to change</p>
-                </>
+              {/* Image preview */}
+              {preview && file ? (
+                <div className="relative">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={preview} alt="Preview" className="w-full max-h-72 object-contain rounded-2xl" />
+                  <div className="absolute inset-0 bg-black/0 hover:bg-black/10 rounded-2xl transition-colors" />
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); clearFile(); }}
+                    className="absolute top-3 right-3 w-7 h-7 bg-white rounded-full shadow flex items-center justify-center hover:bg-red-50 hover:text-red-500 transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/40 to-transparent rounded-b-2xl px-4 py-3">
+                    <p className="text-white text-sm font-medium truncate">{file.name}</p>
+                    <p className="text-white/70 text-xs">{(file.size / 1024).toFixed(0)} KB</p>
+                  </div>
+                </div>
+              ) : file ? (
+                /* Non-image file */
+                <div className="p-6 flex items-center gap-4">
+                  {fileIcon()}
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold text-gray-800 truncate">{file.name}</p>
+                    <p className="text-sm text-gray-400">{(file.size / 1024).toFixed(0)} KB</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); clearFile(); }}
+                    className="text-gray-400 hover:text-red-500 transition-colors"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
               ) : (
+                /* Empty state */
                 <>
+                  {fileIcon()}
                   <p className="mt-3 font-semibold text-gray-700">Drop your RFQ file here</p>
                   <p className="text-sm text-gray-400 mt-1">PDF, Excel (.xlsx/.xls/.csv), Image (JPG/PNG), or Text (.txt)</p>
-                  <p className="mt-3 text-xs text-blue-600 font-medium">or click to browse</p>
+
+                  <div className="mt-4 flex items-center gap-3">
+                    <span className="text-xs text-blue-600 font-medium">click to browse</span>
+                    <span className="text-gray-300 text-xs">or</span>
+                    <span className="flex items-center gap-1.5 text-xs text-purple-600 font-medium bg-purple-50 px-2.5 py-1 rounded-lg">
+                      <ClipboardPaste className="w-3.5 h-3.5" />
+                      Ctrl + V to paste screenshot
+                    </span>
+                  </div>
                 </>
               )}
+
               <input
                 ref={inputRef}
                 type="file"
@@ -182,21 +234,21 @@ export default function UploadPage() {
 
             {error && (
               <div className="flex items-center gap-2 bg-red-50 text-red-600 text-sm px-4 py-3 rounded-lg">
-                <AlertCircle className="w-4 h-4 flex-shrink-0" />
                 {error}
               </div>
             )}
 
             <Button
               type="submit"
-              disabled={!file || state === "processing" || state === "uploading"}
+              disabled={!file || busy}
               className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-base"
             >
-              {state === "uploading" || state === "processing" ? (
+              {busy ? (
                 <><Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  {state === "uploading" ? "Uploading..." : "AI is processing..."}</>
+                  {state === "uploading" ? "Uploading..." : "AI is reading and categorising..."}</>
               ) : "Upload & Process RFQ"}
             </Button>
+
           </form>
         </div>
       </main>
