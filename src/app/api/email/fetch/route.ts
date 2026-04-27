@@ -5,18 +5,47 @@ import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { normalizeAndCategorize } from "@/lib/ai/normalize";
 
+export const maxDuration = 60;
+
 function generateRfqCode(): string {
   const year = new Date().getFullYear();
   const seq  = Math.floor(Math.random() * 90000) + 10000;
   return `RFQ-${year}-${seq}`;
 }
 
-function detectType(mime: string, filename: string): "pdf" | "excel" | "image" | null {
-  if (mime.includes("pdf") || filename.endsWith(".pdf"))          return "pdf";
+function detectType(mime: string, filename: string): "pdf" | "excel" | "image" | "text" | null {
+  if (mime.includes("pdf") || filename.endsWith(".pdf"))                            return "pdf";
   if (mime.includes("spreadsheet") || mime.includes("excel") ||
-      /\.(xlsx|xls|csv|tsv)$/i.test(filename))                   return "excel";
-  if (mime.includes("image"))                                     return "image";
+      /\.(xlsx|xls|csv|tsv)$/i.test(filename))                                      return "excel";
+  if (mime.includes("image"))                                                        return "image";
+  if (mime.includes("text/plain") || /\.(txt)$/i.test(filename))                   return "text";
   return null;
+}
+
+async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Promise<string> {
+  const base64 = buffer.toString("base64");
+  const isPdf  = mimeType.includes("pdf");
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{
+        role: "user",
+        content: isPdf
+          ? [
+              { type: "text", text: "Extract all text from this RFQ document. Return just the raw text, preserve item names, quantities and units." },
+              { type: "file", file: { filename: "document.pdf", file_data: `data:application/pdf;base64,${base64}` } },
+            ]
+          : [
+              { type: "text", text: "Extract all text from this RFQ image. Return just the raw text, no commentary." },
+              { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64}` } },
+            ],
+      }],
+    }),
+  });
+  const json = await res.json();
+  return json.choices?.[0]?.message?.content ?? "";
 }
 
 export async function POST() {
@@ -33,62 +62,55 @@ export async function POST() {
     const results: { rfqCode: string; subject: string; itemCount: number }[] = [];
 
     for (const email of emails) {
-      // Skip if already imported (dedup by messageId)
+      // Dedup: skip if this messageId was already imported (stored in file_name)
       const { count } = await supabase
         .from("rfqs")
         .select("*", { count: "exact", head: true })
-        .eq("buyer_email", email.fromEmail)
-        .eq("rfq_code", email.messageId);
+        .eq("file_name", `msgid:${email.messageId}`);
       if ((count ?? 0) > 0) continue;
 
-      // 2 — Pick the first processable attachment (or fall back to body text)
+      // 2 — Parse the first useful attachment
       let rawText  = "";
-      let fileType: "pdf" | "excel" | "image" | null = null;
-      let fileName = "email-body.txt";
+      let fileType: "pdf" | "excel" | "image" | "text" | null = null;
+      let fileName = `msgid:${email.messageId}`;
 
       for (const att of email.attachments) {
         const t = detectType(att.mimeType, att.filename);
         if (!t) continue;
 
+        fileName = att.filename;
+
         if (t === "pdf") {
-          rawText  = await parsePdf(att.buffer);
+          try {
+            rawText = await parsePdf(att.buffer);
+          } catch {
+            rawText = await extractTextViaOpenAI(att.buffer, "application/pdf");
+          }
           fileType = "pdf";
-          fileName = att.filename;
           break;
         }
         if (t === "excel") {
           rawText  = parseExcel(att.buffer);
           fileType = "excel";
-          fileName = att.filename;
+          break;
+        }
+        if (t === "text") {
+          rawText  = att.buffer.toString("utf-8");
+          fileType = "text";
           break;
         }
         if (t === "image") {
-          // OpenAI Vision
-          const b64 = att.buffer.toString("base64");
-          const res = await fetch("https://api.openai.com/v1/chat/completions", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-            body: JSON.stringify({
-              model: "gpt-4o-mini",
-              messages: [{ role: "user", content: [
-                { type: "text", text: "Extract all text from this RFQ image. Return only the raw text." },
-                { type: "image_url", image_url: { url: `data:${att.mimeType};base64,${b64}` } },
-              ]}],
-            }),
-          });
-          const j = await res.json();
-          rawText  = j.choices?.[0]?.message?.content ?? "";
+          rawText  = await extractTextViaOpenAI(att.buffer, att.mimeType);
           fileType = "image";
-          fileName = att.filename;
           break;
         }
       }
 
-      // Fall back to email body if no useful attachment
+      // Fall back to email body text if no attachment was useful
       if (!rawText.trim() && email.bodyText.trim()) {
         rawText  = email.bodyText;
         fileType = null;
-        fileName = "email-body.txt";
+        fileName = `msgid:${email.messageId}`;
       }
 
       if (!rawText.trim()) continue;
@@ -100,8 +122,8 @@ export async function POST() {
       const { data: rfq, error: rfqErr } = await supabase
         .from("rfqs")
         .insert({
-          user_id:    user.id,
-          rfq_code:   rfqCode,
+          user_id:     user.id,
+          rfq_code:    rfqCode,
           buyer_name:  email.from,
           buyer_email: email.fromEmail,
           file_name:   fileName,
