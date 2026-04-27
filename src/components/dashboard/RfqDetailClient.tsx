@@ -62,7 +62,8 @@ function CategoryCell({
   const [customVal, setCustomVal] = useState(isPreset ? "" : item.category);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  function handleSelect(val: string) {
+  function handleSelect(val: string | null) {
+    if (!val) return;
     if (val === CUSTOM_VALUE) {
       setEditing(true);
       setCustomVal("");
