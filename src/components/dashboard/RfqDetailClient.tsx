@@ -1,21 +1,24 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import {
   Loader2, Split, Send, CheckCircle, AlertTriangle,
-  MessageCircle, Mail, Package
+  MessageCircle, Mail, Package, Pencil
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
-const CATEGORIES = [
+const PRESET_CATEGORIES = [
   "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
   "FASTENERS","SANITARY_PLUMBING","PAINTS","VALVES_FITTINGS",
   "PACKAGING_MATERIALS","ELECTRICAL","HVAC","GENERAL_HARDWARE",
 ];
+
+const CUSTOM_VALUE = "__CUSTOM__";
 
 const statusStyle: Record<string, string> = {
   draft:       "bg-gray-100 text-gray-600",
@@ -46,6 +49,93 @@ type Rfq = {
   file_name: string | null; created_at: string;
 };
 
+// ── Category selector with "Other / type your own" support ──
+function CategoryCell({
+  item,
+  onSave,
+}: {
+  item: Item;
+  onSave: (id: string, cat: string) => void;
+}) {
+  const isPreset    = PRESET_CATEGORIES.includes(item.category);
+  const [editing,   setEditing]   = useState(false);
+  const [customVal, setCustomVal] = useState(isPreset ? "" : item.category);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function handleSelect(val: string) {
+    if (val === CUSTOM_VALUE) {
+      setEditing(true);
+      setCustomVal("");
+      setTimeout(() => inputRef.current?.focus(), 50);
+    } else {
+      setEditing(false);
+      onSave(item.id, val);
+    }
+  }
+
+  function commitCustom() {
+    const trimmed = customVal.trim().toUpperCase().replace(/\s+/g, "_");
+    if (!trimmed) { setEditing(false); return; }
+    onSave(item.id, trimmed);
+    setEditing(false);
+  }
+
+  // If already a custom category, show it with an edit pencil
+  if (!isPreset && !editing) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full font-medium">
+          {item.category.replace(/_/g, " ")}
+        </span>
+        <button
+          onClick={() => { setEditing(true); setCustomVal(item.category.replace(/_/g, " ")); setTimeout(() => inputRef.current?.focus(), 50); }}
+          className="text-gray-400 hover:text-gray-600"
+        >
+          <Pencil className="w-3 h-3" />
+        </button>
+      </div>
+    );
+  }
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-1">
+        <Input
+          ref={inputRef}
+          value={customVal}
+          onChange={(e) => setCustomVal(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") commitCustom(); if (e.key === "Escape") setEditing(false); }}
+          placeholder="e.g. Civil Materials"
+          className="h-7 text-xs w-40 px-2"
+        />
+        <Button size="sm" onClick={commitCustom} className="h-7 text-xs px-2 bg-blue-600 hover:bg-blue-700 text-white">
+          Save
+        </Button>
+        <button onClick={() => setEditing(false)} className="text-gray-400 hover:text-gray-600 text-xs px-1">✕</button>
+      </div>
+    );
+  }
+
+  return (
+    <Select value={item.category} onValueChange={handleSelect}>
+      <SelectTrigger className="h-7 text-xs w-44">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {PRESET_CATEGORIES.map((c) => (
+          <SelectItem key={c} value={c} className="text-xs">
+            {c.replace(/_/g, " ")}
+          </SelectItem>
+        ))}
+        <div className="border-t border-gray-100 my-1" />
+        <SelectItem value={CUSTOM_VALUE} className="text-xs text-purple-600 font-medium">
+          ✏️ Other — type your own…
+        </SelectItem>
+      </SelectContent>
+    </Select>
+  );
+}
+
 export default function RfqDetailClient({
   rfq, items: initialItems, outgoing: initialOutgoing, outgoingItems,
 }: {
@@ -54,8 +144,8 @@ export default function RfqDetailClient({
   outgoing: OutgoingRfq[];
   outgoingItems: OutgoingItem[];
 }) {
-  const [items, setItems]     = useState<Item[]>(initialItems);
-  const [outgoing, setOutgoing] = useState<OutgoingRfq[]>(initialOutgoing);
+  const [items, setItems]         = useState<Item[]>(initialItems);
+  const [outgoing, setOutgoing]   = useState<OutgoingRfq[]>(initialOutgoing);
   const [splitting, setSplitting] = useState(false);
   const [sending, setSending]     = useState<string | null>(null);
   const [splitError, setSplitError] = useState("");
@@ -68,6 +158,7 @@ export default function RfqDetailClient({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ itemId, category }),
     });
+    toast.success(`Category updated to "${category.replace(/_/g, " ")}"`);
   }
 
   // --- Generate supplier split ---
@@ -94,7 +185,6 @@ export default function RfqDetailClient({
     setSending(outgoingId);
     try {
       if (channel === "whatsapp" && whatsappNumber) {
-        // Open WhatsApp Web with pre-filled message
         const phone = whatsappNumber.replace(/[^0-9]/g, "");
         const text  = encodeURIComponent(message ?? "");
         window.open(`https://wa.me/${phone}?text=${text}`, "_blank");
@@ -102,8 +192,6 @@ export default function RfqDetailClient({
       } else {
         toast.info("Email channel — marking as sent.");
       }
-
-      // Mark as sent in DB
       const res = await fetch(`/api/rfqs/${rfq.id}/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -121,7 +209,6 @@ export default function RfqDetailClient({
     }
   }
 
-  // Which items belong to an outgoing RFQ
   function itemsForOutgoing(outgoingId: string): Item[] {
     const itemIds = new Set(outgoingItems.filter((oi) => oi.outgoing_rfq_id === outgoingId).map((oi) => oi.item_id));
     return items.filter((i) => itemIds.has(i.id));
@@ -212,19 +299,8 @@ export default function RfqDetailClient({
                       {item.qty != null ? `${item.qty} ${item.unit ?? ""}` : "—"}
                     </td>
                     <td className="px-4 py-2.5 text-gray-500 text-xs max-w-[140px] truncate">{item.spec ?? "—"}</td>
-                    <td className="px-4 py-2.5">
-                      <Select value={item.category ?? "GENERAL_HARDWARE"} onValueChange={(v) => v && updateCategory(item.id, v)}>
-                        <SelectTrigger className="h-7 text-xs w-44">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {CATEGORIES.map((c) => (
-                            <SelectItem key={c} value={c} className="text-xs">
-                              {c.replace(/_/g, " ")}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                    <td className="px-4 py-3">
+                      <CategoryCell item={item} onSave={updateCategory} />
                     </td>
                     <td className="px-4 py-2.5">
                       <div className="flex items-center gap-2">
@@ -260,7 +336,6 @@ export default function RfqDetailClient({
                 const isSending = sending === o.id;
                 return (
                   <div key={o.id} className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
-                    {/* Card header */}
                     <div className="flex items-center justify-between px-6 py-4 border-b border-gray-50">
                       <div className="flex items-center gap-3">
                         <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">
@@ -314,7 +389,6 @@ export default function RfqDetailClient({
                       </div>
                     </div>
 
-                    {/* Items in this split */}
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="text-left text-xs text-gray-400 bg-gray-50 border-b border-gray-100">
@@ -334,7 +408,6 @@ export default function RfqDetailClient({
                       </tbody>
                     </table>
 
-                    {/* Message preview */}
                     {o.message_body && (
                       <div className="px-6 py-4 border-t border-gray-50 bg-gray-50/50">
                         <p className="text-xs text-gray-400 mb-1 font-medium">Message preview</p>
