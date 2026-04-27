@@ -1,7 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
+const DEFAULT_TEMPLATE = `Hello {supplier},
+
+We have a new RFQ for you.
+RFQ ID: {rfqCode}
+Category: {category}
+
+Items:
+{items}
+
+Please share your best rate, MOQ, and delivery time.
+Reply to this message or email us back.
+
+Thank you.`;
+
 function buildMessage(
+  template: string,
   supplierName: string,
   rfqCode: string,
   category: string,
@@ -15,19 +30,11 @@ function buildMessage(
     })
     .join("\n");
 
-  return `Hello ${supplierName},
-
-We have a new RFQ for you.
-RFQ ID: ${rfqCode}
-Category: ${category.replace(/_/g, " ")}
-
-Items:
-${itemLines}
-
-Please share your best rate, MOQ, and delivery time.
-Reply to this message or email us back.
-
-Thank you.`;
+  return template
+    .replace("{supplier}", supplierName)
+    .replace("{rfqCode}", rfqCode)
+    .replace("{category}", category.replace(/_/g, " "))
+    .replace("{items}", itemLines);
 }
 
 export async function POST(
@@ -48,6 +55,14 @@ export async function POST(
     .eq("user_id", user.id);
 
   if (!rfq || !items) return NextResponse.json({ error: "RFQ not found" }, { status: 404 });
+
+  // Load message template from settings
+  const { data: settingRows } = await supabase
+    .from("user_settings")
+    .select("key, value")
+    .eq("user_id", user.id)
+    .eq("key", "message_template");
+  const messageTemplate = settingRows?.[0]?.value ?? DEFAULT_TEMPLATE;
 
   // Load all user suppliers
   const { data: suppliers } = await supabase
@@ -100,7 +115,7 @@ export async function POST(
     // One outgoing RFQ per matched supplier
     for (const supplier of matched) {
       const childCode = `${rfq.rfq_code}-${category.slice(0, 3)}-${String(seq++).padStart(2, "0")}`;
-      const message = buildMessage(supplier.name, rfq.rfq_code, category, catItems);
+      const message = buildMessage(messageTemplate, supplier.name, rfq.rfq_code, category, catItems);
 
       const { data: outgoing } = await supabase
         .from("outgoing_rfqs")

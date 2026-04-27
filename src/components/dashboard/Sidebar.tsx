@@ -10,16 +10,20 @@ import {
   Users,
   LogOut,
   Inbox,
+  Settings,
+  Database,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 
 const navItems = [
-  { href: "/dashboard",         label: "Dashboard",  icon: LayoutDashboard },
-  { href: "/inbox",             label: "Email Inbox", icon: Inbox },
-  { href: "/rfqs",              label: "RFQs",       icon: FileText },
-  { href: "/rfqs/upload",       label: "Upload RFQ", icon: Upload },
-  { href: "/suppliers",         label: "Suppliers",  icon: Users },
+  { href: "/dashboard",              label: "Dashboard",    icon: LayoutDashboard },
+  { href: "/inbox",                  label: "Email Inbox",  icon: Inbox },
+  { href: "/rfqs",                   label: "RFQs",         icon: FileText },
+  { href: "/rfqs/upload",            label: "Upload RFQ",   icon: Upload },
+  { href: "/suppliers",              label: "Suppliers",    icon: Users },
+  { href: "/suppliers/tally-import", label: "Tally Import", icon: Database },
+  { href: "/settings",               label: "Settings",     icon: Settings },
 ];
 
 export default function Sidebar() {
@@ -44,7 +48,7 @@ export default function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 px-3 py-4 space-y-1">
+      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
         {navItems.map((item) => {
           const active = pathname === item.href;
           return (

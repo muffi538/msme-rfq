@@ -15,8 +15,7 @@ export type FetchedEmail = {
   }[];
 };
 
-// Connect to Gmail IMAP and fetch unread emails
-export async function fetchUnreadEmails(limit = 20): Promise<FetchedEmail[]> {
+export async function fetchUnreadEmails(limit = 1): Promise<FetchedEmail[]> {
   const client = new ImapFlow({
     host: "imap.gmail.com",
     port: 993,
@@ -26,6 +25,8 @@ export async function fetchUnreadEmails(limit = 20): Promise<FetchedEmail[]> {
       pass: process.env.GMAIL_APP_PASSWORD!,
     },
     logger: false,
+    connectionTimeout: 20000,
+    greetingTimeout: 10000,
   });
 
   await client.connect();
@@ -35,11 +36,14 @@ export async function fetchUnreadEmails(limit = 20): Promise<FetchedEmail[]> {
   try {
     await client.mailboxOpen("INBOX");
 
-    // Search for unseen messages
-    const uids = await client.search({ seen: false }, { uid: true });
+    // Only fetch unread emails received today
+    const todayMidnight = new Date();
+    todayMidnight.setHours(0, 0, 0, 0);
+
+    const uids = await client.search({ seen: false, since: todayMidnight }, { uid: true });
     if (!uids || uids.length === 0) return [];
 
-    // Take the most recent `limit` messages
+    // Most recent `limit` only
     const toFetch = uids.slice(-limit);
 
     for await (const msg of client.fetch(toFetch, { source: true }, { uid: true })) {
@@ -67,10 +71,8 @@ export async function fetchUnreadEmails(limit = 20): Promise<FetchedEmail[]> {
           attachments,
         });
 
-        // Mark as seen so we don't fetch it again
         await client.messageFlagsAdd({ uid: msg.uid }, ["\\Seen"], { uid: true });
       } catch {
-        // Skip malformed emails
         continue;
       }
     }
