@@ -11,9 +11,11 @@ function generateRfqCode(): string {
   return `RFQ-${year}-${seq}`;
 }
 
-function detectFileType(filename: string, mime: string): "pdf" | "excel" | "image" {
-  if (mime.includes("pdf") || filename.endsWith(".pdf"))  return "pdf";
-  if (mime.includes("image"))                              return "image";
+function detectFileType(filename: string, mime: string): "pdf" | "excel" | "image" | "text" {
+  const lower = filename.toLowerCase();
+  if (mime.includes("pdf") || lower.endsWith(".pdf"))                         return "pdf";
+  if (mime.includes("image"))                                                  return "image";
+  if (lower.endsWith(".txt") || lower.endsWith(".csv") || mime.includes("text/plain") || mime.includes("text/csv")) return "text";
   return "excel";
 }
 
@@ -41,6 +43,8 @@ export async function POST(request: NextRequest) {
       rawText = await parsePdf(buffer);
     } else if (fileType === "excel") {
       rawText = parseExcel(buffer);
+    } else if (fileType === "text") {
+      rawText = buffer.toString("utf-8");
     } else {
       // Image — send to OpenAI Vision
       const base64 = buffer.toString("base64");

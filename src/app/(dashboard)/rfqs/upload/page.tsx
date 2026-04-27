@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
-const ACCEPTED = ".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp";
+const ACCEPTED = ".pdf,.xlsx,.xls,.csv,.txt,.jpg,.jpeg,.png,.webp";
 
 type UploadState = "idle" | "uploading" | "processing" | "done" | "error";
 
@@ -132,7 +132,7 @@ export default function UploadPage() {
               ) : (
                 <>
                   <p className="mt-3 font-semibold text-gray-700">Drop your RFQ file here</p>
-                  <p className="text-sm text-gray-400 mt-1">PDF, Excel (.xlsx/.xls/.csv), or Image (JPG/PNG)</p>
+                  <p className="text-sm text-gray-400 mt-1">PDF, Excel (.xlsx/.xls/.csv), Image (JPG/PNG), or Text (.txt)</p>
                   <p className="mt-3 text-xs text-blue-600 font-medium">or click to browse</p>
                 </>
               )}
