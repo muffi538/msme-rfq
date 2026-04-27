@@ -1,8 +1,8 @@
+// pdf-parse v1 requires CJS require in Next.js (no default ESM export)
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string }>;
+
 export async function parsePdf(buffer: Buffer): Promise<string> {
-  // Dynamic import keeps pdf-parse out of the bundle (avoids canvas/DOMMatrix on Vercel)
-  const mod = await import("pdf-parse");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pdfParse = (mod as any).default ?? mod;
-  const data = await (pdfParse as (buf: Buffer) => Promise<{ text: string }>)(buffer);
+  const data = await pdfParse(buffer);
   return data.text;
 }
