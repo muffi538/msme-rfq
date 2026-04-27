@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
-import { FileText, Clock, CheckCircle, Users } from "lucide-react";
+import { FileText, Clock, CheckCircle, Users, Send } from "lucide-react";
 import Link from "next/link";
 
 export default async function DashboardPage() {
@@ -12,21 +12,21 @@ export default async function DashboardPage() {
   // Fetch counts in parallel
   const [
     { count: totalRfqs },
-    { count: pendingRfqs },
     { count: processedRfqs },
+    { count: sentCount },
     { count: totalSuppliers },
   ] = await Promise.all([
     supabase.from("rfqs").select("*", { count: "exact", head: true }),
-    supabase.from("rfqs").select("*", { count: "exact", head: true }).eq("status", "pending"),
     supabase.from("rfqs").select("*", { count: "exact", head: true }).eq("status", "processed"),
+    supabase.from("outgoing_rfqs").select("*", { count: "exact", head: true }).eq("status", "sent"),
     supabase.from("suppliers").select("*", { count: "exact", head: true }),
   ]);
 
   const stats = [
-    { label: "Total RFQs",        value: totalRfqs ?? 0,     icon: FileText,    color: "bg-blue-50 text-blue-600",   href: "/rfqs" },
-    { label: "Pending Approval",   value: pendingRfqs ?? 0,   icon: Clock,       color: "bg-yellow-50 text-yellow-600", href: "/rfqs" },
-    { label: "Processed",          value: processedRfqs ?? 0, icon: CheckCircle, color: "bg-green-50 text-green-600",  href: "/rfqs" },
-    { label: "Suppliers",          value: totalSuppliers ?? 0,icon: Users,       color: "bg-purple-50 text-purple-600",href: "/suppliers" },
+    { label: "Total RFQs",     value: totalRfqs ?? 0,     icon: FileText,    color: "bg-blue-50 text-blue-600",    href: "/rfqs" },
+    { label: "Processed",      value: processedRfqs ?? 0, icon: CheckCircle, color: "bg-green-50 text-green-600",  href: "/rfqs" },
+    { label: "Quotes Sent",    value: sentCount ?? 0,     icon: Send,        color: "bg-indigo-50 text-indigo-600",href: "/rfqs" },
+    { label: "Suppliers",      value: totalSuppliers ?? 0,icon: Users,       color: "bg-purple-50 text-purple-600",href: "/suppliers" },
   ];
 
   // Fetch 5 most recent RFQs
@@ -100,8 +100,10 @@ export default async function DashboardPage() {
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {recentRfqs.map((rfq) => (
-                  <tr key={rfq.id} className="hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => window.location.href = `/rfqs/${rfq.id}`}>
-                    <td className="px-6 py-3 font-medium text-gray-900">{rfq.rfq_code}</td>
+                  <tr key={rfq.id} className="hover:bg-gray-50 transition-colors">
+                    <td className="px-6 py-3 font-medium text-blue-600">
+                      <Link href={`/rfqs/${rfq.id}`} className="hover:underline">{rfq.rfq_code}</Link>
+                    </td>
                     <td className="px-6 py-3 text-gray-600">{rfq.buyer_name ?? "—"}</td>
                     <td className="px-6 py-3">
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusStyle[rfq.status] ?? "bg-gray-100 text-gray-600"}`}>
