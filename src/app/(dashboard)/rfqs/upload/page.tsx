@@ -2,6 +2,7 @@
 
 import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { Upload, FileText, ImageIcon, Table2, Loader2, CheckCircle, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -68,9 +69,12 @@ export default function UploadPage() {
 
       setRfqId(json.rfqId);
       setState("done");
+      toast.success(`${json.itemCount} items extracted and categorised!`);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
+      const msg = err instanceof Error ? err.message : "Something went wrong";
+      setError(msg);
       setState("error");
+      toast.error(msg);
     }
   }
 

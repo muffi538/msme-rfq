@@ -9,12 +9,14 @@ import {
   Upload,
   Users,
   LogOut,
+  Inbox,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 
 const navItems = [
   { href: "/dashboard",         label: "Dashboard",  icon: LayoutDashboard },
+  { href: "/inbox",             label: "Email Inbox", icon: Inbox },
   { href: "/rfqs",              label: "RFQs",       icon: FileText },
   { href: "/rfqs/upload",       label: "Upload RFQ", icon: Upload },
   { href: "/suppliers",         label: "Suppliers",  icon: Users },

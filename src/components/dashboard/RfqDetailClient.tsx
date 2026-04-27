@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -10,6 +9,7 @@ import {
   MessageCircle, Mail, Package
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 
 const CATEGORIES = [
   "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
@@ -74,28 +74,51 @@ export default function RfqDetailClient({
   async function handleSplit() {
     setSplitting(true);
     setSplitError("");
-    const res  = await fetch(`/api/rfqs/${rfq.id}/split`, { method: "POST" });
-    const json = await res.json();
-    if (!res.ok) { setSplitError(json.error ?? "Split failed"); setSplitting(false); return; }
-    setOutgoing(json.outgoing);
-    setSplitting(false);
+    try {
+      const res  = await fetch(`/api/rfqs/${rfq.id}/split`, { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Split failed");
+      setOutgoing(json.outgoing);
+      toast.success(`Split complete — ${json.outgoing.length} supplier RFQ(s) generated`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Split failed";
+      setSplitError(msg);
+      toast.error(msg);
+    } finally {
+      setSplitting(false);
+    }
   }
 
   // --- Approve + send a child RFQ ---
-  async function handleSend(outgoingId: string, channel: string) {
+  async function handleSend(outgoingId: string, channel: string, whatsappNumber?: string | null, message?: string | null) {
     setSending(outgoingId);
-    const res  = await fetch(`/api/rfqs/${rfq.id}/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ outgoingId, channel }),
-    });
-    const json = await res.json();
-    if (res.ok) {
-      setOutgoing((prev) =>
-        prev.map((o) => o.id === outgoingId ? { ...o, status: "sent", sent_at: new Date().toISOString() } : o)
-      );
+    try {
+      if (channel === "whatsapp" && whatsappNumber) {
+        // Open WhatsApp Web with pre-filled message
+        const phone = whatsappNumber.replace(/[^0-9]/g, "");
+        const text  = encodeURIComponent(message ?? "");
+        window.open(`https://wa.me/${phone}?text=${text}`, "_blank");
+        toast.success("WhatsApp opened — send the message to complete.");
+      } else {
+        toast.info("Email channel — marking as sent.");
+      }
+
+      // Mark as sent in DB
+      const res = await fetch(`/api/rfqs/${rfq.id}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outgoingId, channel }),
+      });
+      if (res.ok) {
+        setOutgoing((prev) =>
+          prev.map((o) => o.id === outgoingId ? { ...o, status: "sent", sent_at: new Date().toISOString() } : o)
+        );
+      }
+    } catch {
+      toast.error("Could not mark as sent. Please try again.");
+    } finally {
+      setSending(null);
     }
-    setSending(null);
   }
 
   // Which items belong to an outgoing RFQ
@@ -261,12 +284,12 @@ export default function RfqDetailClient({
                             {o.suppliers.whatsapp_number && (
                               <Button
                                 size="sm"
-                                onClick={() => handleSend(o.id, "whatsapp")}
+                                onClick={() => handleSend(o.id, "whatsapp", o.suppliers?.whatsapp_number, o.message_body)}
                                 disabled={isSending}
                                 className="bg-green-600 hover:bg-green-700 text-white gap-1.5 h-8 text-xs"
                               >
                                 {isSending ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageCircle className="w-3 h-3" />}
-                                WhatsApp
+                                Send on WhatsApp
                               </Button>
                             )}
                             {o.suppliers.email && (
