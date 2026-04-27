@@ -1,9 +1,19 @@
-import { createClient } from "@/lib/supabase/server";
+"use client";
 
-export default async function DashboardHeader({ title }: { title: string }) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  const company = user?.user_metadata?.company_name ?? "Your Company";
+import { useEffect, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
+
+export default function DashboardHeader({ title }: { title: string }) {
+  const [company, setCompany] = useState("Your Company");
+
+  useEffect(() => {
+    const supabase = createClient();
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      const name = user?.user_metadata?.company_name ?? "Your Company";
+      setCompany(name);
+    });
+  }, []);
+
   const initials = company.slice(0, 2).toUpperCase();
 
   return (
