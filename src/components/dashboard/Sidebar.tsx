@@ -12,9 +12,11 @@ import {
   Inbox,
   Settings,
   Database,
+  ShieldCheck,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 
 const navItems = [
   { href: "/dashboard",              label: "Dashboard",    icon: LayoutDashboard },
@@ -27,8 +29,24 @@ const navItems = [
 ];
 
 export default function Sidebar() {
-  const pathname = usePathname();
-  const router = useRouter();
+  const pathname  = usePathname();
+  const router    = useRouter();
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    const supabase = createClient();
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) return;
+      supabase
+        .from("profiles")
+        .select("is_admin")
+        .eq("id", user.id)
+        .single()
+        .then(({ data }) => {
+          if (data?.is_admin) setIsAdmin(true);
+        });
+    });
+  }, []);
 
   async function handleLogout() {
     const supabase = createClient();
@@ -67,6 +85,22 @@ export default function Sidebar() {
             </Link>
           );
         })}
+
+        {/* Admin-only link */}
+        {isAdmin && (
+          <Link
+            href="/admin"
+            className={cn(
+              "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors mt-2",
+              pathname === "/admin"
+                ? "bg-purple-600 text-white"
+                : "text-purple-400 hover:bg-gray-800 hover:text-purple-300"
+            )}
+          >
+            <ShieldCheck className="w-4 h-4 flex-shrink-0" />
+            Admin Panel
+          </Link>
+        )}
       </nav>
 
       {/* Logout */}
