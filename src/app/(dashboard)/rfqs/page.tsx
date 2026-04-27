@@ -2,7 +2,6 @@ import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import Link from "next/link";
-import { Badge } from "@/components/ui/badge";
 import { Upload, AlertTriangle } from "lucide-react";
 
 const statusStyle: Record<string, string> = {
@@ -64,8 +63,10 @@ export default async function RfqsPage() {
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {rfqs.map((rfq) => (
-                  <tr key={rfq.id} className="hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => window.location.href = `/rfqs/${rfq.id}`}>
-                    <td className="px-6 py-3 font-semibold text-blue-600 hover:underline">{rfq.rfq_code}</td>
+                  <tr key={rfq.id} className="hover:bg-gray-50 transition-colors">
+                    <td className="px-6 py-3 font-semibold text-blue-600">
+                      <Link href={`/rfqs/${rfq.id}`} className="hover:underline">{rfq.rfq_code}</Link>
+                    </td>
                     <td className="px-6 py-3">
                       <p className="text-gray-800 font-medium">{rfq.buyer_name ?? "—"}</p>
                       {rfq.buyer_email && (
@@ -86,7 +87,9 @@ export default async function RfqsPage() {
                       )}
                     </td>
                     <td className="px-6 py-3 text-gray-400">
-                      {new Date(rfq.created_at).toLocaleDateString("en-IN")}
+                      <Link href={`/rfqs/${rfq.id}`} className="hover:underline block">
+                        {new Date(rfq.created_at).toLocaleDateString("en-IN")}
+                      </Link>
                     </td>
                   </tr>
                 ))}
