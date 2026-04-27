@@ -4,6 +4,32 @@ import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { normalizeAndCategorize } from "@/lib/ai/normalize";
 
+async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Promise<string> {
+  const base64 = buffer.toString("base64");
+  const isPdf  = mimeType.includes("pdf");
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{
+        role: "user",
+        content: isPdf
+          ? [
+              { type: "text", text: "Extract all text from this RFQ document. Return just the raw text, preserve item names, quantities and units." },
+              { type: "file", file: { filename: "document.pdf", file_data: `data:application/pdf;base64,${base64}` } },
+            ]
+          : [
+              { type: "text", text: "Extract all text from this RFQ image. Return just the raw text, no commentary." },
+              { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64}` } },
+            ],
+      }],
+    }),
+  });
+  const json = await res.json();
+  return json.choices?.[0]?.message?.content ?? "";
+}
+
 // Generate sequential RFQ code like RFQ-2026-00001
 function generateRfqCode(): string {
   const year = new Date().getFullYear();
@@ -40,34 +66,19 @@ export async function POST(request: NextRequest) {
     // 1 — Parse the file into raw text
     let rawText = "";
     if (fileType === "pdf") {
-      rawText = await parsePdf(buffer);
+      try {
+        rawText = await parsePdf(buffer);
+      } catch {
+        // Malformed PDF — fall back to OpenAI which handles any PDF via base64
+        rawText = await extractTextViaOpenAI(buffer, "application/pdf");
+      }
     } else if (fileType === "excel") {
       rawText = parseExcel(buffer);
     } else if (fileType === "text") {
       rawText = buffer.toString("utf-8");
     } else {
       // Image — send to OpenAI Vision
-      const base64 = buffer.toString("base64");
-      const mimeType = file.type || "image/jpeg";
-      const visionRes = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          messages: [{
-            role: "user",
-            content: [
-              { type: "text", text: "Extract all text from this RFQ image. Return just the raw text, no commentary." },
-              { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64}` } },
-            ],
-          }],
-        }),
-      });
-      const visionJson = await visionRes.json();
-      rawText = visionJson.choices?.[0]?.message?.content ?? "";
+      rawText = await extractTextViaOpenAI(buffer, file.type || "image/jpeg");
     }
 
     if (!rawText.trim()) {
