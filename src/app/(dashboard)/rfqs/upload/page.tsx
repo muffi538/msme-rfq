@@ -65,6 +65,26 @@ export default function UploadPage() {
     }
   }, []);
 
+  // Button click — reads image from clipboard via Clipboard API
+  async function handleClipboardButton() {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const imageType = item.types.find((t) => t.startsWith("image/"));
+        if (imageType) {
+          const blob = await item.getType(imageType);
+          const named = new File([blob], `paste-${Date.now()}.png`, { type: imageType });
+          pickFile(named);
+          toast.success("Screenshot pasted from clipboard!");
+          return;
+        }
+      }
+      toast.error("No image found in clipboard. Copy a screenshot first.");
+    } catch {
+      toast.error("Could not read clipboard. Try pressing Ctrl+V instead.");
+    }
+  }
+
   useEffect(() => {
     document.addEventListener("paste", handlePaste);
     return () => document.removeEventListener("paste", handlePaste);
@@ -177,14 +197,7 @@ export default function UploadPage() {
                   <p className="mt-3 font-semibold text-gray-700">Drop your RFQ file here</p>
                   <p className="text-sm text-gray-400 mt-1">PDF, Excel (.xlsx/.xls/.csv), Image (JPG/PNG), or Text (.txt)</p>
 
-                  <div className="mt-4 flex items-center gap-3">
-                    <span className="text-xs text-blue-600 font-medium">click to browse</span>
-                    <span className="text-gray-300 text-xs">or</span>
-                    <span className="flex items-center gap-1.5 text-xs text-purple-600 font-medium bg-purple-50 px-2.5 py-1 rounded-lg">
-                      <ClipboardPaste className="w-3.5 h-3.5" />
-                      Ctrl + V to paste screenshot
-                    </span>
-                  </div>
+                  <p className="mt-3 text-xs text-blue-600 font-medium">click to browse</p>
                 </>
               )}
 
@@ -196,6 +209,19 @@ export default function UploadPage() {
                 onChange={(e) => e.target.files?.[0] && pickFile(e.target.files[0])}
               />
             </div>
+
+            {/* Paste from clipboard button */}
+            {!file && (
+              <button
+                type="button"
+                onClick={handleClipboardButton}
+                className="w-full flex items-center justify-center gap-2.5 bg-purple-50 hover:bg-purple-100 border border-purple-200 hover:border-purple-300 text-purple-700 font-medium text-sm rounded-2xl py-4 transition-colors"
+              >
+                <ClipboardPaste className="w-5 h-5" />
+                Paste screenshot from clipboard
+                <span className="text-purple-400 text-xs font-normal ml-1">(or press Ctrl + V)</span>
+              </button>
+            )}
 
             {/* Buyer details */}
             <div className="bg-white rounded-2xl border border-gray-100 p-6 space-y-4">
