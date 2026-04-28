@@ -18,6 +18,7 @@ export default function InboxPage() {
   const [fetchError, setFetchError]     = useState("");
   const [pending, setPending]           = useState<PendingRfq[]>([]);
   const [processing, setProcessing]     = useState<Record<string, boolean>>({});
+  const [done, setDone]                 = useState<Record<string, boolean>>({});
 
   useEffect(() => { loadPending(); }, []);
 
@@ -55,9 +56,15 @@ export default function InboxPage() {
       const res  = await fetch(`/api/rfqs/${rfqId}/process`, { method: "POST" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Processing failed");
-      toast.success(`${json.itemCount} items extracted! Redirecting to approval...`);
-      // Go straight to the RFQ detail page for review & approval
-      router.push(`/rfqs/${rfqId}`);
+
+      // Mark as done, remove from pending list
+      setDone((p) => ({ ...p, [rfqId]: true }));
+      setProcessing((p) => ({ ...p, [rfqId]: false }));
+      setPending((p) => p.filter((r) => r.id !== rfqId));
+      toast.success(`${json.itemCount} items extracted!`);
+
+      // Short pause so user sees the ✓ tick, then redirect
+      setTimeout(() => router.push(`/rfqs/${rfqId}`), 1200);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Processing failed");
       setProcessing((p) => ({ ...p, [rfqId]: false }));
@@ -121,7 +128,7 @@ export default function InboxPage() {
             </div>
             <div className="divide-y divide-gray-50">
               {pending.map((rfq) => (
-                <div key={rfq.id} className="flex items-center justify-between px-6 py-4 hover:bg-gray-50">
+                <div key={rfq.id} className={`flex items-center justify-between px-6 py-4 transition-colors ${done[rfq.id] ? "bg-green-50" : "hover:bg-gray-50"}`}>
                   <div className="min-w-0 flex-1">
                     <p className="font-medium text-gray-800">{rfq.rfq_code}</p>
                     <p className="text-sm text-gray-500 truncate">{rfq.buyer_name ?? rfq.buyer_email ?? "Unknown sender"}</p>
@@ -129,16 +136,22 @@ export default function InboxPage() {
                       {rfq.file_name?.includes("|") ? rfq.file_name.split("|")[1] : rfq.file_name ?? "email body"} · {new Date(rfq.created_at).toLocaleDateString("en-IN")}
                     </p>
                   </div>
-                  <Button
-                    size="sm"
-                    onClick={() => handleProcess(rfq.id)}
-                    disabled={processing[rfq.id]}
-                    className="ml-4 bg-blue-600 hover:bg-blue-700 text-white gap-1.5 flex-shrink-0"
-                  >
-                    {processing[rfq.id]
-                      ? <><Loader2 className="w-3 h-3 animate-spin" /> Processing...</>
-                      : <><Sparkles className="w-3 h-3" /> Run AI <ArrowRight className="w-3 h-3" /></>}
-                  </Button>
+                  {done[rfq.id] ? (
+                    <div className="ml-4 flex items-center gap-1.5 text-green-600 text-sm font-medium">
+                      <CheckCircle className="w-4 h-4" /> Done — opening...
+                    </div>
+                  ) : (
+                    <Button
+                      size="sm"
+                      onClick={() => handleProcess(rfq.id)}
+                      disabled={processing[rfq.id]}
+                      className="ml-4 bg-blue-600 hover:bg-blue-700 text-white gap-1.5 flex-shrink-0"
+                    >
+                      {processing[rfq.id]
+                        ? <><Loader2 className="w-3 h-3 animate-spin" /> Processing...</>
+                        : <><Sparkles className="w-3 h-3" /> Run AI <ArrowRight className="w-3 h-3" /></>}
+                    </Button>
+                  )}
                 </div>
               ))}
             </div>
