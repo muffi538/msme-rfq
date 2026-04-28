@@ -20,10 +20,11 @@ type Supplier = {
   contact_person: string | null;
   email: string | null;
   whatsapp_number: string | null;
+  whatsapp_group_link: string | null;
   categories: string[];
 };
 
-const emptyForm = { name: "", contact_person: "", email: "", whatsapp_number: "", categories: [] as string[] };
+const emptyForm = { name: "", contact_person: "", email: "", whatsapp_number: "", whatsapp_group_link: "", categories: [] as string[] };
 
 export default function SuppliersPage() {
   const supabase = createClient();
@@ -55,11 +56,12 @@ export default function SuppliersPage() {
 
   function openEdit(s: Supplier) {
     setForm({
-      name:            s.name,
-      contact_person:  s.contact_person ?? "",
-      email:           s.email ?? "",
-      whatsapp_number: s.whatsapp_number ?? "",
-      categories:      s.categories ?? [],
+      name:                s.name,
+      contact_person:      s.contact_person ?? "",
+      email:               s.email ?? "",
+      whatsapp_number:     s.whatsapp_number ?? "",
+      whatsapp_group_link: s.whatsapp_group_link ?? "",
+      categories:          s.categories ?? [],
     });
     setFormMode(s.id);
   }
@@ -85,20 +87,22 @@ export default function SuppliersPage() {
 
     if (formMode === "add") {
       await supabase.from("suppliers").insert({
-        user_id:         user!.id,
-        name:            form.name,
-        contact_person:  form.contact_person || null,
-        email:           form.email || null,
-        whatsapp_number: form.whatsapp_number || null,
-        categories:      form.categories,
+        user_id:              user!.id,
+        name:                 form.name,
+        contact_person:       form.contact_person || null,
+        email:                form.email || null,
+        whatsapp_number:      form.whatsapp_number || null,
+        whatsapp_group_link:  form.whatsapp_group_link || null,
+        categories:           form.categories,
       });
     } else {
       await supabase.from("suppliers").update({
-        name:            form.name,
-        contact_person:  form.contact_person || null,
-        email:           form.email || null,
-        whatsapp_number: form.whatsapp_number || null,
-        categories:      form.categories,
+        name:                 form.name,
+        contact_person:       form.contact_person || null,
+        email:                form.email || null,
+        whatsapp_number:      form.whatsapp_number || null,
+        whatsapp_group_link:  form.whatsapp_group_link || null,
+        categories:           form.categories,
       }).eq("id", formMode!);
     }
 
@@ -198,6 +202,15 @@ export default function SuppliersPage() {
                 <Label>WhatsApp number</Label>
                 <Input placeholder="+919876543210" value={form.whatsapp_number} onChange={(e) => setForm({ ...form, whatsapp_number: e.target.value })} />
               </div>
+              <div className="space-y-1.5 col-span-2">
+                <Label>WhatsApp Group Link <span className="text-gray-400 font-normal">(optional)</span></Label>
+                <Input
+                  placeholder="https://chat.whatsapp.com/xxxxx"
+                  value={form.whatsapp_group_link}
+                  onChange={(e) => setForm({ ...form, whatsapp_group_link: e.target.value })}
+                />
+                <p className="text-xs text-gray-400">Open WhatsApp → Group → Invite via link → Copy link. Paste it here.</p>
+              </div>
             </div>
 
             <div className="space-y-2">
@@ -221,7 +234,7 @@ export default function SuppliersPage() {
             </div>
 
             <div className="flex gap-3">
-              <Button onClick={handleSave} disabled={saving || !form.name.trim()} className="bg-blue-600 hover:bg-blue-700 text-white">
+              <Button onClick={handleSave} disabled={saving || !form.name.trim()} className={formMode === "add" ? "bg-blue-600 hover:bg-blue-700 text-white" : "bg-green-600 hover:bg-green-700 text-white"}>
                 {saving ? "Saving..." : formMode === "add" ? "Save supplier" : "Save changes"}
               </Button>
               <Button variant="outline" onClick={closeForm}>Cancel</Button>

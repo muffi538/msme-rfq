@@ -102,7 +102,7 @@ export default async function DashboardPage() {
                 {recentRfqs.map((rfq) => (
                   <tr key={rfq.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-6 py-3 font-medium text-blue-600">
-                      <Link href={`/rfqs/${rfq.id}`} className="hover:underline">{rfq.rfq_code}</Link>
+                      <Link href={`/rfqs/${rfq.id}`} target="_blank" className="hover:underline">{rfq.rfq_code}</Link>
                     </td>
                     <td className="px-6 py-3 text-gray-600">{rfq.buyer_name ?? "—"}</td>
                     <td className="px-6 py-3">
@@ -115,8 +115,9 @@ export default async function DashboardPage() {
                         <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-red-100 text-red-700">urgent</span>
                       )}
                     </td>
-                    <td className="px-6 py-3 text-gray-400">
-                      {new Date(rfq.created_at).toLocaleDateString("en-IN")}
+                    <td className="px-6 py-3 text-gray-400 whitespace-nowrap">
+                      <p>{new Date(rfq.created_at).toLocaleDateString("en-IN")}</p>
+                      <p className="text-xs">{new Date(rfq.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</p>
                     </td>
                   </tr>
                 ))}

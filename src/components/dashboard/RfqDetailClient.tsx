@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Input } from "@/components/ui/input";
 import {
   Loader2, Split, Send, CheckCircle, AlertTriangle,
-  MessageCircle, Mail, Package, Pencil
+  MessageCircle, Mail, Package, Pencil, Copy, ExternalLink, Users
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -38,7 +38,7 @@ type Item = {
 type OutgoingRfq = {
   id: string; child_code: string; category: string; message_body: string;
   channel: string; status: string; sent_at: string | null;
-  suppliers: { name: string; whatsapp_number: string | null; email: string | null } | null;
+  suppliers: { name: string; whatsapp_number: string | null; whatsapp_group_link: string | null; email: string | null } | null;
 };
 
 type OutgoingItem = { outgoing_rfq_id: string; item_id: string };
@@ -152,6 +152,10 @@ export default function RfqDetailClient({
   const [splitError, setSplitError] = useState("");
   const [selected, setSelected]   = useState<Set<string>>(new Set());
 
+  // Group send modal
+  const [groupModal, setGroupModal] = useState<{ outgoingId: string; groupLink: string; message: string; supplierName: string } | null>(null);
+  const [copied, setCopied]         = useState(false);
+
   // --- Update item category ---
   async function updateCategory(itemId: string, category: string) {
     setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, category } : i));
@@ -183,10 +187,51 @@ export default function RfqDetailClient({
   }
 
   // --- Approve + send a child RFQ ---
-  async function handleSend(outgoingId: string, channel: string, whatsappNumber?: string | null, message?: string | null) {
+  function openGroupModal(outgoingId: string, groupLink: string, message: string, supplierName: string) {
+    setGroupModal({ outgoingId, groupLink, message, supplierName });
+    setCopied(false);
+  }
+
+  async function copyGroupMessage() {
+    if (!groupModal) return;
+    await navigator.clipboard.writeText(groupModal.message);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  }
+
+  async function confirmGroupSend() {
+    if (!groupModal) return;
+    const { outgoingId } = groupModal;
+
+    // Always copy message first so it's ready to paste the moment WhatsApp opens
+    try { await navigator.clipboard.writeText(groupModal.message); } catch { /* ignore */ }
+
+    window.open(groupModal.groupLink, "_blank");
+
+    toast.success("✅ Message copied! Click the text box in the group and press Ctrl+V to paste.", { duration: 6000 });
+
+    // Mark as sent
+    const res = await fetch(`/api/rfqs/${rfq.id}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outgoingId, channel: "whatsapp" }),
+    });
+    if (res.ok) {
+      setOutgoing((prev) =>
+        prev.map((o) => o.id === outgoingId ? { ...o, status: "sent", sent_at: new Date().toISOString() } : o)
+      );
+    }
+    setGroupModal(null);
+  }
+
+  async function handleSend(outgoingId: string, channel: string, whatsappNumber?: string | null, message?: string | null, groupLink?: string | null, supplierName?: string) {
     setSending(outgoingId);
     try {
-      if (channel === "whatsapp" && whatsappNumber) {
+      if (channel === "whatsapp_group" && groupLink) {
+        setSending(null);
+        openGroupModal(outgoingId, groupLink, message ?? "", supplierName ?? "Supplier");
+        return;
+      } else if (channel === "whatsapp" && whatsappNumber) {
         const phone = whatsappNumber.replace(/[^0-9]/g, "");
         const text  = encodeURIComponent(message ?? "");
         window.open(`https://wa.me/${phone}?text=${text}`, "_blank");
@@ -218,6 +263,58 @@ export default function RfqDetailClient({
 
   return (
     <main className="flex-1 p-8">
+
+      {/* WhatsApp Group send modal */}
+      {groupModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-lg w-full space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-teal-100 rounded-full flex items-center justify-center flex-shrink-0">
+                <Users className="w-5 h-5 text-teal-600" />
+              </div>
+              <div>
+                <p className="font-semibold text-gray-900">Send to WhatsApp Group</p>
+                <p className="text-sm text-gray-500">{groupModal.supplierName}</p>
+              </div>
+            </div>
+
+            {/* Steps */}
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
+              <p className="font-semibold mb-1">WhatsApp groups don&apos;t support auto-fill</p>
+              <p className="text-xs text-amber-700">Click <strong>Open Group</strong> — the message is auto-copied. When WhatsApp opens, click the text box and press <strong>Ctrl+V</strong> to paste, then send.</p>
+            </div>
+
+            {/* Message preview */}
+            <div className="bg-gray-50 rounded-xl p-3 max-h-48 overflow-y-auto">
+              <pre className="text-xs text-gray-700 whitespace-pre-wrap font-sans">{groupModal.message}</pre>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={copyGroupMessage}
+                className={`flex-1 h-10 flex items-center justify-center gap-2 text-sm font-semibold rounded-xl border-2 transition-colors ${
+                  copied ? "border-green-400 bg-green-50 text-green-700" : "border-teal-200 bg-teal-50 hover:bg-teal-100 text-teal-700"
+                }`}
+              >
+                {copied ? <><CheckCircle className="w-4 h-4" /> Copied!</> : <><Copy className="w-4 h-4" /> Copy Message</>}
+              </button>
+              <button
+                onClick={confirmGroupSend}
+                className="flex-1 h-10 flex items-center justify-center gap-2 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-xl transition-colors"
+              >
+                <ExternalLink className="w-4 h-4" /> Open Group
+              </button>
+            </div>
+            <button
+              onClick={() => setGroupModal(null)}
+              className="w-full text-center text-xs text-gray-400 hover:text-gray-600"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* RFQ meta */}
       <div className="bg-white rounded-2xl border border-gray-100 p-6 mb-6 flex flex-wrap gap-6">
         <div>
@@ -368,6 +465,21 @@ export default function RfqDetailClient({
                     </Button>
                     <Button
                       size="sm"
+                      onClick={() => {
+                        const groupOnes = outgoing.filter(o => selected.has(o.id) && o.suppliers?.whatsapp_group_link);
+                        if (groupOnes.length > 0) {
+                          // Open first one — user handles each group sequentially
+                          const o = groupOnes[0];
+                          openGroupModal(o.id, o.suppliers!.whatsapp_group_link!, o.message_body, o.suppliers!.name);
+                        }
+                        setSelected(new Set());
+                      }}
+                      className="bg-teal-600 hover:bg-teal-700 text-white gap-1.5 h-8 text-xs"
+                    >
+                      <Users className="w-3 h-3" /> Send to Groups
+                    </Button>
+                    <Button
+                      size="sm"
                       variant="outline"
                       onClick={() => setSelected(new Set())}
                       className="h-8 text-xs"
@@ -420,7 +532,7 @@ export default function RfqDetailClient({
                           {o.status}
                         </span>
                         {!isSent && o.suppliers && (
-                          <div className="flex gap-2">
+                          <div className="flex gap-2 flex-wrap">
                             {o.suppliers.whatsapp_number && (
                               <Button
                                 size="sm"
@@ -430,6 +542,16 @@ export default function RfqDetailClient({
                               >
                                 {isSending ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageCircle className="w-3 h-3" />}
                                 WhatsApp
+                              </Button>
+                            )}
+                            {o.suppliers.whatsapp_group_link && (
+                              <Button
+                                size="sm"
+                                onClick={() => openGroupModal(o.id, o.suppliers!.whatsapp_group_link!, o.message_body, o.suppliers!.name)}
+                                disabled={isSending}
+                                className="bg-teal-600 hover:bg-teal-700 text-white gap-1.5 h-8 text-xs"
+                              >
+                                <Users className="w-3 h-3" /> Group
                               </Button>
                             )}
                             {o.suppliers.email && (

@@ -116,8 +116,9 @@ async function extractAttachments(
 export async function fetchUnreadEmails(limit = 5): Promise<FetchedEmail[]> {
   const token = await getAccessToken();
 
-  // All emails from last 24h — dedup handled by our database (no reliance on unread flag)
-  const query = `in:inbox newer_than:1d`;
+  // Only fetch emails still marked UNREAD — Gmail's own flag is the dedup mechanism.
+  // After we save to DB we mark them read, so re-fetching is a no-op.
+  const query = `is:unread in:inbox`;
 
   const listRes = await gmailGet(
     `/messages?q=${encodeURIComponent(query)}&maxResults=${limit}`,
@@ -139,7 +140,9 @@ export async function fetchUnreadEmails(limit = 5): Promise<FetchedEmail[]> {
     const headers  = msg.payload.headers ?? [];
     const subject  = headerVal(headers, "Subject") || "(no subject)";
     const fromRaw  = headerVal(headers, "From");
-    const msgId    = headerVal(headers, "Message-ID") || id;
+    // Use Gmail's stable internal id — never the Message-ID header which can contain
+    // angle-brackets and break the LIKE dedup check.
+    const msgId    = id;
 
     // Parse "Name <email>" or just "email"
     const emailMatch = fromRaw.match(/<(.+?)>/) ?? fromRaw.match(/(\S+@\S+)/);

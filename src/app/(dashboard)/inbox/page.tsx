@@ -4,12 +4,19 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { Button } from "@/components/ui/button";
-import { Mail, Loader2, CheckCircle, AlertCircle, Sparkles, ArrowRight } from "lucide-react";
+import { Mail, Loader2, CheckCircle, AlertCircle, Sparkles, ArrowRight, Clock } from "lucide-react";
 import { toast } from "sonner";
 import Link from "next/link";
+import { createClient } from "@/lib/supabase/client";
 
 type FetchResult  = { rfqCode: string; subject: string; from: string; hasAttachment: boolean };
 type PendingRfq   = { id: string; rfq_code: string; buyer_name: string | null; buyer_email: string | null; file_name: string | null; created_at: string };
+type DoneRfq      = { id: string; rfq_code: string; buyer_name: string | null; status: string; created_at: string };
+
+function fmt(iso: string) {
+  const d = new Date(iso);
+  return `${d.toLocaleDateString("en-IN")} · ${d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`;
+}
 
 export default function InboxPage() {
   const router = useRouter();
@@ -17,16 +24,34 @@ export default function InboxPage() {
   const [fetchResults, setFetchResults] = useState<FetchResult[] | null>(null);
   const [fetchError, setFetchError]     = useState("");
   const [pending, setPending]           = useState<PendingRfq[]>([]);
+  const [done, setDone]                 = useState<DoneRfq[]>([]);
   const [processing, setProcessing]     = useState<Record<string, boolean>>({});
-  const [done, setDone]                 = useState<Record<string, boolean>>({});
+  const [justDone, setJustDone]         = useState<Record<string, boolean>>({});
 
-  useEffect(() => { loadPending(); }, []);
+  useEffect(() => { loadAll(); }, []);
+
+  async function loadAll() {
+    await Promise.all([loadPending(), loadDone()]);
+  }
 
   async function loadPending() {
     const res  = await fetch("/api/rfqs/pending");
     if (!res.ok) return;
     const data = await res.json();
     setPending(data.rfqs ?? []);
+  }
+
+  async function loadDone() {
+    // Fetch last 20 processed/approved/sent RFQs from email (file_name starts with msgid:)
+    const supabase = createClient();
+    const { data } = await supabase
+      .from("rfqs")
+      .select("id, rfq_code, buyer_name, status, created_at")
+      .in("status", ["processed", "approved", "sent"])
+      .like("file_name", "msgid:%")
+      .order("created_at", { ascending: false })
+      .limit(20);
+    setDone(data ?? []);
   }
 
   async function handleFetch() {
@@ -40,7 +65,7 @@ export default function InboxPage() {
       setFetchResults(json.results ?? []);
       if (json.created === 0) toast.info("No new emails found.");
       else toast.success(`${json.created} email${json.created > 1 ? "s" : ""} fetched! Run AI to extract items.`);
-      await loadPending();
+      await loadAll();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Something went wrong";
       setFetchError(msg);
@@ -57,19 +82,28 @@ export default function InboxPage() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Processing failed");
 
-      // Mark as done, remove from pending list
-      setDone((p) => ({ ...p, [rfqId]: true }));
+      setJustDone((p) => ({ ...p, [rfqId]: true }));
       setProcessing((p) => ({ ...p, [rfqId]: false }));
+      // Move from pending to done list
+      const moved = pending.find((r) => r.id === rfqId);
       setPending((p) => p.filter((r) => r.id !== rfqId));
-      toast.success(`${json.itemCount} items extracted!`);
-
-      // Short pause so user sees the ✓ tick, then redirect
-      setTimeout(() => router.push(`/rfqs/${rfqId}`), 1200);
+      if (moved) {
+        setDone((prev) => [{ id: moved.id, rfq_code: moved.rfq_code, buyer_name: moved.buyer_name, status: "processed", created_at: moved.created_at }, ...prev]);
+      }
+      toast.success(`${json.itemCount} items extracted! Opening in new tab…`);
+      // Open RFQ in a new tab so the inbox stays open
+      setTimeout(() => window.open(`/rfqs/${rfqId}`, "_blank"), 800);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Processing failed");
       setProcessing((p) => ({ ...p, [rfqId]: false }));
     }
   }
+
+  const statusLabel: Record<string, string> = {
+    processed: "AI done",
+    approved:  "Approved",
+    sent:      "Sent",
+  };
 
   return (
     <>
@@ -116,7 +150,7 @@ export default function InboxPage() {
           )}
         </div>
 
-        {/* Pending emails waiting for AI */}
+        {/* Pending — newest first */}
         {pending.length > 0 && (
           <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-50 flex items-center justify-between">
@@ -124,19 +158,20 @@ export default function InboxPage() {
                 <Sparkles className="w-4 h-4 text-blue-500" />
                 <span className="font-semibold text-gray-900">Ready for AI Processing ({pending.length})</span>
               </div>
-              <span className="text-xs text-gray-400">Run AI → review items → approve → send</span>
+              <span className="text-xs text-gray-400">Newest first · Run AI → review → approve → send</span>
             </div>
             <div className="divide-y divide-gray-50">
               {pending.map((rfq) => (
-                <div key={rfq.id} className={`flex items-center justify-between px-6 py-4 transition-colors ${done[rfq.id] ? "bg-green-50" : "hover:bg-gray-50"}`}>
+                <div key={rfq.id} className={`flex items-center justify-between px-6 py-4 transition-colors ${justDone[rfq.id] ? "bg-green-50" : "hover:bg-gray-50"}`}>
                   <div className="min-w-0 flex-1">
                     <p className="font-medium text-gray-800">{rfq.rfq_code}</p>
                     <p className="text-sm text-gray-500 truncate">{rfq.buyer_name ?? rfq.buyer_email ?? "Unknown sender"}</p>
-                    <p className="text-xs text-gray-400 mt-0.5">
-                      {rfq.file_name?.includes("|") ? rfq.file_name.split("|")[1] : rfq.file_name ?? "email body"} · {new Date(rfq.created_at).toLocaleDateString("en-IN")}
+                    <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1">
+                      <Clock className="w-3 h-3" />
+                      {fmt(rfq.created_at)}
                     </p>
                   </div>
-                  {done[rfq.id] ? (
+                  {justDone[rfq.id] ? (
                     <div className="ml-4 flex items-center gap-1.5 text-green-600 text-sm font-medium">
                       <CheckCircle className="w-4 h-4" /> Done — opening...
                     </div>
@@ -153,6 +188,48 @@ export default function InboxPage() {
                     </Button>
                   )}
                 </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Already processed — with tick */}
+        {done.length > 0 && (
+          <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-50 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-green-500" />
+                <span className="font-semibold text-gray-900">Already Processed ({done.length})</span>
+              </div>
+              <span className="text-xs text-gray-400">AI has already run on these</span>
+            </div>
+            <div className="divide-y divide-gray-50">
+              {done.map((rfq) => (
+                <Link
+                  key={rfq.id}
+                  href={`/rfqs/${rfq.id}`}
+                  target="_blank"
+                  className="flex items-center justify-between px-6 py-3.5 hover:bg-gray-50 transition-colors"
+                >
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />
+                    <div className="min-w-0">
+                      <p className="font-medium text-gray-700 text-sm">{rfq.rfq_code}</p>
+                      <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
+                        <Clock className="w-3 h-3" />
+                        {fmt(rfq.created_at)}
+                        {rfq.buyer_name && <span className="ml-1">· {rfq.buyer_name}</span>}
+                      </p>
+                    </div>
+                  </div>
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 ml-4 ${
+                    rfq.status === "sent"     ? "bg-gray-100 text-gray-600" :
+                    rfq.status === "approved" ? "bg-indigo-100 text-indigo-700" :
+                                               "bg-green-100 text-green-700"
+                  }`}>
+                    {statusLabel[rfq.status] ?? rfq.status}
+                  </span>
+                </Link>
               ))}
             </div>
           </div>

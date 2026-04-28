@@ -19,9 +19,16 @@ export async function GET() {
   }
 
   // 2. Use service role key to read auth.users (bypasses RLS)
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    return NextResponse.json(
+      { error: "SUPABASE_SERVICE_ROLE_KEY is not set. Add it in Vercel → Settings → Environment Variables." },
+      { status: 500 }
+    );
+  }
+
   const admin = createServiceClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
+    process.env.SUPABASE_SERVICE_ROLE_KEY
   );
 
   const { data: { users }, error } = await admin.auth.admin.listUsers();

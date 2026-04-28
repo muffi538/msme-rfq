@@ -29,7 +29,7 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
   // Fetch outgoing RFQs (splits) with supplier name
   const { data: outgoing } = await supabase
     .from("outgoing_rfqs")
-    .select("*, suppliers(name, whatsapp_number, email)")
+    .select("*, suppliers(name, whatsapp_number, whatsapp_group_link, email)")
     .eq("rfq_id", id)
     .order("category");
 
