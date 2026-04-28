@@ -150,6 +150,7 @@ export default function RfqDetailClient({
   const [splitting, setSplitting] = useState(false);
   const [sending, setSending]     = useState<string | null>(null);
   const [splitError, setSplitError] = useState("");
+  const [selected, setSelected]   = useState<Set<string>>(new Set());
 
   // --- Update item category ---
   async function updateCategory(itemId: string, category: string) {
@@ -332,14 +333,77 @@ export default function RfqDetailClient({
             </div>
           ) : (
             <div className="space-y-4">
+              {/* Select all toolbar */}
+              <div className="bg-white rounded-2xl border border-gray-100 px-5 py-3 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4 rounded accent-blue-600 cursor-pointer"
+                    checked={selected.size === outgoing.filter(o => o.status !== "sent").length && outgoing.filter(o => o.status !== "sent").length > 0}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setSelected(new Set(outgoing.filter(o => o.status !== "sent").map(o => o.id)));
+                      } else {
+                        setSelected(new Set());
+                      }
+                    }}
+                  />
+                  <span className="text-sm text-gray-600">
+                    {selected.size === 0 ? "Select suppliers to send" : `${selected.size} supplier${selected.size > 1 ? "s" : ""} selected`}
+                  </span>
+                </div>
+                {selected.size > 0 && (
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        outgoing.filter(o => selected.has(o.id) && o.suppliers?.whatsapp_number).forEach(o => {
+                          handleSend(o.id, "whatsapp", o.suppliers?.whatsapp_number, o.message_body);
+                        });
+                        setSelected(new Set());
+                      }}
+                      className="bg-green-600 hover:bg-green-700 text-white gap-1.5 h-8 text-xs"
+                    >
+                      <MessageCircle className="w-3 h-3" /> Send WhatsApp to selected
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setSelected(new Set())}
+                      className="h-8 text-xs"
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                )}
+              </div>
+
               {outgoing.map((o) => {
                 const supplierItems = itemsForOutgoing(o.id);
                 const isSending = sending === o.id;
+                const isSelected = selected.has(o.id);
+                const isSent = o.status === "sent";
                 return (
-                  <div key={o.id} className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+                  <div key={o.id} className={cn("bg-white rounded-2xl border overflow-hidden transition-colors", isSelected ? "border-blue-300 ring-1 ring-blue-200" : "border-gray-100")}>
                     <div className="flex items-center justify-between px-6 py-4 border-b border-gray-50">
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">
+                        {/* Checkbox */}
+                        {!isSent && (
+                          <input
+                            type="checkbox"
+                            className="w-4 h-4 rounded accent-blue-600 cursor-pointer flex-shrink-0"
+                            checked={isSelected}
+                            onChange={(e) => {
+                              setSelected(prev => {
+                                const next = new Set(prev);
+                                if (e.target.checked) next.add(o.id);
+                                else next.delete(o.id);
+                                return next;
+                              });
+                            }}
+                          />
+                        )}
+                        <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center flex-shrink-0">
                           <Package className="w-5 h-5 text-blue-600" />
                         </div>
                         <div>
@@ -355,7 +419,7 @@ export default function RfqDetailClient({
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusStyle[o.status]}`}>
                           {o.status}
                         </span>
-                        {o.status !== "sent" && o.suppliers && (
+                        {!isSent && o.suppliers && (
                           <div className="flex gap-2">
                             {o.suppliers.whatsapp_number && (
                               <Button
@@ -365,7 +429,7 @@ export default function RfqDetailClient({
                                 className="bg-green-600 hover:bg-green-700 text-white gap-1.5 h-8 text-xs"
                               >
                                 {isSending ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageCircle className="w-3 h-3" />}
-                                Send on WhatsApp
+                                WhatsApp
                               </Button>
                             )}
                             {o.suppliers.email && (
@@ -382,7 +446,7 @@ export default function RfqDetailClient({
                             )}
                           </div>
                         )}
-                        {o.status === "sent" && (
+                        {isSent && (
                           <span className="flex items-center gap-1 text-green-600 text-xs font-medium">
                             <CheckCircle className="w-4 h-4" /> Sent
                           </span>
