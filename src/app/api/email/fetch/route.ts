@@ -132,6 +132,7 @@ export async function POST() {
           raw_text:    rawText,
           status:      "pending",
           priority:    /urgent|asap|priority/i.test(email.subject) ? "urgent" : "normal",
+          created_at:  email.date.toISOString(),
         })
         .select("id")
         .single();
