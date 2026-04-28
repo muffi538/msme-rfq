@@ -107,6 +107,10 @@ export default function UploadPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!file) { setError("Please select a file."); return; }
+    if (!buyerName.trim()) { setError("Buyer name is required."); return; }
+    if (!/^[a-zA-Z\s.&'-]+$/.test(buyerName.trim())) { setError("Buyer name must contain letters only, no numbers."); return; }
+    if (!buyerEmail.trim()) { setError("Buyer email is required."); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(buyerEmail.trim())) { setError("Enter a valid email address."); return; }
 
     setState("uploading");
     setError("");
@@ -225,15 +229,31 @@ export default function UploadPage() {
 
             {/* Buyer details */}
             <div className="bg-white rounded-2xl border border-gray-100 p-6 space-y-4">
-              <h3 className="font-semibold text-gray-900">Buyer details (optional)</h3>
+              <h3 className="font-semibold text-gray-900">Buyer details <span className="text-red-500">*</span></h3>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <Label>Buyer name</Label>
-                  <Input placeholder="Sharma Traders" value={buyerName} onChange={(e) => setBuyerName(e.target.value)} />
+                  <Label>Buyer name <span className="text-red-500">*</span></Label>
+                  <Input
+                    placeholder="Sharma Traders"
+                    value={buyerName}
+                    onChange={(e) => {
+                      // letters, spaces, dots, &, hyphens only — no digits
+                      const val = e.target.value.replace(/[^a-zA-Z\s.&'-]/g, "");
+                      setBuyerName(val);
+                    }}
+                    className={!buyerName.trim() && error ? "border-red-400" : ""}
+                  />
+                  <p className="text-xs text-gray-400">Letters only — no numbers</p>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Buyer email</Label>
-                  <Input placeholder="buyer@example.com" type="email" value={buyerEmail} onChange={(e) => setBuyerEmail(e.target.value)} />
+                  <Label>Buyer email <span className="text-red-500">*</span></Label>
+                  <Input
+                    placeholder="buyer@example.com"
+                    type="email"
+                    value={buyerEmail}
+                    onChange={(e) => setBuyerEmail(e.target.value)}
+                    className={!buyerEmail.trim() && error ? "border-red-400" : ""}
+                  />
                 </div>
               </div>
               <div className="space-y-1.5">
@@ -266,7 +286,7 @@ export default function UploadPage() {
 
             <Button
               type="submit"
-              disabled={!file || busy}
+              disabled={!file || !buyerName.trim() || !buyerEmail.trim() || busy}
               className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-base"
             >
               {busy ? (
