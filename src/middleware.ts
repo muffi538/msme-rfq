@@ -37,7 +37,8 @@ export async function middleware(request: NextRequest) {
   }
 
   // Redirect logged-in users away from auth pages and landing page
-  if (user && (path === "/" || path === "/login" || path === "/signup")) {
+  // (but never interrupt the /auth/callback code exchange)
+  if (user && !path.startsWith("/auth/") && (path === "/" || path === "/login" || path === "/signup")) {
     return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 
