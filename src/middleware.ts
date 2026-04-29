@@ -11,13 +11,9 @@ export async function middleware(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() {
-          return request.cookies.getAll();
-        },
+        getAll() { return request.cookies.getAll(); },
         setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value }) =>
-            request.cookies.set(name, value)
-          );
+          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
           supabaseResponse = NextResponse.next({ request });
           cookiesToSet.forEach(({ name, value, options }) =>
             supabaseResponse.cookies.set(name, value, options)
@@ -30,16 +26,34 @@ export async function middleware(request: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser();
   const path = request.nextUrl.pathname;
 
-  // Redirect logged-out users away from all protected routes
+  // ── Logged-out users ──────────────────────────────────────────────────────
   const isProtected = PROTECTED.some((p) => path.startsWith(p));
-  if (!user && isProtected) {
+  if (!user && (isProtected || path === "/onboarding")) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  // Redirect logged-in users away from auth pages and landing page
-  // (but never interrupt the /auth/callback code exchange)
-  if (user && !path.startsWith("/auth/") && (path === "/" || path === "/login" || path === "/signup")) {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
+  // ── Logged-in users ───────────────────────────────────────────────────────
+  if (user && !path.startsWith("/auth/")) {
+    const onboarded = !!user.user_metadata?.onboarding_complete;
+
+    // Send them to finish onboarding before the dashboard
+    if (!onboarded && isProtected) {
+      return NextResponse.redirect(new URL("/onboarding", request.url));
+    }
+
+    // Already onboarded — skip the onboarding page
+    if (onboarded && path === "/onboarding") {
+      return NextResponse.redirect(new URL("/dashboard", request.url));
+    }
+
+    // Already logged in — skip auth/marketing pages
+    const authPages = ["/", "/login", "/signup"];
+    if (authPages.includes(path)) {
+      return NextResponse.redirect(new URL(
+        onboarded ? "/dashboard" : "/onboarding",
+        request.url
+      ));
+    }
   }
 
   return supabaseResponse;
