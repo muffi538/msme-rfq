@@ -28,8 +28,29 @@ const LABELS: { value: RfqLabel; emoji: string; label: string; pill: string }[] 
 ];
 
 function fmt(iso: string) {
-  const d = new Date(iso);
-  return `${d.toLocaleDateString("en-IN")} · ${d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`;
+  if (!iso) return "Unknown time";
+  const d   = new Date(iso);
+  if (isNaN(d.getTime())) return "Unknown time";
+  const now  = Date.now();
+  const diff = now - d.getTime();
+  const mins = Math.floor(diff / 60_000);
+  const hrs  = Math.floor(diff / 3_600_000);
+  const time = d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+
+  if (mins < 1)   return "Just now";
+  if (mins < 60)  return `${mins}m ago`;
+  if (hrs  < 24)  return `${hrs}h ago · ${time}`;
+
+  const today     = new Date(); today.setHours(0,0,0,0);
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  const msgDay    = new Date(d); msgDay.setHours(0,0,0,0);
+
+  if (msgDay.getTime() === yesterday.getTime()) return `Yesterday · ${time}`;
+
+  const days = Math.floor(diff / 86_400_000);
+  if (days < 7) return `${days}d ago · ${time}`;
+
+  return `${d.toLocaleDateString("en-IN", { day: "numeric", month: "short" })} · ${time}`;
 }
 
 /* ── Label pill ─────────────────────────────────────────── */
@@ -132,10 +153,9 @@ export default function InboxPage() {
     const res  = await fetch("/api/rfqs/pending");
     if (!res.ok) return;
     const data = await res.json();
-    // Newest first
-    const sorted = [...(data.rfqs ?? [])].sort(
-      (a: PendingRfq, b: PendingRfq) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    );
+    // Newest first — guard against null/invalid timestamps
+    const ts = (r: PendingRfq) => (r.created_at ? new Date(r.created_at).getTime() : 0) || 0;
+    const sorted = [...(data.rfqs ?? [])].sort((a, b) => ts(b) - ts(a));
     setPending(sorted);
   }
 
