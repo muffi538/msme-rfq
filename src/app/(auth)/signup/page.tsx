@@ -3,299 +3,171 @@
 import { useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Loader2, Mail, Building2, Lock, ArrowRight, RefreshCw } from "lucide-react";
+import { Loader2, Mail, ArrowRight, CheckCircle } from "lucide-react";
 
-type Step = "details" | "verify";
+function GoogleIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
+      <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" fill="#34A853"/>
+      <path d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
+      <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
+    </svg>
+  );
+}
+
+type View = "form" | "sent";
 
 export default function SignupPage() {
-  const [step,        setStep]        = useState<Step>("details");
-  const [companyName, setCompanyName] = useState("");
-  const [email,       setEmail]       = useState("");
-  const [password,    setPassword]    = useState("");
-  const [confirmPass, setConfirmPass] = useState("");
-  const [loading,          setLoading]          = useState(false);
-  const [resending,        setResending]        = useState(false);
-  const [error,            setError]            = useState("");
-  const [resendOk,         setResendOk]         = useState(false);
-  const [showResendInline, setShowResendInline] = useState(false);
+  const [view,          setView]         = useState<View>("form");
+  const [email,         setEmail]        = useState("");
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [magicLoading,  setMagicLoading]  = useState(false);
+  const [error,         setError]         = useState("");
 
-  /* ── Step 1: Create account ── */
-  async function handleSignUp(e: React.FormEvent) {
-    e.preventDefault();
+  /* ── Google OAuth ── */
+  async function handleGoogle() {
+    setGoogleLoading(true);
     setError("");
-
-    if (!companyName.trim())                           { setError("Company name is required."); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))    { setError("Enter a valid email address."); return; }
-    if (password.length < 8)                           { setError("Password must be at least 8 characters."); return; }
-    if (password !== confirmPass)                      { setError("Passwords don't match."); return; }
-
-    setLoading(true);
     const supabase = createClient();
-
-    const { data, error: err } = await supabase.auth.signUp({
-      email,
-      password,
+    const { error: err } = await supabase.auth.signInWithOAuth({
+      provider: "google",
       options: {
-        // After clicking the confirmation link, Supabase redirects here.
-        // /auth/callback exchanges the code for a session and sends to /dashboard.
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-        data: { company_name: companyName },
+        redirectTo: `${window.location.origin}/auth/callback`,
+        queryParams: { prompt: "select_account" },
       },
     });
-
-    setLoading(false);
-
-    if (err) {
-      if (err.message.toLowerCase().includes("already registered") ||
-          err.message.toLowerCase().includes("already exists")) {
-        setError("An account with this email already exists. Log in instead, or use a different email.");
-      } else {
-        setError(err.message);
-      }
-      return;
-    }
-
-    // Supabase returns identities:[] when the user already exists but email
-    // is unconfirmed — it silently "succeeds" but sends a magic link, not a
-    // confirmation. Detect this and offer a resend button.
-    if (data.user && data.user.identities?.length === 0) {
-      setError(
-        "An account with this email already exists but hasn't been verified yet."
-      );
-      setShowResendInline(true);
-      return;
-    }
-
-    setStep("verify");
+    if (err) { setError(err.message); setGoogleLoading(false); }
   }
 
-  /* ── Resend verification email (from step 2 "verify" screen) ── */
-  async function handleResend() {
-    setResending(true);
-    setResendOk(false);
-    const supabase = createClient();
-    await supabase.auth.resend({
-      type: "signup",
-      email,
-      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
-    });
-    setResending(false);
-    setResendOk(true);
-    setTimeout(() => setResendOk(false), 5000);
-  }
-
-  /* ── Resend from step 1 error state (unconfirmed existing account) ── */
-  async function handleResendInline() {
-    setResending(true);
+  /* ── Magic link (no password, no OTP) ── */
+  async function handleMagicLink(e: React.FormEvent) {
+    e.preventDefault();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setError("Enter a valid email address.");
+      return;
+    }
+    setMagicLoading(true);
     setError("");
     const supabase = createClient();
-    await supabase.auth.resend({
-      type: "signup",
+    const { error: err } = await supabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+      options: {
+        emailRedirectTo: `${window.location.origin}/auth/callback`,
+        shouldCreateUser: true,
+      },
     });
-    setResending(false);
-    setShowResendInline(false);
-    setStep("verify"); // go straight to the "check your inbox" screen
+    setMagicLoading(false);
+    if (err) { setError(err.message); return; }
+    setView("sent");
   }
 
-  /* ── Step indicators ── */
-  const stepIndex = step === "details" ? 0 : 1;
-  const STEPS = [
-    { label: "Your details", icon: Building2 },
-    { label: "Verify email",  icon: Mail },
-  ];
+  /* ── Sent screen ── */
+  if (view === "sent") {
+    return (
+      <Card className="w-full max-w-md shadow-lg border-border">
+        <CardContent className="pt-8 pb-8">
+          <div className="flex flex-col items-center text-center space-y-4">
+            <div className="w-16 h-16 bg-green-50 rounded-2xl flex items-center justify-center">
+              <CheckCircle className="w-8 h-8 text-green-500" />
+            </div>
+            <h2 className="text-xl font-bold text-card-foreground">Check your inbox</h2>
+            <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
+              We sent a sign-in link to{" "}
+              <span className="font-semibold text-card-foreground">{email}</span>.
+              <br /><br />
+              Click it to instantly access your dashboard — no password needed.
+            </p>
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-700 text-left w-full">
+              <strong>Can&apos;t find it?</strong> Check your spam folder. The link expires in 1 hour.
+            </div>
+            <button
+              onClick={() => { setView("form"); setError(""); }}
+              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              ← Try a different email
+            </button>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
 
+  /* ── Main form ── */
   return (
     <Card className="w-full max-w-md shadow-lg border-border">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-2xl font-bold text-card-foreground">
-          Create your account
-        </CardTitle>
-        <CardDescription>Start automating your RFQ workflow today</CardDescription>
-
-        {/* Step indicator */}
-        <div className="flex items-center gap-0 mt-4">
-          {STEPS.map((s, i) => (
-            <div key={i} className="flex items-center flex-1">
-              <div className={`flex items-center gap-2 text-xs font-medium ${
-                i < stepIndex  ? "text-green-600" :
-                i === stepIndex ? "text-[#1847F5]"  : "text-muted-foreground/40"
-              }`}>
-                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold transition-all ${
-                  i < stepIndex  ? "bg-green-100 text-green-700" :
-                  i === stepIndex ? "bg-[#1847F5] text-white shadow-[0_2px_8px_rgba(24,71,245,0.4)]" :
-                  "bg-muted text-muted-foreground/40"
-                }`}>
-                  {i < stepIndex ? "✓" : i + 1}
-                </div>
-                <span className="hidden sm:block">{s.label}</span>
-              </div>
-              {i < STEPS.length - 1 && (
-                <div className={`flex-1 h-px mx-3 transition-colors ${
-                  i < stepIndex ? "bg-green-300" : "bg-border"
-                }`} />
-              )}
-            </div>
-          ))}
-        </div>
+      <CardHeader className="pb-4">
+        <CardTitle className="text-2xl font-bold text-card-foreground">Create your account</CardTitle>
+        <CardDescription>Join RFQ Flow — start automating in minutes</CardDescription>
       </CardHeader>
 
-      <CardContent className="pt-5">
+      <CardContent className="space-y-5">
 
-        {/* ── Step 1: Details ── */}
-        {step === "details" && (
-          <form onSubmit={handleSignUp} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="company">Company name</Label>
-              <Input
-                id="company"
-                placeholder="Sharma Traders Pvt Ltd"
-                value={companyName}
-                onChange={(e) => setCompanyName(e.target.value)}
-                autoComplete="organization"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="email">Work email</Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="you@company.com"
-                value={email}
-                onChange={(e) => { setEmail(e.target.value); setShowResendInline(false); setError(""); }}
-                autoComplete="email"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                placeholder="Min. 8 characters"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="new-password"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="confirm">Confirm password</Label>
-              <Input
-                id="confirm"
-                type="password"
-                placeholder="Re-enter password"
-                value={confirmPass}
-                onChange={(e) => setConfirmPass(e.target.value)}
-                autoComplete="new-password"
-              />
-            </div>
+        {/* Google — primary CTA */}
+        <button
+          type="button"
+          onClick={handleGoogle}
+          disabled={googleLoading}
+          className="w-full h-12 flex items-center justify-center gap-3 rounded-full bg-[#1847F5] text-white text-sm font-semibold shadow-[0_2px_12px_rgba(24,71,245,0.4)] hover:bg-[#0f35d4] hover:shadow-[0_4px_20px_rgba(24,71,245,0.5)] transition-all disabled:opacity-60"
+        >
+          {googleLoading
+            ? <Loader2 className="w-4 h-4 animate-spin" />
+            : <><GoogleIcon /><span>Continue with Google</span><ArrowRight className="w-4 h-4" /></>}
+        </button>
 
-            {error && (
-              <div className="bg-red-50 border border-red-200 px-4 py-3.5 rounded-xl space-y-3">
-                <p className="text-red-600 text-sm">{error}</p>
+        <p className="text-center text-xs text-muted-foreground">
+          Instant access — Google verifies your identity. No email confirmation needed.
+        </p>
 
-                {showResendInline && (
-                  <div className="flex flex-col gap-2 pt-1 border-t border-red-200">
-                    <p className="text-xs text-red-500">
-                      Can&apos;t find the email? We&apos;ll send a fresh one right now.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={handleResendInline}
-                      disabled={resending}
-                      className="inline-flex items-center gap-2 self-start px-4 py-2 bg-[#1847F5] hover:bg-[#0f35d4] text-white text-xs font-semibold rounded-full transition-colors disabled:opacity-60 shadow-[0_2px_8px_rgba(24,71,245,0.35)]"
-                    >
-                      {resending
-                        ? <><Loader2 className="w-3 h-3 animate-spin" /> Sending…</>
-                        : <><RefreshCw className="w-3 h-3" /> Resend verification email</>}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
+        {/* Divider */}
+        <div className="flex items-center gap-3">
+          <div className="flex-1 h-px bg-border" />
+          <span className="text-xs text-muted-foreground">or use email</span>
+          <div className="flex-1 h-px bg-border" />
+        </div>
 
-            <Button
-              type="submit"
-              disabled={loading}
-              className="w-full h-11 font-semibold rounded-full bg-[#1847F5] hover:bg-[#0f35d4] text-white shadow-[0_2px_8px_rgba(24,71,245,0.35)] gap-2"
-            >
-              {loading
-                ? <Loader2 className="w-4 h-4 animate-spin" />
-                : <><span>Create account</span><ArrowRight className="w-4 h-4" /></>}
-            </Button>
-
-            <p className="text-center text-sm text-muted-foreground">
-              Already have an account?{" "}
-              <Link href="/login" className="text-[#1847F5] font-medium hover:underline">Log in</Link>
-            </p>
-          </form>
-        )}
-
-        {/* ── Step 2: Verify email ── */}
-        {step === "verify" && (
-          <div className="space-y-5">
-            {/* Big icon */}
-            <div className="flex flex-col items-center text-center py-4">
-              <div className="w-16 h-16 bg-[#1847F5]/8 rounded-2xl flex items-center justify-center mb-4">
-                <Mail className="w-8 h-8 text-[#1847F5]" />
-              </div>
-              <h3 className="font-bold text-card-foreground text-lg mb-2">Check your inbox</h3>
-              <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
-                We sent a verification link to{" "}
-                <span className="font-semibold text-card-foreground">{email}</span>.
-                <br />Click the link to verify your account and log in.
-              </p>
-            </div>
-
-            {/* What to expect */}
-            <div className="bg-muted/50 border border-border rounded-xl px-4 py-3.5 space-y-2 text-sm text-muted-foreground">
-              <div className="flex items-start gap-2">
-                <span className="text-[#1847F5] font-bold flex-shrink-0 mt-px">1.</span>
-                <span>Open the email from <strong>Supabase / RFQ Flow</strong></span>
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="text-[#1847F5] font-bold flex-shrink-0 mt-px">2.</span>
-                <span>Click the <strong>"Confirm your email"</strong> button</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="text-[#1847F5] font-bold flex-shrink-0 mt-px">3.</span>
-                <span>You'll be taken straight to your dashboard</span>
-              </div>
-            </div>
-
-            {/* Resend */}
-            <div className="text-center">
-              {resendOk ? (
-                <p className="text-green-600 text-sm font-medium">Verification email resent ✓</p>
-              ) : (
-                <button
-                  onClick={handleResend}
-                  disabled={resending}
-                  className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-[#1847F5] transition-colors disabled:opacity-50"
-                >
-                  {resending
-                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    : <RefreshCw className="w-3.5 h-3.5" />}
-                  Didn&apos;t receive it? Resend email
-                </button>
-              )}
-            </div>
-
-            {/* Back link */}
-            <div className="text-center">
-              <button
-                onClick={() => { setStep("details"); setError(""); }}
-                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-              >
-                ← Wrong email? Go back
-              </button>
-            </div>
+        {/* Magic link form */}
+        <form onSubmit={handleMagicLink} className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="email">Work email</Label>
+            <Input
+              id="email"
+              type="email"
+              placeholder="you@company.com"
+              value={email}
+              onChange={(e) => { setEmail(e.target.value); setError(""); }}
+              autoComplete="email"
+            />
           </div>
-        )}
+
+          {error && (
+            <p className="text-red-500 text-sm bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
+              {error}
+            </p>
+          )}
+
+          <button
+            type="submit"
+            disabled={magicLoading}
+            className="w-full h-11 flex items-center justify-center gap-2 rounded-full border border-border bg-background text-sm font-medium text-card-foreground hover:bg-muted/50 transition-all disabled:opacity-60 shadow-sm"
+          >
+            {magicLoading
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : <><Mail className="w-4 h-4" /><span>Send me a sign-in link</span></>}
+          </button>
+
+          <p className="text-center text-xs text-muted-foreground">
+            We&apos;ll email you a one-click link — no password required.
+          </p>
+        </form>
+
+        <p className="text-center text-sm text-muted-foreground">
+          Already have an account?{" "}
+          <Link href="/login" className="text-[#1847F5] font-medium hover:underline">Log in</Link>
+        </p>
 
       </CardContent>
     </Card>
