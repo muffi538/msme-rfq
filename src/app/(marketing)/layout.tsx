@@ -6,27 +6,29 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
     <>
       <Navbar />
       <main>{children}</main>
-      <footer className="bg-gray-950 border-t border-white/5">
-        <div className="max-w-6xl mx-auto px-6 py-12">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-6">
+
+      <footer className="bg-[#1a1209] border-t border-[#2e2518]">
+        <div className="max-w-7xl mx-auto px-8 md:px-16 py-14">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-8">
+
             {/* Logo */}
             <div className="flex items-center gap-2.5">
-              <div className="w-7 h-7 bg-blue-600 rounded-md flex items-center justify-center">
+              <div className="w-7 h-7 bg-[#1847F5] rounded-md flex items-center justify-center shadow-[0_2px_8px_rgba(24,71,245,0.4)]">
                 <span className="text-white font-black text-xs">R</span>
               </div>
-              <span className="font-bold text-white text-sm tracking-tight">RFQ Flow</span>
+              <span className="font-bold text-[#faf4eb] text-sm tracking-tight">RFQ Flow</span>
             </div>
 
             {/* Links */}
-            <div className="flex items-center gap-6 text-sm text-gray-500">
-              <a href="#features"     className="hover:text-gray-300 transition-colors">Features</a>
-              <a href="#how-it-works" className="hover:text-gray-300 transition-colors">How it works</a>
-              <Link href="/login"  className="hover:text-gray-300 transition-colors">Log in</Link>
-              <Link href="/signup" className="hover:text-gray-300 transition-colors">Sign up</Link>
+            <div className="flex items-center gap-8 text-sm text-[#5a4e3f]">
+              <a href="#features"     className="hover:text-[#faf4eb] transition-colors">Features</a>
+              <a href="#how-it-works" className="hover:text-[#faf4eb] transition-colors">How it works</a>
+              <Link href="/login"  className="hover:text-[#faf4eb] transition-colors">Log in</Link>
+              <Link href="/signup" className="hover:text-[#faf4eb] transition-colors">Sign up</Link>
             </div>
 
             {/* Copy */}
-            <p className="text-gray-600 text-sm">
+            <p className="text-[#3a2e20] text-sm">
               © {new Date().getFullYear()} RFQ Flow
             </p>
           </div>

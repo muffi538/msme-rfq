@@ -12,15 +12,29 @@ const PROOF = [
 export default function CtaSection() {
   return (
     <>
-      {/* Social proof strip */}
-      <section className="py-16 px-6 bg-white border-y border-gray-100">
-        <div className="max-w-5xl mx-auto">
-          <AnimateIn>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-8 text-center">
+      {/* Stats strip */}
+      <section className="bg-[#f5ede0] border-y border-[#e0d5c5] py-20 px-8 md:px-16">
+        <div className="max-w-7xl mx-auto">
+
+          <AnimateIn animation="fade-up">
+            <div className="flex items-center gap-4 text-[11px] font-semibold tracking-[0.15em] text-[#9a8674] uppercase mb-4">
+              <div className="h-px w-12 bg-[#c5b5a0]" />
+              <span>Chapter 04 — The Numbers</span>
+            </div>
+            <div className="h-px bg-[#e0d5c5] mb-14" />
+          </AnimateIn>
+
+          <AnimateIn animation="fade-up" delay={60}>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-px bg-[#e0d5c5] border border-[#e0d5c5] rounded-2xl overflow-hidden">
               {PROOF.map((p) => (
-                <div key={p.stat}>
-                  <p className="text-3xl sm:text-4xl font-black text-gray-950 tracking-tight">{p.stat}</p>
-                  <p className="text-sm text-gray-400 mt-1.5 font-medium">{p.label}</p>
+                <div key={p.stat} className="bg-[#f5ede0] px-8 py-8 text-center">
+                  <p
+                    className="text-[42px] sm:text-[52px] font-black text-[#1a1209] leading-none mb-2"
+                    style={{ fontFamily: "var(--font-playfair), Georgia, serif" }}
+                  >
+                    {p.stat}
+                  </p>
+                  <p className="text-xs text-[#9a8674] font-medium uppercase tracking-widest">{p.label}</p>
                 </div>
               ))}
             </div>
@@ -29,46 +43,71 @@ export default function CtaSection() {
       </section>
 
       {/* CTA */}
-      <section className="relative py-32 px-6 overflow-hidden bg-blue-600">
-        {/* Background pattern */}
+      <section className="relative bg-[#1a1209] py-36 px-8 md:px-16 overflow-hidden">
+
+        {/* Dot grid */}
         <div
-          className="pointer-events-none absolute inset-0 opacity-10"
+          className="pointer-events-none absolute inset-0 opacity-[0.05]"
           style={{
-            backgroundImage: "radial-gradient(circle, #fff 1px, transparent 1px)",
-            backgroundSize: "24px 24px",
+            backgroundImage: "radial-gradient(circle, #ffffff 1px, transparent 1px)",
+            backgroundSize: "28px 28px",
           }}
         />
-        {/* Glow */}
-        <div className="pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-white/10 rounded-full blur-[80px]" />
 
-        <div className="relative max-w-3xl mx-auto text-center">
-          <AnimateIn>
-            <p className="text-blue-200 text-sm font-semibold uppercase tracking-widest mb-5">
-              Start today — free
-            </p>
-            <h2 className="text-4xl sm:text-5xl font-black text-white tracking-tight leading-tight mb-6">
-              Your procurement team<br />deserves better tools.
-            </h2>
-            <p className="text-blue-100 text-lg mb-10 max-w-xl mx-auto leading-relaxed">
-              Join MSME procurement teams already saving 20+ hours a week.
-              Set up in 5 minutes. No credit card required.
-            </p>
-            <div className="flex flex-col sm:flex-row gap-3 justify-center">
-              <Link
-                href="/signup"
-                className="inline-flex items-center justify-center gap-2 px-8 py-4 text-base font-bold text-blue-600 bg-white hover:bg-blue-50 rounded-xl transition-all shadow-lg hover:shadow-xl hover:-translate-y-0.5"
-              >
-                Create your free account
-                <ArrowRight className="w-4 h-4" />
-              </Link>
-              <Link
-                href="/login"
-                className="inline-flex items-center justify-center px-8 py-4 text-base font-semibold text-white/90 hover:text-white border border-white/20 hover:border-white/40 rounded-xl transition-all hover:bg-white/10"
-              >
-                Already have an account
-              </Link>
+        {/* Blue glow */}
+        <div className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[400px]"
+          style={{ background: "radial-gradient(ellipse at center, rgba(24,71,245,0.15) 0%, transparent 70%)" }} />
+
+        <div className="relative max-w-7xl mx-auto">
+
+          <AnimateIn animation="fade-up">
+            <div className="flex items-center gap-4 text-[11px] font-semibold tracking-[0.15em] text-[#3a2e20] uppercase mb-4">
+              <div className="h-px w-12 bg-[#2e2518]" />
+              <span>Start today — free</span>
             </div>
+            <div className="h-px bg-[#2e2518] mb-16" />
           </AnimateIn>
+
+          <div className="grid lg:grid-cols-2 gap-16 items-end">
+            <AnimateIn animation="fade-up" delay={80}>
+              <h2
+                className="text-[clamp(44px,6vw,88px)] font-black text-[#faf4eb] leading-[0.92] tracking-tight"
+                style={{ fontFamily: "var(--font-playfair), Georgia, serif" }}
+              >
+                Your procurement team deserves{" "}
+                <em
+                  className="text-[#1847F5]"
+                  style={{ fontStyle: "italic" }}
+                >
+                  better tools.
+                </em>
+              </h2>
+            </AnimateIn>
+
+            <AnimateIn animation="fade-up" delay={160}>
+              <div>
+                <p className="text-[#7a6a55] text-lg leading-relaxed mb-10">
+                  Join MSME procurement teams already saving 20+ hours a week.
+                  Set up in 5 minutes. No credit card required.
+                </p>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <Link
+                    href="/signup"
+                    className="inline-flex items-center justify-center gap-2.5 px-8 py-4 bg-[#faf4eb] text-[#1a1209] font-bold rounded-full text-sm hover:bg-white transition-all hover:shadow-2xl hover:-translate-y-0.5"
+                  >
+                    Create your free account <ArrowRight className="w-4 h-4" />
+                  </Link>
+                  <Link
+                    href="/login"
+                    className="inline-flex items-center justify-center px-8 py-4 border border-[#2e2518] text-[#7a6a55] font-semibold rounded-full text-sm hover:border-[#5a4e3f] hover:text-[#faf4eb] transition-all"
+                  >
+                    Already have an account
+                  </Link>
+                </div>
+              </div>
+            </AnimateIn>
+          </div>
+
         </div>
       </section>
     </>

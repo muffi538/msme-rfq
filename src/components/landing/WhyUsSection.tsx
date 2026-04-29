@@ -1,85 +1,104 @@
-import { Zap, Brain, Package, MessageCircle, Clock, ShieldCheck } from "lucide-react";
 import AnimateIn from "./AnimateIn";
 
-const cards = [
+const features = [
   {
-    icon: Zap,
+    num: "01",
     title: "30× faster processing",
-    description: "From email to supplier messages in under 2 minutes. No manual typing, no copy-paste, no missed items.",
-    accent: "bg-amber-50 text-amber-600 border-amber-100",
-    border: "hover:border-amber-200",
+    desc: "From email to supplier messages in under 2 minutes. No manual typing, no copy-paste, no missed items.",
   },
   {
-    icon: Brain,
+    num: "02",
     title: "AI categorisation",
-    description: "Every item is automatically mapped to one of 12 categories — Power Tools, Fasteners, Electrical, and more.",
-    accent: "bg-violet-50 text-violet-600 border-violet-100",
-    border: "hover:border-violet-200",
+    desc: "Every item is automatically mapped to one of 12 categories — Power Tools, Fasteners, Electrical, and more.",
   },
   {
-    icon: Package,
+    num: "03",
     title: "Smart supplier split",
-    description: "Items are split by category and sent only to suppliers who deal in that product. No irrelevant messages.",
-    accent: "bg-blue-50 text-blue-600 border-blue-100",
-    border: "hover:border-blue-200",
+    desc: "Items are split by category and sent only to suppliers who deal in that product. No irrelevant messages.",
   },
   {
-    icon: MessageCircle,
+    num: "04",
     title: "WhatsApp automation",
-    description: "Each supplier gets a clean formatted RFQ on WhatsApp — exactly how Indian MSMEs actually transact.",
-    accent: "bg-green-50 text-green-600 border-green-100",
-    border: "hover:border-green-200",
+    desc: "Each supplier gets a clean formatted RFQ on WhatsApp — exactly how Indian MSMEs actually transact.",
   },
   {
-    icon: Clock,
+    num: "05",
     title: "Real-time tracking",
-    description: "See which suppliers have seen, replied to, or ignored your RFQ — all in one live dashboard.",
-    accent: "bg-orange-50 text-orange-600 border-orange-100",
-    border: "hover:border-orange-200",
+    desc: "See which suppliers have seen, replied to, or ignored your RFQ — all in one live dashboard.",
   },
   {
-    icon: ShieldCheck,
+    num: "06",
     title: "You stay in control",
-    description: "Every RFQ passes through your approval queue before anything is sent. Nothing leaves without your sign-off.",
-    accent: "bg-rose-50 text-rose-600 border-rose-100",
-    border: "hover:border-rose-200",
+    desc: "Every RFQ passes through your approval queue before anything is sent. Nothing leaves without your sign-off.",
   },
 ];
 
 export default function WhyUsSection() {
   return (
-    <section id="features" className="py-32 px-6 bg-white">
-      <div className="max-w-6xl mx-auto">
+    <section id="features" className="relative bg-[#faf4eb] py-32 px-8 md:px-16 overflow-hidden">
 
-        {/* Heading */}
-        <AnimateIn className="text-center mb-16">
-          <p className="text-sm font-semibold text-blue-600 uppercase tracking-widest mb-3">Features</p>
-          <h2 className="text-4xl sm:text-5xl font-black text-gray-950 tracking-tight mb-5">
-            Everything your team needs.
-            <br />
-            <span className="text-gray-400">Nothing you don&apos;t.</span>
-          </h2>
-          <p className="text-gray-500 text-lg max-w-lg mx-auto">
-            Built specifically for hardware and industrial MSME trading companies in India.
-          </p>
+      {/* Dot grid */}
+      <div
+        className="pointer-events-none absolute inset-0 opacity-[0.13]"
+        style={{
+          backgroundImage: "radial-gradient(circle, #b5a491 1px, transparent 1px)",
+          backgroundSize: "28px 28px",
+        }}
+      />
+
+      <div className="relative max-w-7xl mx-auto">
+
+        {/* Chapter label */}
+        <AnimateIn animation="fade-up">
+          <div className="flex items-center justify-between text-[11px] font-semibold tracking-[0.15em] text-[#9a8674] uppercase mb-4">
+            <div className="flex items-center gap-4">
+              <div className="h-px w-12 bg-[#c5b5a0]" />
+              <span>Chapter 02 — Why RFQ Flow</span>
+            </div>
+          </div>
+          <div className="h-px bg-[#e0d5c5] mb-16" />
         </AnimateIn>
 
-        {/* Cards grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {cards.map((card, i) => (
-            <AnimateIn key={card.title} delay={i * 80} animation="fade-up">
-              <div
-                className={`group h-full p-7 rounded-2xl border border-gray-100 ${card.border} bg-white transition-all duration-300 hover:shadow-[0_8px_30px_rgba(0,0,0,0.06)] hover:-translate-y-0.5 cursor-default`}
+        {/* Heading */}
+        <AnimateIn animation="fade-up" delay={60}>
+          <div className="max-w-3xl mb-20">
+            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-[#d5c8b5] bg-[#f5ede0] text-[#7a6a55] text-xs font-semibold tracking-widest uppercase mb-6">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#1847F5]" />
+              Features
+            </div>
+            <h2
+              className="text-[clamp(36px,5vw,72px)] font-black text-[#1a1209] leading-[0.95] tracking-tight"
+              style={{ fontFamily: "var(--font-playfair), Georgia, serif" }}
+            >
+              Everything your team needs.{" "}
+              <em
+                className="text-[#9a8674]"
+                style={{ fontStyle: "italic" }}
               >
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center mb-5 border ${card.accent}`}>
-                  <card.icon className="w-5 h-5" />
-                </div>
-                <h3 className="font-bold text-gray-900 text-[15px] mb-2 tracking-tight">{card.title}</h3>
-                <p className="text-gray-500 text-sm leading-relaxed">{card.description}</p>
+                Nothing you don&apos;t.
+              </em>
+            </h2>
+          </div>
+        </AnimateIn>
+
+        {/* Feature grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-px bg-[#e0d5c5] border border-[#e0d5c5] rounded-2xl overflow-hidden">
+          {features.map((f, i) => (
+            <AnimateIn key={f.num} animation="fade-up" delay={i * 60}>
+              <div className="bg-[#faf4eb] hover:bg-[#f5ede0] transition-colors p-8 h-full group">
+                <p
+                  className="text-[52px] font-black text-[#e8ddd0] leading-none mb-5 group-hover:text-[#1847F5]/20 transition-colors"
+                  style={{ fontFamily: "var(--font-playfair), Georgia, serif" }}
+                >
+                  {f.num}
+                </p>
+                <h3 className="font-bold text-[#1a1209] text-[15px] mb-3 tracking-tight">{f.title}</h3>
+                <p className="text-[#7a6a55] text-sm leading-relaxed">{f.desc}</p>
               </div>
             </AnimateIn>
           ))}
         </div>
+
       </div>
     </section>
   );

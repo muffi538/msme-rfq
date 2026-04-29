@@ -1,38 +1,37 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useEffect } from "react";
-import { cn } from "@/lib/utils";
+import { useEffect, useState } from "react";
+import { ArrowRight } from "lucide-react";
 
 export default function Navbar() {
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 24);
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
+    const fn = () => setScrolled(window.scrollY > 24);
+    window.addEventListener("scroll", fn, { passive: true });
+    return () => window.removeEventListener("scroll", fn);
   }, []);
 
   return (
-    <nav
-      className={cn(
-        "fixed top-0 left-0 right-0 z-50 transition-all duration-500",
+    <header
+      className={`fixed top-0 left-0 right-0 z-50 transition-all duration-500 ${
         scrolled
-          ? "bg-white/90 backdrop-blur-xl border-b border-gray-200/60 shadow-[0_1px_12px_rgba(0,0,0,0.06)]"
+          ? "bg-[#faf4eb]/95 backdrop-blur-md border-b border-[#e0d5c5] shadow-[0_1px_24px_rgba(26,18,9,0.06)]"
           : "bg-transparent"
-      )}
+      }`}
     >
-      <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-8 h-[68px] flex items-center justify-between">
         {/* Logo */}
-        <Link href="/" className="flex items-center gap-2.5 group">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-sm group-hover:scale-105 transition-transform duration-200">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 bg-[#1847F5] rounded-lg flex items-center justify-center shadow-[0_2px_8px_rgba(24,71,245,0.4)]">
             <span className="text-white font-black text-sm">R</span>
           </div>
-          <span className="font-bold text-gray-900 text-[17px] tracking-tight">RFQ Flow</span>
-        </Link>
+          <span className="font-bold text-[#1a1209] text-[15px] tracking-tight">RFQ Flow</span>
+        </div>
 
-        {/* Desktop links */}
-        <div className="hidden md:flex items-center gap-0.5">
+        {/* Nav links */}
+        <nav className="hidden md:flex items-center gap-10">
           {[
             { href: "#features",     label: "Features" },
             { href: "#how-it-works", label: "How it works" },
@@ -40,29 +39,24 @@ export default function Navbar() {
             <a
               key={href}
               href={href}
-              className="px-4 py-2 text-sm text-gray-500 hover:text-gray-900 font-medium rounded-lg hover:bg-gray-100/70 transition-colors"
+              className="text-sm text-[#7a6a55] hover:text-[#1a1209] transition-colors"
             >
               {label}
             </a>
           ))}
-        </div>
-
-        {/* CTAs */}
-        <div className="flex items-center gap-2">
-          <Link
-            href="/login"
-            className="hidden sm:block px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 rounded-lg hover:bg-gray-100/70 transition-colors"
-          >
+          <Link href="/login" className="text-sm text-[#7a6a55] hover:text-[#1a1209] transition-colors">
             Log in
           </Link>
-          <Link
-            href="/signup"
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-all shadow-sm hover:shadow-md hover:-translate-y-px"
-          >
-            Get started free
-          </Link>
-        </div>
+        </nav>
+
+        {/* CTA pill */}
+        <Link
+          href="/signup"
+          className="flex items-center gap-2 px-5 py-2.5 bg-[#1a1209] text-[#faf4eb] text-sm font-semibold rounded-full hover:bg-[#3a2a18] transition-all hover:shadow-lg"
+        >
+          Get started <ArrowRight className="w-3.5 h-3.5" />
+        </Link>
       </div>
-    </nav>
+    </header>
   );
 }
