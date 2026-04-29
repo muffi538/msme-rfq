@@ -135,7 +135,7 @@ export default function DashboardHeader({ title }: { title: string }) {
               {/* Menu items */}
               <div className="py-1.5">
                 <button
-                  onClick={() => { setOpen(false); router.push("/settings"); }}
+                  onClick={() => { setOpen(false); window.open("/settings", "_blank"); }}
                   className="w-full flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-accent transition-colors"
                 >
                   <Settings className="w-4 h-4 text-muted-foreground" />
@@ -143,7 +143,7 @@ export default function DashboardHeader({ title }: { title: string }) {
                 </button>
 
                 <button
-                  onClick={() => { setOpen(false); router.push("/suppliers"); }}
+                  onClick={() => { setOpen(false); window.open("/suppliers", "_blank"); }}
                   className="w-full flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-accent transition-colors"
                 >
                   <User className="w-4 h-4 text-muted-foreground" />

@@ -55,6 +55,8 @@ export default async function DashboardPage() {
             <Link
               key={s.label}
               href={s.href}
+              target="_blank"
+              rel="noopener noreferrer"
               className="bg-white rounded-2xl border border-gray-100 p-6 flex items-center gap-4 hover:shadow-md transition-shadow"
             >
               <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${s.color}`}>
@@ -72,7 +74,7 @@ export default async function DashboardPage() {
         <div className="bg-white rounded-2xl border border-gray-100">
           <div className="flex items-center justify-between px-6 py-4 border-b border-gray-50">
             <h2 className="font-semibold text-gray-900">Recent RFQs</h2>
-            <Link href="/rfqs" className="text-sm text-blue-600 hover:underline">View all</Link>
+            <Link href="/rfqs" target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline">View all</Link>
           </div>
 
           {!recentRfqs || recentRfqs.length === 0 ? (
@@ -82,6 +84,8 @@ export default async function DashboardPage() {
               <p className="text-gray-400 text-sm mt-1 mb-4">Upload your first RFQ to get started</p>
               <Link
                 href="/rfqs/upload"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors"
               >
                 Upload RFQ

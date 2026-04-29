@@ -230,7 +230,7 @@ export default function RfqsClient({ rfqs: initial }: { rfqs: Rfq[] }) {
               {hasActiveFilter ? "No RFQs match your filters" : "No RFQs uploaded yet"}
             </p>
             {!hasActiveFilter && (
-              <Link href="/rfqs/upload" className="mt-4 text-blue-600 text-sm font-medium hover:underline">
+              <Link href="/rfqs/upload" target="_blank" rel="noopener noreferrer" className="mt-4 text-blue-600 text-sm font-medium hover:underline">
                 Upload your first RFQ →
               </Link>
             )}
