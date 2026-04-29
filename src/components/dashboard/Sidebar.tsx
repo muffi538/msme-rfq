@@ -13,6 +13,7 @@ import {
   Settings,
   Database,
   ShieldCheck,
+  MessageSquareReply,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
@@ -23,6 +24,7 @@ const navItems = [
   { href: "/inbox",                  label: "Email Inbox",  icon: Inbox },
   { href: "/rfqs",                   label: "RFQs",         icon: FileText },
   { href: "/rfqs/upload",            label: "Upload RFQ",   icon: Upload },
+  { href: "/rfq-reply",              label: "RFQ Reply",    icon: MessageSquareReply },
   { href: "/suppliers",              label: "Suppliers",    icon: Users },
   { href: "/suppliers/tally-import", label: "Tally Import", icon: Database },
   { href: "/settings",               label: "Settings",     icon: Settings },

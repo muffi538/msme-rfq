@@ -113,6 +113,34 @@ async function extractAttachments(
   return results;
 }
 
+export async function sendEmail({
+  to,
+  subject,
+  body,
+  fromName,
+}: {
+  to: string;
+  subject: string;
+  body: string;
+  fromName?: string;
+}): Promise<void> {
+  const token = await getAccessToken();
+
+  const fromLine = fromName ? `From: ${fromName}\r\n` : "";
+  const raw = [
+    fromLine,
+    `To: ${to}\r\n`,
+    `Subject: ${subject}\r\n`,
+    `MIME-Version: 1.0\r\n`,
+    `Content-Type: text/plain; charset=UTF-8\r\n`,
+    `\r\n`,
+    body,
+  ].join("");
+
+  const encoded = Buffer.from(raw).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  await gmailPost("/messages/send", token, { raw: encoded });
+}
+
 export async function fetchUnreadEmails(limit = 5): Promise<FetchedEmail[]> {
   const token = await getAccessToken();
 
