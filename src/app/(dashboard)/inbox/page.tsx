@@ -23,7 +23,7 @@ type FilterTab   = "all" | RfqLabel;
 const LABELS: { value: RfqLabel; emoji: string; label: string; pill: string }[] = [
   { value: "important",     emoji: "🔴", label: "Important",     pill: "bg-red-50 text-red-700 border border-red-200" },
   { value: "waiting_reply", emoji: "⏳", label: "Waiting Reply",  pill: "bg-amber-50 text-amber-700 border border-amber-200" },
-  { value: "in_progress",   emoji: "🔵", label: "In Progress",   pill: "bg-blue-50 text-blue-700 border border-blue-200" },
+  { value: "in_progress",   emoji: "🔵", label: "In Progress",   pill: "bg-[#1847F5]/8 text-[#1847F5] border border-[#1847F5]/20" },
   { value: "spam",          emoji: "🚫", label: "Spam",          pill: "bg-gray-100 text-gray-500 border border-gray-200" },
 ];
 
@@ -112,7 +112,7 @@ function LabelSelector({
             >
               <span className="text-base">{lbl.emoji}</span>
               {lbl.label}
-              {current === lbl.value && <CheckCircle className="w-3.5 h-3.5 ml-auto text-blue-500" />}
+              {current === lbl.value && <CheckCircle className="w-3.5 h-3.5 ml-auto text-[#1847F5]" />}
             </button>
           ))}
           {current && (
@@ -291,20 +291,32 @@ export default function InboxPage() {
       <DashboardHeader title="Email Inbox" />
       <main className="flex-1 p-6 max-w-4xl mx-auto w-full space-y-5">
 
-        {/* ── Stats row ── */}
-        <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+        {/* ── Chapter label ── */}
+        <div>
+          <div className="flex items-center gap-3 text-[11px] font-semibold tracking-[0.15em] text-muted-foreground uppercase mb-3">
+            <div className="h-px w-8 bg-border" />
+            <span>Inbox Overview</span>
+          </div>
+          <div className="h-px bg-border" />
+        </div>
+
+        {/* ── Stats row — gap-px grid ── */}
+        <div className="grid grid-cols-3 sm:grid-cols-6 gap-px bg-border border border-border rounded-2xl overflow-hidden">
           {[
-            { label: "Need AI Run",  value: stats.needAI,   icon: Sparkles,    bg: "bg-orange-50",  text: "text-orange-600",  border: "border-orange-100" },
-            { label: "AI Done",      value: stats.aiDone,   icon: CheckCircle, bg: "bg-green-50",   text: "text-green-600",   border: "border-green-100"  },
-            { label: "Approved",     value: stats.approved, icon: ArrowRight,  bg: "bg-indigo-50",  text: "text-indigo-600",  border: "border-indigo-100" },
-            { label: "Sent",         value: stats.sent,     icon: Send,        bg: "bg-gray-50",    text: "text-gray-600",    border: "border-gray-200"   },
-            { label: "Important",    value: stats.important,icon: Tag,         bg: "bg-red-50",     text: "text-red-600",     border: "border-red-100"    },
-            { label: "Spam",         value: stats.spam,     icon: Mail,        bg: "bg-gray-50",    text: "text-gray-400",    border: "border-gray-200"   },
+            { label: "Need AI Run",  value: stats.needAI,    icon: Sparkles,    text: "text-orange-500" },
+            { label: "AI Done",      value: stats.aiDone,    icon: CheckCircle, text: "text-green-500"  },
+            { label: "Approved",     value: stats.approved,  icon: ArrowRight,  text: "text-[#1847F5]"  },
+            { label: "Sent",         value: stats.sent,      icon: Send,        text: "text-muted-foreground" },
+            { label: "Important",    value: stats.important, icon: Tag,         text: "text-red-500"    },
+            { label: "Spam",         value: stats.spam,      icon: Mail,        text: "text-muted-foreground/50" },
           ].map((s) => (
-            <div key={s.label} className={cn("rounded-xl border p-3 flex flex-col gap-1", s.bg, s.border)}>
-              <s.icon className={cn("w-4 h-4", s.text)} />
-              <p className={cn("text-xl font-black leading-none", s.text)}>{s.value}</p>
-              <p className="text-[11px] text-gray-500 font-medium leading-tight">{s.label}</p>
+            <div key={s.label} className="bg-card p-4 flex flex-col gap-2">
+              <s.icon className={cn("w-3.5 h-3.5", s.text)} />
+              <p className={cn("text-2xl font-black leading-none", s.text)}
+                style={{ fontFamily: "var(--font-playfair), Georgia, serif" }}>
+                {s.value}
+              </p>
+              <p className="text-[10px] text-muted-foreground font-semibold uppercase tracking-widest leading-tight">{s.label}</p>
             </div>
           ))}
         </div>
@@ -312,8 +324,8 @@ export default function InboxPage() {
         {/* ── Fetch card ── */}
         <div className="bg-card border border-border rounded-2xl p-6">
           <div className="flex items-center gap-4 mb-4">
-            <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center flex-shrink-0">
-              <Mail className="w-5 h-5 text-blue-600" />
+            <div className="w-10 h-10 bg-[#1847F5]/8 rounded-xl flex items-center justify-center flex-shrink-0">
+              <Mail className="w-5 h-5 text-[#1847F5]" />
             </div>
             <div>
               <h2 className="font-semibold text-card-foreground">Gmail RFQ Importer</h2>
@@ -325,7 +337,7 @@ export default function InboxPage() {
           </div>
 
           <Button onClick={handleFetch} disabled={fetching}
-            className="w-full h-11 bg-blue-600 hover:bg-blue-700 text-white font-semibold gap-2">
+            className="w-full h-11 bg-[#1847F5] hover:bg-[#0f35d4] text-white font-semibold gap-2 rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.35)]">
             {fetching
               ? <><Loader2 className="w-4 h-4 animate-spin" />Connecting to Gmail…</>
               : <><Mail className="w-4 h-4" />Fetch New Emails</>}
@@ -370,14 +382,14 @@ export default function InboxPage() {
                   className={cn(
                     "flex-shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-sm font-medium transition-all border",
                     activeFilter === key
-                      ? "bg-gray-900 text-white border-gray-900"
-                      : "bg-card text-muted-foreground border-border hover:border-gray-400 hover:text-foreground"
+                      ? "bg-[#1847F5] text-white border-[#1847F5] shadow-[0_2px_8px_rgba(24,71,245,0.3)]"
+                      : "bg-card text-muted-foreground border-border hover:border-[#1847F5]/40 hover:text-foreground"
                   )}
                 >
                   {label}
                   <span className={cn(
                     "text-xs px-1.5 py-0.5 rounded-full font-semibold",
-                    activeFilter === key ? "bg-white/20 text-white" : "bg-muted text-muted-foreground"
+                    activeFilter === key ? "bg-white/20 text-white" : "bg-muted text-muted-foreground/70"
                   )}>
                     {count}
                   </span>
@@ -390,17 +402,18 @@ export default function InboxPage() {
         {/* ── Pending — AI not yet run ── */}
         {filteredPending.length > 0 && (
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-orange-500" />
-                <span className="font-semibold text-card-foreground text-sm">
+            <div className="px-5 py-4 border-b border-border flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="h-4 w-px bg-orange-400" />
+                <Sparkles className="w-3.5 h-3.5 text-orange-500" />
+                <span className="font-semibold text-card-foreground text-sm tracking-tight">
                   Need AI Processing
-                  <span className="ml-1.5 text-xs bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded-full font-semibold">
-                    {filteredPending.length}
-                  </span>
+                </span>
+                <span className="text-[11px] bg-orange-50 text-orange-600 border border-orange-200 px-2 py-0.5 rounded-full font-semibold">
+                  {filteredPending.length}
                 </span>
               </div>
-              <span className="text-xs text-muted-foreground hidden sm:block">Newest first</span>
+              <span className="text-[11px] text-muted-foreground font-medium uppercase tracking-widest hidden sm:block">Newest first</span>
             </div>
 
             <div className="divide-y divide-border">
@@ -441,7 +454,7 @@ export default function InboxPage() {
                         size="sm"
                         onClick={() => handleProcess(rfq.id)}
                         disabled={processing[rfq.id] || labels[rfq.id] === "spam"}
-                        className="bg-blue-600 hover:bg-blue-700 text-white gap-1.5 h-8 text-xs"
+                        className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.3)]"
                       >
                         {processing[rfq.id]
                           ? <><Loader2 className="w-3 h-3 animate-spin" />Processing…</>
@@ -458,17 +471,18 @@ export default function InboxPage() {
         {/* ── Done — AI already ran ── */}
         {filteredDone.length > 0 && (
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-green-500" />
-                <span className="font-semibold text-card-foreground text-sm">
+            <div className="px-5 py-4 border-b border-border flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="h-4 w-px bg-green-400" />
+                <CheckCircle className="w-3.5 h-3.5 text-green-500" />
+                <span className="font-semibold text-card-foreground text-sm tracking-tight">
                   Processed
-                  <span className="ml-1.5 text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full font-semibold">
-                    {filteredDone.length}
-                  </span>
+                </span>
+                <span className="text-[11px] bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded-full font-semibold">
+                  {filteredDone.length}
                 </span>
               </div>
-              <span className="text-xs text-muted-foreground hidden sm:block">AI has run on these</span>
+              <span className="text-[11px] text-muted-foreground font-medium uppercase tracking-widest hidden sm:block">AI has run</span>
             </div>
 
             <div className="divide-y divide-border">
@@ -483,7 +497,7 @@ export default function InboxPage() {
                     <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <p className="font-medium text-card-foreground text-sm group-hover:text-blue-600 transition-colors">{rfq.rfq_code}</p>
+                        <p className="font-medium text-card-foreground text-sm group-hover:text-[#1847F5] transition-colors">{rfq.rfq_code}</p>
                         {labels[rfq.id] && <LabelPill value={labels[rfq.id]} />}
                         <span className={cn(
                           "text-[11px] px-2 py-0.5 rounded-full font-medium",

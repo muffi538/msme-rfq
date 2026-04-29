@@ -15,11 +15,11 @@ const THEMES = [
 export default function DashboardHeader({ title }: { title: string }) {
   const router  = useRouter();
   const { theme, setTheme, resolvedTheme } = useTheme();
-  const [company, setCompany] = useState("Your Company");
-  const [email,   setEmail]   = useState("");
-  const [open,    setOpen]    = useState(false);
+  const [company,   setCompany]   = useState("Your Company");
+  const [email,     setEmail]     = useState("");
+  const [open,      setOpen]      = useState(false);
   const [resetSent, setResetSent] = useState(false);
-  const [mounted, setMounted] = useState(false);
+  const [mounted,   setMounted]   = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => setMounted(true), []);
@@ -27,8 +27,7 @@ export default function DashboardHeader({ title }: { title: string }) {
   useEffect(() => {
     const supabase = createClient();
     supabase.auth.getUser().then(({ data: { user } }) => {
-      const name = user?.user_metadata?.company_name ?? "Your Company";
-      setCompany(name);
+      setCompany(user?.user_metadata?.company_name ?? "Your Company");
       setEmail(user?.email ?? "");
     });
   }, []);
@@ -57,29 +56,35 @@ export default function DashboardHeader({ title }: { title: string }) {
     setTimeout(() => setResetSent(false), 4000);
   }
 
-  const initials = company.slice(0, 2).toUpperCase();
-
-  // Cycle through light → dark → system on icon click
-  function cycleTheme() {
-    const next = theme === "light" ? "dark" : theme === "dark" ? "system" : "light";
-    setTheme(next);
-  }
-
+  const initials  = company.slice(0, 2).toUpperCase();
   const ThemeIcon = resolvedTheme === "dark" ? Moon : Sun;
 
-  return (
-    <header className="h-16 border-b border-border bg-card flex items-center justify-between px-8 relative z-30">
-      <h1 className="text-xl font-semibold text-card-foreground">{title}</h1>
+  function cycleTheme() {
+    setTheme(theme === "light" ? "dark" : theme === "dark" ? "system" : "light");
+  }
 
-      <div className="flex items-center gap-2">
+  return (
+    <header className="h-[68px] border-b border-border bg-card flex items-center justify-between px-8 relative z-30 flex-shrink-0">
+
+      {/* Page title — editorial style */}
+      <div className="flex items-center gap-4">
+        <div className="h-4 w-px bg-border" />
+        <h1
+          className="text-[15px] font-semibold text-card-foreground tracking-tight"
+        >
+          {title}
+        </h1>
+      </div>
+
+      <div className="flex items-center gap-1.5">
         {/* Theme toggle */}
         {mounted && (
           <button
             onClick={cycleTheme}
             title={`Theme: ${theme}`}
-            className="w-9 h-9 flex items-center justify-center rounded-xl text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+            className="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
           >
-            <ThemeIcon className="w-4 h-4" />
+            <ThemeIcon className="w-3.5 h-3.5" />
           </button>
         )}
 
@@ -89,19 +94,19 @@ export default function DashboardHeader({ title }: { title: string }) {
             onClick={() => setOpen((v) => !v)}
             className="flex items-center gap-2.5 hover:bg-accent rounded-xl px-3 py-1.5 transition-colors"
           >
-            <span className="text-sm text-muted-foreground hidden sm:block">{company}</span>
-            <div className="w-9 h-9 bg-blue-600 rounded-full flex items-center justify-center flex-shrink-0">
+            <span className="text-sm text-muted-foreground hidden sm:block font-medium">{company}</span>
+            <div className="w-8 h-8 bg-[#1847F5] rounded-full flex items-center justify-center flex-shrink-0 shadow-[0_2px_8px_rgba(24,71,245,0.35)]">
               <span className="text-white text-xs font-bold">{initials}</span>
             </div>
             <ChevronDown className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
           </button>
 
           {open && (
-            <div className="absolute right-0 top-12 w-72 bg-popover text-popover-foreground rounded-2xl shadow-lg border border-border overflow-hidden">
+            <div className="absolute right-0 top-[52px] w-72 bg-popover text-popover-foreground rounded-2xl shadow-xl border border-border overflow-hidden">
               {/* Account info */}
-              <div className="px-4 py-4 border-b border-border bg-muted/40">
+              <div className="px-4 py-4 border-b border-border">
                 <div className="flex items-center gap-3">
-                  <div className="w-11 h-11 bg-blue-600 rounded-full flex items-center justify-center flex-shrink-0">
+                  <div className="w-10 h-10 bg-[#1847F5] rounded-full flex items-center justify-center flex-shrink-0 shadow-[0_2px_8px_rgba(24,71,245,0.35)]">
                     <span className="text-white text-sm font-bold">{initials}</span>
                   </div>
                   <div className="min-w-0">
@@ -113,7 +118,7 @@ export default function DashboardHeader({ title }: { title: string }) {
 
               {/* Theme selector */}
               <div className="px-4 py-3 border-b border-border">
-                <p className="text-xs font-medium text-muted-foreground mb-2">Appearance</p>
+                <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-widest mb-2">Appearance</p>
                 <div className="flex gap-1.5">
                   {THEMES.map(({ value, label, icon: Icon }) => (
                     <button
@@ -121,7 +126,7 @@ export default function DashboardHeader({ title }: { title: string }) {
                       onClick={() => setTheme(value)}
                       className={`flex-1 flex flex-col items-center gap-1 py-2 rounded-lg text-xs font-medium transition-colors border ${
                         theme === value
-                          ? "border-blue-600 bg-blue-50 text-blue-600 dark:bg-blue-950 dark:text-blue-400"
+                          ? "border-[#1847F5] bg-[#1847F5]/8 text-[#1847F5]"
                           : "border-border text-muted-foreground hover:bg-accent"
                       }`}
                     >
@@ -134,32 +139,27 @@ export default function DashboardHeader({ title }: { title: string }) {
 
               {/* Menu items */}
               <div className="py-1.5">
-                <button
-                  onClick={() => { setOpen(false); window.open("/settings", "_blank"); }}
-                  className="w-full flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-accent transition-colors"
-                >
-                  <Settings className="w-4 h-4 text-muted-foreground" />
-                  Settings
-                </button>
-
-                <button
-                  onClick={() => { setOpen(false); window.open("/suppliers", "_blank"); }}
-                  className="w-full flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-accent transition-colors"
-                >
-                  <User className="w-4 h-4 text-muted-foreground" />
-                  My Suppliers
-                </button>
-
+                {[
+                  { icon: Settings, label: "Settings",    onClick: () => { setOpen(false); window.open("/settings", "_blank"); } },
+                  { icon: User,     label: "My Suppliers", onClick: () => { setOpen(false); window.open("/suppliers", "_blank"); } },
+                ].map(({ icon: Icon, label, onClick }) => (
+                  <button
+                    key={label}
+                    onClick={onClick}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-accent transition-colors"
+                  >
+                    <Icon className="w-4 h-4 text-muted-foreground" />
+                    {label}
+                  </button>
+                ))}
                 <button
                   onClick={handleResetPassword}
                   className="w-full flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-accent transition-colors"
                 >
                   <KeyRound className="w-4 h-4 text-muted-foreground" />
-                  {resetSent ? (
-                    <span className="text-green-600 font-medium">Reset link sent to your email ✓</span>
-                  ) : (
-                    "Change password"
-                  )}
+                  {resetSent
+                    ? <span className="text-green-600 font-medium">Reset link sent ✓</span>
+                    : "Change password"}
                 </button>
               </div>
 

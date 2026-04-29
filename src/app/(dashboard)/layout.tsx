@@ -38,9 +38,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             w-7 h-7 rounded-full
             flex items-center justify-center
             bg-[#1e2235] border border-[#3a3f5c]
-            shadow-[0_0_0_2px_#0d0f1a,0_4px_16px_rgba(91,107,255,0.35)]
-            hover:bg-[#5b6bff] hover:border-[#5b6bff]
-            hover:shadow-[0_0_0_2px_#0d0f1a,0_4px_20px_rgba(91,107,255,0.6)]
+            shadow-[0_0_0_2px_#0d0f1a,0_4px_16px_rgba(24,71,245,0.35)]
+            hover:bg-[#1847F5] hover:border-[#1847F5]
+            hover:shadow-[0_0_0_2px_#0d0f1a,0_4px_20px_rgba(24,71,245,0.6)]
             group transition-all"
         >
           {collapsed

@@ -71,7 +71,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
     >
       {/* Logo */}
       <div className="h-16 flex items-center border-b border-gray-800 flex-shrink-0 px-4">
-        <div className="w-8 h-8 bg-[#5b6bff] rounded-lg flex items-center justify-center flex-shrink-0">
+        <div className="w-8 h-8 bg-[#1847F5] rounded-lg flex items-center justify-center flex-shrink-0">
           <span className="text-white font-bold text-sm">R</span>
         </div>
         <span
@@ -99,7 +99,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
                 "flex items-center gap-3 rounded-lg text-sm font-medium transition-colors h-10 px-3",
                 collapsed ? "justify-center" : "justify-start",
                 active
-                  ? "bg-[#5b6bff] text-white"
+                  ? "bg-[#1847F5] text-white"
                   : "text-gray-400 hover:bg-gray-800 hover:text-white"
               )}
             >
