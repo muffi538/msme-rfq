@@ -34,9 +34,11 @@ export async function middleware(request: NextRequest) {
 
   // ── Logged-in users ───────────────────────────────────────────────────────
   if (user && !path.startsWith("/auth/")) {
-    const onboarded = !!user.user_metadata?.onboarding_complete;
+    // company_name is set by the onboarding page — reliable indicator
+    // because Google OAuth never sets it, so new users always hit onboarding
+    const onboarded = !!user.user_metadata?.company_name;
 
-    // Send them to finish onboarding before the dashboard
+    // Block dashboard/inbox/etc until onboarding is done
     if (!onboarded && isProtected) {
       return NextResponse.redirect(new URL("/onboarding", request.url));
     }

@@ -13,7 +13,9 @@ export async function GET(request: NextRequest) {
     if (!error) {
       // Check if this user has completed onboarding
       const { data: { user } } = await supabase.auth.getUser();
-      const done = user?.user_metadata?.onboarding_complete;
+      // company_name is set during onboarding — Google OAuth never sets it,
+      // so any account without it is a first-time user who needs onboarding
+      const done = !!user?.user_metadata?.company_name;
 
       if (!done) {
         // First-time user — collect their profile info before dashboard

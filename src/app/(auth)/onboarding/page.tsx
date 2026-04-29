@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,8 +8,6 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Loader2, ArrowRight, Building2, User, Lock } from "lucide-react";
 
 export default function OnboardingPage() {
-  const router = useRouter();
-
   const [fullName,    setFullName]    = useState("");
   const [companyName, setCompanyName] = useState("");
   const [password,    setPassword]    = useState("");
@@ -21,29 +18,33 @@ export default function OnboardingPage() {
   const [booting,     setBooting]     = useState(true);
   const [error,       setError]       = useState("");
 
-  // Pre-fill from Google profile
   useEffect(() => {
     (async () => {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
 
-      if (!user) { router.replace("/login"); return; }
+      if (!user) { window.location.href = "/login"; return; }
 
-      // If already onboarded, skip
-      if (user.user_metadata?.onboarding_complete) {
-        router.replace("/dashboard");
+      // Already onboarded (has company_name) — go to dashboard
+      if (user.user_metadata?.company_name) {
+        window.location.href = "/dashboard";
         return;
       }
 
       setEmail(user.email ?? "");
-      setFullName(user.user_metadata?.full_name ?? user.user_metadata?.name ?? "");
+      // Pre-fill name from Google profile
+      setFullName(
+        user.user_metadata?.full_name ??
+        user.user_metadata?.name ??
+        ""
+      );
 
       const providers = user.identities?.map((i) => i.provider) ?? [];
       setIsGoogle(providers.includes("google"));
 
       setBooting(false);
     })();
-  }, [router]);
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -52,24 +53,24 @@ export default function OnboardingPage() {
     if (!fullName.trim())    { setError("Please enter your full name."); return; }
     if (!companyName.trim()) { setError("Please enter your company name."); return; }
 
-    // Password is optional (Google users already have OAuth), but if provided must match
     if (password) {
-      if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
-      if (password !== confirmPass) { setError("Passwords don't match."); return; }
+      if (password.length < 8)        { setError("Password must be at least 8 characters."); return; }
+      if (password !== confirmPass)    { setError("Passwords don't match."); return; }
     }
 
     setLoading(true);
     const supabase = createClient();
 
-    // Save profile to user metadata
-    const { error: metaErr } = await supabase.auth.updateUser({
+    const updatePayload: Parameters<typeof supabase.auth.updateUser>[0] = {
       data: {
-        full_name: fullName.trim(),
+        full_name:    fullName.trim(),
         company_name: companyName.trim(),
         onboarding_complete: true,
       },
-      ...(password ? { password } : {}),
-    });
+    };
+    if (password) updatePayload.password = password;
+
+    const { error: metaErr } = await supabase.auth.updateUser(updatePayload);
 
     if (metaErr) {
       setError(metaErr.message);
@@ -77,7 +78,12 @@ export default function OnboardingPage() {
       return;
     }
 
-    router.replace("/dashboard");
+    // Refresh the session so the new JWT carries company_name
+    // — middleware reads the JWT, so without this it may still see old data
+    await supabase.auth.refreshSession();
+
+    // Hard redirect (not SPA navigation) so browser sends fresh cookies
+    window.location.href = "/dashboard";
   }
 
   if (booting) {
@@ -105,13 +111,11 @@ export default function OnboardingPage() {
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-4">
 
-          {/* Email — read only */}
           <div className="space-y-1.5">
             <Label>Email</Label>
             <Input value={email} disabled className="bg-muted text-muted-foreground" />
           </div>
 
-          {/* Full name */}
           <div className="space-y-1.5">
             <Label htmlFor="name">
               <span className="flex items-center gap-1.5">
@@ -127,7 +131,6 @@ export default function OnboardingPage() {
             />
           </div>
 
-          {/* Company name */}
           <div className="space-y-1.5">
             <Label htmlFor="company">
               <span className="flex items-center gap-1.5">
@@ -143,7 +146,6 @@ export default function OnboardingPage() {
             />
           </div>
 
-          {/* Password — optional for Google users */}
           <div className="space-y-3 pt-1">
             <div className="flex items-center gap-2">
               <div className="flex-1 h-px bg-border" />
@@ -155,8 +157,8 @@ export default function OnboardingPage() {
 
             {isGoogle && (
               <p className="text-xs text-muted-foreground text-center">
-                You&apos;re signed in with Google — you don&apos;t need a password.
-                Add one only if you&apos;d also like to log in with email.
+                You&apos;re signed in with Google — no password needed.
+                Add one only if you&apos;d like to also log in with email.
               </p>
             )}
 
