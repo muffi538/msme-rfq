@@ -14,8 +14,6 @@ import {
   Database,
   ShieldCheck,
   MessageSquareReply,
-  ChevronLeft,
-  ChevronRight,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
@@ -36,10 +34,9 @@ const NAV_TARGET = "_blank" as const;
 
 interface SidebarProps {
   collapsed: boolean;
-  onToggle: () => void;
 }
 
-export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
+export default function Sidebar({ collapsed }: SidebarProps) {
   const pathname = usePathname();
   const router   = useRouter();
   const [isAdmin, setIsAdmin] = useState(false);
@@ -72,40 +69,19 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         collapsed ? "w-16" : "w-60"
       )}
     >
-      {/* Logo + toggle button */}
-      <div className="h-16 flex items-center justify-between border-b border-gray-800 flex-shrink-0 relative">
-        {/* Logo icon — always visible */}
-        <div className={cn("flex items-center gap-3 transition-all duration-300", collapsed ? "px-4" : "px-4")}>
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center flex-shrink-0">
-            <span className="text-white font-bold text-sm">R</span>
-          </div>
-          {/* Label fades out when collapsed */}
-          <span
-            className={cn(
-              "text-white font-bold text-[15px] whitespace-nowrap transition-all duration-200",
-              collapsed ? "opacity-0 w-0 overflow-hidden" : "opacity-100"
-            )}
-          >
-            RFQ Flow
-          </span>
+      {/* Logo */}
+      <div className="h-16 flex items-center border-b border-gray-800 flex-shrink-0 px-4">
+        <div className="w-8 h-8 bg-[#5b6bff] rounded-lg flex items-center justify-center flex-shrink-0">
+          <span className="text-white font-bold text-sm">R</span>
         </div>
-
-        {/* Collapse toggle — floats on the right edge */}
-        <button
-          onClick={onToggle}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        <span
           className={cn(
-            "absolute -right-3 top-1/2 -translate-y-1/2 z-50",
-            "w-6 h-6 rounded-full bg-gray-700 border border-gray-600",
-            "flex items-center justify-center",
-            "hover:bg-blue-600 hover:border-blue-500 transition-colors",
-            "shadow-md"
+            "ml-3 text-white font-bold text-[15px] whitespace-nowrap transition-all duration-200",
+            collapsed ? "opacity-0 w-0 ml-0 overflow-hidden" : "opacity-100"
           )}
         >
-          {collapsed
-            ? <ChevronRight className="w-3 h-3 text-gray-300" />
-            : <ChevronLeft  className="w-3 h-3 text-gray-300" />}
-        </button>
+          RFQ Flow
+        </span>
       </div>
 
       {/* Nav */}
@@ -120,11 +96,10 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
               rel="noopener noreferrer"
               title={collapsed ? item.label : undefined}
               className={cn(
-                "flex items-center gap-3 rounded-lg text-sm font-medium transition-colors",
-                "h-10 px-3",
+                "flex items-center gap-3 rounded-lg text-sm font-medium transition-colors h-10 px-3",
                 collapsed ? "justify-center" : "justify-start",
                 active
-                  ? "bg-blue-600 text-white"
+                  ? "bg-[#5b6bff] text-white"
                   : "text-gray-400 hover:bg-gray-800 hover:text-white"
               )}
             >
@@ -148,8 +123,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
             rel="noopener noreferrer"
             title={collapsed ? "Admin Panel" : undefined}
             className={cn(
-              "flex items-center gap-3 rounded-lg text-sm font-medium transition-colors",
-              "h-10 px-3 mt-2",
+              "flex items-center gap-3 rounded-lg text-sm font-medium transition-colors h-10 px-3 mt-2",
               collapsed ? "justify-center" : "justify-start",
               pathname === "/admin"
                 ? "bg-purple-600 text-white"
@@ -175,9 +149,8 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           onClick={handleLogout}
           title={collapsed ? "Log out" : undefined}
           className={cn(
-            "flex items-center gap-3 w-full rounded-lg text-sm font-medium",
-            "h-10 px-3 transition-colors",
-            "text-gray-400 hover:bg-gray-800 hover:text-white",
+            "flex items-center gap-3 w-full rounded-lg text-sm font-medium h-10 px-3",
+            "transition-colors text-gray-400 hover:bg-gray-800 hover:text-white",
             collapsed ? "justify-center" : "justify-start"
           )}
         >
