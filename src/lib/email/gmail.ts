@@ -12,14 +12,14 @@ export type FetchedEmail = {
   }[];
 };
 
-async function getAccessToken(): Promise<string> {
+async function getAccessToken(refreshToken: string): Promise<string> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       client_id:     process.env.GMAIL_CLIENT_ID!,
       client_secret: process.env.GMAIL_CLIENT_SECRET!,
-      refresh_token: process.env.GMAIL_REFRESH_TOKEN!,
+      refresh_token: refreshToken,
       grant_type:    "refresh_token",
     }),
   });
@@ -118,13 +118,15 @@ export async function sendEmail({
   subject,
   body,
   fromName,
+  refreshToken,
 }: {
   to: string;
   subject: string;
   body: string;
   fromName?: string;
+  refreshToken: string;
 }): Promise<void> {
-  const token = await getAccessToken();
+  const token = await getAccessToken(refreshToken);
 
   const fromLine = fromName ? `From: ${fromName}\r\n` : "";
   const raw = [
@@ -141,8 +143,8 @@ export async function sendEmail({
   await gmailPost("/messages/send", token, { raw: encoded });
 }
 
-export async function fetchUnreadEmails(limit = 5): Promise<FetchedEmail[]> {
-  const token = await getAccessToken();
+export async function fetchUnreadEmails(limit = 5, refreshToken: string): Promise<FetchedEmail[]> {
+  const token = await getAccessToken(refreshToken);
 
   // Only fetch emails still marked UNREAD — Gmail's own flag is the dedup mechanism.
   // After we save to DB we mark them read, so re-fetching is a no-op.

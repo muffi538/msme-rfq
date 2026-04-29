@@ -143,8 +143,26 @@ export default function InboxPage() {
   const [justDone,     setJustDone]     = useState<Record<string, boolean>>({});
   const [labels,       setLabels]       = useState<Record<string, RfqLabel>>({});
   const [activeFilter, setActiveFilter] = useState<FilterTab>("all");
+  const [gmailEmail,   setGmailEmail]   = useState<string | null>(null);
+  const [gmailLoading, setGmailLoading] = useState(true);
 
-  useEffect(() => { loadAll(); loadLabels(); }, []);
+  useEffect(() => { loadAll(); loadLabels(); loadGmailStatus(); }, []);
+
+  /* ── Gmail status ────────────────────────────────────── */
+  async function loadGmailStatus() {
+    setGmailLoading(true);
+    const supabase = createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { setGmailLoading(false); return; }
+    const { data } = await supabase
+      .from("user_settings")
+      .select("value")
+      .eq("user_id", user.id)
+      .eq("key", "gmail_email")
+      .single();
+    setGmailEmail(data?.value ?? null);
+    setGmailLoading(false);
+  }
 
   /* ── Data loading ─────────────────────────────────────── */
   async function loadAll() { await Promise.all([loadPending(), loadDone()]); }
@@ -321,27 +339,52 @@ export default function InboxPage() {
           ))}
         </div>
 
-        {/* ── Fetch card ── */}
+        {/* ── Gmail connection card ── */}
         <div className="bg-card border border-border rounded-2xl p-6">
           <div className="flex items-center gap-4 mb-4">
             <div className="w-10 h-10 bg-[#1847F5]/8 rounded-xl flex items-center justify-center flex-shrink-0">
               <Mail className="w-5 h-5 text-[#1847F5]" />
             </div>
-            <div>
+            <div className="flex-1 min-w-0">
               <h2 className="font-semibold text-card-foreground">Gmail RFQ Importer</h2>
-              <p className="text-muted-foreground text-xs mt-0.5">
-                Connected to <span className="font-medium text-foreground">mufaddal66you@gmail.com</span>
-                {" · "}Step 1: Fetch · Step 2: Run AI → review → send
+              <p className="text-muted-foreground text-xs mt-0.5 truncate">
+                {gmailLoading
+                  ? "Checking Gmail connection…"
+                  : gmailEmail
+                  ? <>Connected to <span className="font-medium text-foreground">{gmailEmail}</span> · Step 1: Fetch · Step 2: Run AI → review → send</>
+                  : "Not connected — connect your Gmail to start fetching RFQs"}
               </p>
             </div>
+            {/* Disconnect / reconnect */}
+            {gmailEmail && !gmailLoading && (
+              <a
+                href="/api/auth/gmail/connect"
+                className="text-xs text-muted-foreground hover:text-[#1847F5] underline underline-offset-2 flex-shrink-0"
+              >
+                Change account
+              </a>
+            )}
           </div>
 
-          <Button onClick={handleFetch} disabled={fetching}
-            className="w-full h-11 bg-[#1847F5] hover:bg-[#0f35d4] text-white font-semibold gap-2 rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.35)]">
-            {fetching
-              ? <><Loader2 className="w-4 h-4 animate-spin" />Connecting to Gmail…</>
-              : <><Mail className="w-4 h-4" />Fetch New Emails</>}
-          </Button>
+          {/* Not connected — show connect button */}
+          {!gmailLoading && !gmailEmail && (
+            <a
+              href="/api/auth/gmail/connect"
+              className="w-full h-11 flex items-center justify-center gap-2 rounded-full bg-[#1847F5] text-white text-sm font-semibold shadow-[0_2px_8px_rgba(24,71,245,0.35)] hover:bg-[#0f35d4] transition-colors"
+            >
+              <Mail className="w-4 h-4" /> Connect your Gmail account
+            </a>
+          )}
+
+          {/* Connected — show fetch button */}
+          {!gmailLoading && gmailEmail && (
+            <Button onClick={handleFetch} disabled={fetching}
+              className="w-full h-11 bg-[#1847F5] hover:bg-[#0f35d4] text-white font-semibold gap-2 rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.35)]">
+              {fetching
+                ? <><Loader2 className="w-4 h-4 animate-spin" />Connecting to Gmail…</>
+                : <><Mail className="w-4 h-4" />Fetch New Emails</>}
+            </Button>
+          )}
 
           {fetchError && (
             <div className="flex items-start gap-3 bg-red-50 text-red-700 rounded-xl px-4 py-3 mt-3 text-sm">

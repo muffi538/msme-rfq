@@ -25,11 +25,17 @@ export async function POST(request: NextRequest) {
     .from("user_settings")
     .select("key, value")
     .eq("user_id", user.id)
-    .eq("key", "company_name");
-  const companyName = settingRows?.[0]?.value ?? "RFQ Flow";
+    .in("key", ["company_name", "gmail_refresh_token"]);
+
+  const companyName    = settingRows?.find((r) => r.key === "company_name")?.value    ?? "RFQ Flow";
+  const gmailToken     = settingRows?.find((r) => r.key === "gmail_refresh_token")?.value;
+
+  if (!gmailToken) {
+    return NextResponse.json({ error: "Gmail not connected. Please connect your Gmail in the inbox." }, { status: 400 });
+  }
 
   try {
-    await sendEmail({ to, subject, body, fromName: companyName });
+    await sendEmail({ to, subject, body, fromName: companyName, refreshToken: gmailToken });
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     return NextResponse.json(

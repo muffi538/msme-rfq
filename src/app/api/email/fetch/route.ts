@@ -62,7 +62,22 @@ export async function POST() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
-    const emails = await fetchUnreadEmails(5);
+    // Look up this user's own Gmail refresh token
+    const { data: tokenRow } = await supabase
+      .from("user_settings")
+      .select("value")
+      .eq("user_id", user.id)
+      .eq("key", "gmail_refresh_token")
+      .single();
+
+    if (!tokenRow?.value) {
+      return NextResponse.json(
+        { error: "Gmail not connected. Please connect your Gmail account first." },
+        { status: 400 }
+      );
+    }
+
+    const emails = await fetchUnreadEmails(5, tokenRow.value);
     if (emails.length === 0) return NextResponse.json({ created: 0, message: "No new emails found" });
 
     let created = 0;
