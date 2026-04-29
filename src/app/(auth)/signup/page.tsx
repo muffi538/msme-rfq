@@ -35,7 +35,7 @@ export default function SignupPage() {
     setLoading(true);
     const supabase = createClient();
 
-    const { error: err } = await supabase.auth.signUp({
+    const { data, error: err } = await supabase.auth.signUp({
       email,
       password,
       options: {
@@ -49,13 +49,23 @@ export default function SignupPage() {
     setLoading(false);
 
     if (err) {
-      // "User already registered" is the most common error — give a helpful message
       if (err.message.toLowerCase().includes("already registered") ||
           err.message.toLowerCase().includes("already exists")) {
-        setError("An account with this email already exists. Try logging in instead.");
+        setError("An account with this email already exists. Log in instead, or use a different email.");
       } else {
         setError(err.message);
       }
+      return;
+    }
+
+    // Supabase returns identities:[] when the user already exists but email
+    // is unconfirmed — it silently "succeeds" but sends a magic link, not a
+    // confirmation. Detect this and show a clear message.
+    if (data.user && data.user.identities?.length === 0) {
+      setError(
+        "An account with this email already exists but hasn't been confirmed yet. " +
+        "Check your inbox for the earlier verification email, or use a different email address."
+      );
       return;
     }
 

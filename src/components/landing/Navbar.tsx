@@ -44,18 +44,23 @@ export default function Navbar() {
               {label}
             </a>
           ))}
-          <Link href="/login" className="text-sm text-[#7a6a55] hover:text-[#1a1209] transition-colors">
-            Log in
-          </Link>
         </nav>
 
-        {/* CTA pill */}
-        <Link
-          href="/signup"
-          className="flex items-center gap-2 px-5 py-2.5 bg-[#1a1209] text-[#faf4eb] text-sm font-semibold rounded-full hover:bg-[#3a2a18] transition-all hover:shadow-lg"
-        >
-          Get started <ArrowRight className="w-3.5 h-3.5" />
-        </Link>
+        {/* CTAs */}
+        <div className="flex items-center gap-3">
+          <Link
+            href="/login"
+            className="hidden sm:block text-sm text-[#7a6a55] hover:text-[#1a1209] font-medium transition-colors"
+          >
+            Log in
+          </Link>
+          <Link
+            href="/signup"
+            className="flex items-center gap-2 px-5 py-2.5 bg-[#1847F5] text-white text-sm font-semibold rounded-full hover:bg-[#0f35d4] transition-all hover:shadow-[0_4px_16px_rgba(24,71,245,0.4)] hover:-translate-y-0.5"
+          >
+            Sign up now <ArrowRight className="w-3.5 h-3.5" />
+          </Link>
+        </div>
       </div>
     </header>
   );
