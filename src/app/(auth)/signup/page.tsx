@@ -17,10 +17,11 @@ export default function SignupPage() {
   const [email,       setEmail]       = useState("");
   const [password,    setPassword]    = useState("");
   const [confirmPass, setConfirmPass] = useState("");
-  const [loading,     setLoading]     = useState(false);
-  const [resending,   setResending]   = useState(false);
-  const [error,       setError]       = useState("");
-  const [resendOk,    setResendOk]    = useState(false);
+  const [loading,          setLoading]          = useState(false);
+  const [resending,        setResending]        = useState(false);
+  const [error,            setError]            = useState("");
+  const [resendOk,         setResendOk]         = useState(false);
+  const [showResendInline, setShowResendInline] = useState(false);
 
   /* ── Step 1: Create account ── */
   async function handleSignUp(e: React.FormEvent) {
@@ -60,19 +61,19 @@ export default function SignupPage() {
 
     // Supabase returns identities:[] when the user already exists but email
     // is unconfirmed — it silently "succeeds" but sends a magic link, not a
-    // confirmation. Detect this and show a clear message.
+    // confirmation. Detect this and offer a resend button.
     if (data.user && data.user.identities?.length === 0) {
       setError(
-        "An account with this email already exists but hasn't been confirmed yet. " +
-        "Check your inbox for the earlier verification email, or use a different email address."
+        "An account with this email already exists but hasn't been verified yet."
       );
+      setShowResendInline(true);
       return;
     }
 
     setStep("verify");
   }
 
-  /* ── Resend verification email ── */
+  /* ── Resend verification email (from step 2 "verify" screen) ── */
   async function handleResend() {
     setResending(true);
     setResendOk(false);
@@ -85,6 +86,21 @@ export default function SignupPage() {
     setResending(false);
     setResendOk(true);
     setTimeout(() => setResendOk(false), 5000);
+  }
+
+  /* ── Resend from step 1 error state (unconfirmed existing account) ── */
+  async function handleResendInline() {
+    setResending(true);
+    setError("");
+    const supabase = createClient();
+    await supabase.auth.resend({
+      type: "signup",
+      email,
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+    });
+    setResending(false);
+    setShowResendInline(false);
+    setStep("verify"); // go straight to the "check your inbox" screen
   }
 
   /* ── Step indicators ── */
@@ -151,7 +167,7 @@ export default function SignupPage() {
                 type="email"
                 placeholder="you@company.com"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => { setEmail(e.target.value); setShowResendInline(false); setError(""); }}
                 autoComplete="email"
               />
             </div>
@@ -179,8 +195,26 @@ export default function SignupPage() {
             </div>
 
             {error && (
-              <div className="text-red-600 text-sm bg-red-50 border border-red-200 px-3 py-2.5 rounded-xl">
-                {error}
+              <div className="bg-red-50 border border-red-200 px-4 py-3.5 rounded-xl space-y-3">
+                <p className="text-red-600 text-sm">{error}</p>
+
+                {showResendInline && (
+                  <div className="flex flex-col gap-2 pt-1 border-t border-red-200">
+                    <p className="text-xs text-red-500">
+                      Can&apos;t find the email? We&apos;ll send a fresh one right now.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleResendInline}
+                      disabled={resending}
+                      className="inline-flex items-center gap-2 self-start px-4 py-2 bg-[#1847F5] hover:bg-[#0f35d4] text-white text-xs font-semibold rounded-full transition-colors disabled:opacity-60 shadow-[0_2px_8px_rgba(24,71,245,0.35)]"
+                    >
+                      {resending
+                        ? <><Loader2 className="w-3 h-3 animate-spin" /> Sending…</>
+                        : <><RefreshCw className="w-3 h-3" /> Resend verification email</>}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
