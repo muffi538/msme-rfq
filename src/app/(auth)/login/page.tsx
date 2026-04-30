@@ -6,8 +6,12 @@ import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Loader2, Mail, ArrowRight, CheckCircle, AlertCircle } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import {
+  Loader2, ArrowRight, AlertCircle,
+  Mail, Lock, LogIn,
+  UserCircle2, Inbox, Zap,
+} from "lucide-react";
 
 function GoogleIcon() {
   return (
@@ -20,18 +24,40 @@ function GoogleIcon() {
   );
 }
 
-type View = "form" | "sent";
+const STEPS = [
+  {
+    icon: LogIn,
+    title: "Sign in",
+    desc: "Use Google for instant access, or enter your email and password.",
+  },
+  {
+    icon: UserCircle2,
+    title: "Your profile",
+    desc: "Company name and contact details — takes 30 seconds.",
+  },
+  {
+    icon: Inbox,
+    title: "Connect Gmail",
+    desc: "Link your inbox so RFQs are read automatically.",
+  },
+  {
+    icon: Zap,
+    title: "Go live",
+    desc: "Incoming RFQs are parsed and replied to on your behalf.",
+  },
+];
 
 function LoginForm() {
   const searchParams = useSearchParams();
-  const urlMessage = searchParams.get("message");
+  const urlMessage   = searchParams.get("message");
 
-  const [view,          setView]          = useState<View>("form");
   const [email,         setEmail]         = useState("");
+  const [password,      setPassword]      = useState("");
   const [googleLoading, setGoogleLoading] = useState(false);
-  const [magicLoading,  setMagicLoading]  = useState(false);
+  const [loading,       setLoading]       = useState(false);
   const [error,         setError]         = useState("");
 
+  /* ── Google OAuth ── */
   async function handleGoogle() {
     setGoogleLoading(true);
     setError("");
@@ -46,130 +72,160 @@ function LoginForm() {
     if (err) { setError(err.message); setGoogleLoading(false); }
   }
 
-  async function handleMagicLink(e: React.FormEvent) {
+  /* ── Email + Password ── */
+  async function handleEmailLogin(e: React.FormEvent) {
     e.preventDefault();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      setError("Enter a valid email address.");
-      return;
-    }
-    setMagicLoading(true);
+    if (!email.trim())    { setError("Please enter your email."); return; }
+    if (!password.trim()) { setError("Please enter your password."); return; }
+
+    setLoading(true);
     setError("");
     const supabase = createClient();
-    const { error: err } = await supabase.auth.signInWithOtp({
-      email,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-        shouldCreateUser: false,
-      },
-    });
-    setMagicLoading(false);
-    if (err) { setError(err.message); return; }
-    setView("sent");
-  }
+    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+    setLoading(false);
 
-  if (view === "sent") {
-    return (
-      <Card className="w-full max-w-md shadow-lg border-border">
-        <CardContent className="pt-8 pb-8">
-          <div className="flex flex-col items-center text-center space-y-4">
-            <div className="w-16 h-16 bg-green-50 rounded-2xl flex items-center justify-center">
-              <CheckCircle className="w-8 h-8 text-green-500" />
-            </div>
-            <h2 className="text-xl font-bold text-card-foreground">Check your inbox</h2>
-            <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
-              We sent a sign-in link to{" "}
-              <span className="font-semibold text-card-foreground">{email}</span>.
-              <br /><br />
-              Click it to log in instantly.
-            </p>
-            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-700 text-left w-full">
-              <strong>Can&apos;t find it?</strong> Check your spam folder. The link expires in 1 hour.
-            </div>
-            <button
-              onClick={() => { setView("form"); setError(""); }}
-              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
-            >
-              ← Try a different email
-            </button>
-          </div>
-        </CardContent>
-      </Card>
-    );
+    if (err) {
+      // Make Supabase's generic message friendlier
+      if (err.message.toLowerCase().includes("invalid login")) {
+        setError("Incorrect email or password. Try again, or sign in with Google.");
+      } else {
+        setError(err.message);
+      }
+      return;
+    }
+
+    window.location.href = "/dashboard";
   }
 
   return (
-    <Card className="w-full max-w-md shadow-lg border-border">
-      <CardHeader className="pb-4">
-        <CardTitle className="text-2xl font-bold text-card-foreground">Welcome back</CardTitle>
-        <CardDescription>Log in to your RFQ Flow account</CardDescription>
-      </CardHeader>
+    <div className="w-full flex items-start gap-10 max-w-3xl">
 
-      <CardContent className="space-y-5">
-
-        {urlMessage && (
-          <div className="flex items-start gap-2.5 bg-amber-50 border border-amber-200 text-amber-700 text-sm px-3 py-2.5 rounded-xl">
-            <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-            {urlMessage}
-          </div>
-        )}
-
-        {/* Google — primary */}
-        <button
-          type="button"
-          onClick={handleGoogle}
-          disabled={googleLoading}
-          className="w-full h-12 flex items-center justify-center gap-3 rounded-full bg-[#1847F5] text-white text-sm font-semibold shadow-[0_2px_12px_rgba(24,71,245,0.4)] hover:bg-[#0f35d4] hover:shadow-[0_4px_20px_rgba(24,71,245,0.5)] transition-all disabled:opacity-60"
-        >
-          {googleLoading
-            ? <Loader2 className="w-4 h-4 animate-spin" />
-            : <><GoogleIcon /><span>Continue with Google</span><ArrowRight className="w-4 h-4" /></>}
-        </button>
-
-        {/* Divider */}
-        <div className="flex items-center gap-3">
-          <div className="flex-1 h-px bg-border" />
-          <span className="text-xs text-muted-foreground">or use email</span>
-          <div className="flex-1 h-px bg-border" />
+      {/* ── Steps panel (desktop only) ── */}
+      <div className="hidden lg:flex flex-col gap-6 w-64 shrink-0 pt-2">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-widest text-[#1847F5] mb-1">How it works</p>
+          <h2 className="text-xl font-bold text-[#1a1209] leading-snug">
+            From sign-in to<br />live in minutes
+          </h2>
         </div>
 
-        {/* Magic link */}
-        <form onSubmit={handleMagicLink} className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="email">Email address</Label>
-            <Input
-              id="email"
-              type="email"
-              placeholder="you@company.com"
-              value={email}
-              onChange={(e) => { setEmail(e.target.value); setError(""); }}
-              autoComplete="email"
-            />
-          </div>
+        <div className="flex flex-col gap-5">
+          {STEPS.map(({ icon: Icon, title, desc }, i) => (
+            <div key={i} className="flex items-start gap-3">
+              {/* Step number + connector */}
+              <div className="flex flex-col items-center">
+                <div className="w-8 h-8 rounded-full bg-[#1847F5]/10 flex items-center justify-center shrink-0">
+                  <Icon className="w-4 h-4 text-[#1847F5]" />
+                </div>
+                {i < STEPS.length - 1 && (
+                  <div className="w-px flex-1 bg-[#1847F5]/20 mt-1 mb-[-8px] min-h-[20px]" />
+                )}
+              </div>
+              <div className="pb-4">
+                <p className="text-sm font-semibold text-[#1a1209]">{title}</p>
+                <p className="text-xs text-[#7a6a52] leading-relaxed mt-0.5">{desc}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
 
-          {error && (
-            <p className="text-red-500 text-sm bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
-              {error}
-            </p>
+      {/* ── Login card ── */}
+      <Card className="w-full max-w-md shadow-lg border-border">
+        <CardHeader className="pb-4">
+          <CardTitle className="text-2xl font-bold text-card-foreground">Welcome back</CardTitle>
+          <CardDescription>Sign in to your RFQ Flow account</CardDescription>
+        </CardHeader>
+
+        <CardContent className="space-y-5">
+
+          {urlMessage && (
+            <div className="flex items-start gap-2.5 bg-amber-50 border border-amber-200 text-amber-700 text-sm px-3 py-2.5 rounded-xl">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              {urlMessage}
+            </div>
           )}
 
+          {/* Google — primary CTA */}
           <button
-            type="submit"
-            disabled={magicLoading}
-            className="w-full h-11 flex items-center justify-center gap-2 rounded-full border border-border bg-background text-sm font-medium text-card-foreground hover:bg-muted/50 transition-all disabled:opacity-60 shadow-sm"
+            type="button"
+            onClick={handleGoogle}
+            disabled={googleLoading}
+            className="w-full h-12 flex items-center justify-center gap-3 rounded-full bg-[#1847F5] text-white text-sm font-semibold shadow-[0_2px_12px_rgba(24,71,245,0.4)] hover:bg-[#0f35d4] hover:shadow-[0_4px_20px_rgba(24,71,245,0.5)] transition-all disabled:opacity-60"
           >
-            {magicLoading
+            {googleLoading
               ? <Loader2 className="w-4 h-4 animate-spin" />
-              : <><Mail className="w-4 h-4" /><span>Email me a sign-in link</span></>}
+              : <><GoogleIcon /><span>Continue with Google</span><ArrowRight className="w-4 h-4" /></>}
           </button>
-        </form>
 
-        <p className="text-center text-sm text-muted-foreground">
-          No account?{" "}
-          <Link href="/signup" className="text-[#1847F5] font-medium hover:underline">Sign up free</Link>
-        </p>
+          {/* Divider */}
+          <div className="flex items-center gap-3">
+            <div className="flex-1 h-px bg-border" />
+            <span className="text-xs text-muted-foreground">or sign in with email</span>
+            <div className="flex-1 h-px bg-border" />
+          </div>
 
-      </CardContent>
-    </Card>
+          {/* Email + password form */}
+          <form onSubmit={handleEmailLogin} className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="email">
+                <span className="flex items-center gap-1.5">
+                  <Mail className="w-3.5 h-3.5" /> Email address
+                </span>
+              </Label>
+              <Input
+                id="email"
+                type="email"
+                placeholder="you@company.com"
+                value={email}
+                onChange={(e) => { setEmail(e.target.value); setError(""); }}
+                autoComplete="email"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="password">
+                <span className="flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5" /> Password
+                </span>
+              </Label>
+              <Input
+                id="password"
+                type="password"
+                placeholder="Your password"
+                value={password}
+                onChange={(e) => { setPassword(e.target.value); setError(""); }}
+                autoComplete="current-password"
+              />
+            </div>
+
+            {error && (
+              <p className="text-red-500 text-sm bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
+                {error}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full h-11 flex items-center justify-center gap-2 rounded-full border border-border bg-background text-sm font-medium text-card-foreground hover:bg-muted/50 transition-all disabled:opacity-60 shadow-sm"
+            >
+              {loading
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : <><LogIn className="w-4 h-4" /><span>Sign in</span></>}
+            </button>
+          </form>
+
+          <p className="text-center text-sm text-muted-foreground">
+            No account?{" "}
+            <Link href="/signup" className="text-[#1847F5] font-medium hover:underline">
+              Sign up free
+            </Link>
+          </p>
+
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
