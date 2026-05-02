@@ -77,7 +77,8 @@ export async function POST() {
       );
     }
 
-    const emails = await fetchUnreadEmails(5, tokenRow.value);
+    // Fetch up to 20 newest unread emails (was 5 — too few to keep up)
+    const emails = await fetchUnreadEmails(20, tokenRow.value);
     if (emails.length === 0) return NextResponse.json({ created: 0, message: "No new emails found" });
 
     let created = 0;

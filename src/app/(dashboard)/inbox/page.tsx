@@ -186,7 +186,10 @@ export default function InboxPage() {
       .like("file_name", "msgid:%")
       .order("created_at", { ascending: false })
       .limit(30);
-    setDone(data ?? []);
+    // Defensive: re-sort client-side too — newest first
+    const ts = (r: DoneRfq) => (r.created_at ? new Date(r.created_at).getTime() : 0) || 0;
+    const sorted = [...(data ?? [])].sort((a, b) => ts(b) - ts(a));
+    setDone(sorted);
   }
 
   async function loadLabels() {

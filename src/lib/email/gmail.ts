@@ -143,7 +143,7 @@ export async function sendEmail({
   await gmailPost("/messages/send", token, { raw: encoded });
 }
 
-export async function fetchUnreadEmails(limit = 5, refreshToken: string): Promise<FetchedEmail[]> {
+export async function fetchUnreadEmails(limit = 20, refreshToken: string): Promise<FetchedEmail[]> {
   const token = await getAccessToken(refreshToken);
 
   // Only fetch emails still marked UNREAD — Gmail's own flag is the dedup mechanism.
@@ -199,5 +199,8 @@ export async function fetchUnreadEmails(limit = 5, refreshToken: string): Promis
     });
   }
 
+  // Newest first — Gmail's list usually returns this order, but enforce it
+  // explicitly so downstream code (and DB inserts) are deterministic.
+  emails.sort((a, b) => b.date.getTime() - a.date.getTime());
   return emails;
 }
