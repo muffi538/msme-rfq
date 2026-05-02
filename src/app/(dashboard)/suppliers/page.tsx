@@ -378,125 +378,164 @@ export default function SuppliersPage() {
 
         {/* Add / Edit form */}
         {formMode !== null && (
-          <div className="bg-white rounded-2xl border border-blue-100 p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-gray-900">
-                {formMode === "add" ? "New Supplier" : `Editing: ${editingSupplier?.name}`}
-              </h3>
-              <button onClick={closeForm} className="text-gray-400 hover:text-gray-600">
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+
+            {/* Form header */}
+            <div className="flex items-center justify-between px-7 py-5 border-b border-gray-100 bg-gray-50/50">
+              <div>
+                <p className="text-[11px] font-semibold tracking-widest text-blue-600 uppercase">
+                  {formMode === "add" ? "New supplier" : "Editing supplier"}
+                </p>
+                <h3 className="font-semibold text-gray-900 text-lg mt-0.5">
+                  {formMode === "add" ? "Add a new supplier" : editingSupplier?.name}
+                </h3>
+              </div>
+              <button onClick={closeForm} className="text-gray-400 hover:text-gray-700 transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label>Company name *</Label>
-                <Input placeholder="Sharma Traders" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Contact person</Label>
-                <Input placeholder="Ramesh Sharma" value={form.contact_person} onChange={(e) => setForm({ ...form, contact_person: e.target.value })} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Email</Label>
-                <Input placeholder="ramesh@sharma.com" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>WhatsApp number</Label>
-                <Input placeholder="+919876543210" value={form.whatsapp_number} onChange={(e) => setForm({ ...form, whatsapp_number: e.target.value })} />
-              </div>
-              <div className="space-y-1.5 col-span-2">
-                <Label>WhatsApp Group Link <span className="text-gray-400 font-normal">(optional)</span></Label>
-                <Input
-                  placeholder="https://chat.whatsapp.com/xxxxx"
-                  value={form.whatsapp_group_link}
-                  onChange={(e) => setForm({ ...form, whatsapp_group_link: e.target.value })}
-                />
-                <p className="text-xs text-gray-400">Open WhatsApp → Group → Invite via link → Copy link. Paste it here.</p>
-              </div>
-            </div>
+            <div className="px-7 py-6 space-y-7">
 
-            <div className="space-y-3">
-              <Label>Categories this supplier deals in</Label>
+              {/* ── Section 1: Identity ──────────────── */}
+              <section className="space-y-3">
+                <p className="text-[11px] font-semibold tracking-widest text-gray-400 uppercase">Company info</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-gray-500 font-medium">Company name *</Label>
+                    <Input placeholder="Sharma Traders" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-gray-500 font-medium">Contact person</Label>
+                    <Input placeholder="Ramesh Sharma" value={form.contact_person} onChange={(e) => setForm({ ...form, contact_person: e.target.value })} />
+                  </div>
+                </div>
+              </section>
 
-              {/* Built-in + custom categories */}
-              <div className="flex flex-wrap gap-2">
-                {allCategoryOptions.map((cat) => {
-                  const isCustom   = customCategories.includes(cat);
-                  const isSelected = form.categories.includes(cat);
-                  return (
-                    <div key={cat} className="relative group">
-                      <button
-                        type="button"
-                        onClick={() => toggleCategory(cat)}
-                        className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
-                          isSelected
-                            ? "bg-blue-600 text-white border-blue-600"
-                            : "bg-white text-gray-600 border-gray-200 hover:border-blue-300"
-                        } ${isCustom ? "pr-7" : ""}`}
-                      >
-                        {cat.replace(/_/g, " ")}
-                      </button>
-                      {/* Remove button — only on user-added categories */}
-                      {isCustom && (
+              {/* ── Section 2: Contact channels ──────── */}
+              <section className="space-y-3">
+                <p className="text-[11px] font-semibold tracking-widest text-gray-400 uppercase">Contact channels</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-gray-500 font-medium">Email</Label>
+                    <Input placeholder="ramesh@sharma.com" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-gray-500 font-medium">WhatsApp number</Label>
+                    <Input placeholder="+91 98765 43210" value={form.whatsapp_number} onChange={(e) => setForm({ ...form, whatsapp_number: e.target.value })} />
+                  </div>
+                  <div className="space-y-1.5 col-span-2">
+                    <Label className="text-xs text-gray-500 font-medium flex items-center gap-2">
+                      WhatsApp group link
+                      <span className="text-gray-300 font-normal text-[11px]">(optional)</span>
+                    </Label>
+                    <Input
+                      placeholder="https://chat.whatsapp.com/xxxxx"
+                      value={form.whatsapp_group_link}
+                      onChange={(e) => setForm({ ...form, whatsapp_group_link: e.target.value })}
+                    />
+                    <p className="text-[11px] text-gray-400">
+                      WhatsApp → Group → Invite via link → Copy link
+                    </p>
+                  </div>
+                </div>
+              </section>
+
+              {/* ── Section 3: Categories ────────────── */}
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-[11px] font-semibold tracking-widest text-gray-400 uppercase">
+                    Categories
+                    {form.categories.length > 0 && (
+                      <span className="ml-2 text-blue-600 normal-case tracking-normal">
+                        · {form.categories.length} selected
+                      </span>
+                    )}
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {allCategoryOptions.map((cat) => {
+                    const isCustom   = customCategories.includes(cat);
+                    const isSelected = form.categories.includes(cat);
+                    return (
+                      <div key={cat} className="relative group">
                         <button
                           type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (confirm(`Delete custom category "${cat.replace(/_/g, " ")}"? This won't affect existing supplier records.`)) {
-                              removeCustomCategory(cat);
-                            }
-                          }}
-                          title="Remove custom category"
-                          className={`absolute top-1/2 -translate-y-1/2 right-1.5 w-4 h-4 rounded-full flex items-center justify-center transition-colors ${
-                            isSelected ? "text-white/70 hover:bg-white/20" : "text-gray-400 hover:bg-gray-100 hover:text-red-500"
-                          }`}
+                          onClick={() => toggleCategory(cat)}
+                          className={`text-[11px] px-2.5 py-1 rounded-full border font-medium tracking-wide transition-colors ${
+                            isSelected
+                              ? "bg-blue-600 text-white border-blue-600"
+                              : "bg-white text-gray-600 border-gray-200 hover:border-blue-300 hover:text-blue-600"
+                          } ${isCustom ? "pr-6" : ""}`}
                         >
-                          <X className="w-3 h-3" />
+                          {cat.replace(/_/g, " ")}
                         </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+                        {isCustom && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (confirm(`Delete custom category "${cat.replace(/_/g, " ")}"? This won't affect existing supplier records.`)) {
+                                removeCustomCategory(cat);
+                              }
+                            }}
+                            title="Remove custom category"
+                            className={`absolute top-1/2 -translate-y-1/2 right-1 w-3.5 h-3.5 rounded-full flex items-center justify-center transition-colors ${
+                              isSelected ? "text-white/70 hover:bg-white/20" : "text-gray-300 hover:bg-gray-100 hover:text-red-500"
+                            }`}
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
 
-              {/* Add new custom category */}
-              <div className="flex items-center gap-2 pt-1">
-                <Input
-                  value={newCategoryInput}
-                  onChange={(e) => setNewCategoryInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      addCustomCategory();
-                    }
-                  }}
-                  placeholder="Add a custom category (e.g. Steel, Plywood)"
-                  className="flex-1 h-9 text-sm"
-                />
-                <Button
-                  type="button"
-                  onClick={addCustomCategory}
-                  disabled={savingCategory || !newCategoryInput.trim()}
-                  variant="outline"
-                  size="sm"
-                  className="h-9 gap-1.5 border-blue-200 text-blue-600 hover:bg-blue-50"
-                >
-                  {savingCategory
-                    ? <span className="text-xs">Saving…</span>
-                    : <><Check className="w-3.5 h-3.5" /><span className="text-xs">Add</span></>}
-                </Button>
-              </div>
-              <p className="text-xs text-gray-400">
-                Custom categories are saved permanently to your account. Click the × on any custom one to remove it.
-              </p>
+                {/* Inline add custom category */}
+                <div className="flex items-center gap-2 pt-1">
+                  <div className="flex-1 relative">
+                    <Plus className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300" />
+                    <Input
+                      value={newCategoryInput}
+                      onChange={(e) => setNewCategoryInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addCustomCategory();
+                        }
+                      }}
+                      placeholder="Add custom category"
+                      className="h-9 pl-9 text-sm bg-gray-50/50 border-gray-200"
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    onClick={addCustomCategory}
+                    disabled={savingCategory || !newCategoryInput.trim()}
+                    variant="outline"
+                    size="sm"
+                    className="h-9 gap-1.5 border-blue-200 text-blue-600 hover:bg-blue-50"
+                  >
+                    {savingCategory
+                      ? <span className="text-xs">Saving…</span>
+                      : <><Check className="w-3.5 h-3.5" /><span className="text-xs">Add</span></>}
+                  </Button>
+                </div>
+              </section>
             </div>
 
-            <div className="flex gap-3">
-              <Button onClick={handleSave} disabled={saving || !form.name.trim()} className={formMode === "add" ? "bg-blue-600 hover:bg-blue-700 text-white" : "bg-green-600 hover:bg-green-700 text-white"}>
+            {/* Footer actions */}
+            <div className="flex items-center justify-end gap-2 px-7 py-4 border-t border-gray-100 bg-gray-50/50">
+              <Button variant="outline" onClick={closeForm} className="border-gray-200">Cancel</Button>
+              <Button
+                onClick={handleSave}
+                disabled={saving || !form.name.trim()}
+                className="bg-blue-600 hover:bg-blue-700 text-white shadow-[0_2px_8px_rgba(37,99,235,0.3)] disabled:opacity-50"
+              >
                 {saving ? "Saving..." : formMode === "add" ? "Save supplier" : "Save changes"}
               </Button>
-              <Button variant="outline" onClick={closeForm}>Cancel</Button>
             </div>
           </div>
         )}
