@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { Button } from "@/components/ui/button";
 import {
@@ -135,6 +136,7 @@ function LabelSelector({
 
 /* ── Main page ──────────────────────────────────────────── */
 export default function InboxPage() {
+  const router = useRouter();
   const [fetching,     setFetching]     = useState(false);
   const [creatingSample, setCreatingSample] = useState(false);
   const [fetchResults, setFetchResults] = useState<FetchResult[] | null>(null);
@@ -296,8 +298,8 @@ export default function InboxPage() {
           created_at: moved.created_at,
         }, ...prev]);
       }
-      toast.success(`${json.itemCount} items extracted! Opening in new tab…`);
-      setTimeout(() => window.open(`/rfqs/${rfqId}`, "_blank"), 800);
+      toast.success(`${json.itemCount} items extracted! Opening RFQ…`);
+      setTimeout(() => router.push(`/rfqs/${rfqId}`), 800);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Processing failed");
       setProcessing((p) => ({ ...p, [rfqId]: false }));

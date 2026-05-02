@@ -30,7 +30,6 @@ const navItems = [
   { href: "/settings",               label: "Settings",     icon: Settings },
 ];
 
-const NAV_TARGET = "_blank" as const;
 
 interface SidebarProps {
   collapsed: boolean;
@@ -92,8 +91,6 @@ export default function Sidebar({ collapsed }: SidebarProps) {
             <Link
               key={item.href}
               href={item.href}
-              target={NAV_TARGET}
-              rel="noopener noreferrer"
               title={collapsed ? item.label : undefined}
               className={cn(
                 "flex items-center gap-3 rounded-lg text-sm font-medium transition-colors h-10 px-3",
@@ -119,8 +116,6 @@ export default function Sidebar({ collapsed }: SidebarProps) {
         {isAdmin && (
           <Link
             href="/admin"
-            target={NAV_TARGET}
-            rel="noopener noreferrer"
             title={collapsed ? "Admin Panel" : undefined}
             className={cn(
               "flex items-center gap-3 rounded-lg text-sm font-medium transition-colors h-10 px-3 mt-2",

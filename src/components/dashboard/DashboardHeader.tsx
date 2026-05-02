@@ -139,8 +139,8 @@ export default function DashboardHeader({ title }: { title: string }) {
               {/* Menu items */}
               <div className="py-1.5">
                 {[
-                  { icon: Settings, label: "Settings",    onClick: () => { setOpen(false); window.open("/settings", "_blank"); } },
-                  { icon: User,     label: "My Suppliers", onClick: () => { setOpen(false); window.open("/suppliers", "_blank"); } },
+                  { icon: Settings, label: "Settings",    onClick: () => { setOpen(false); router.push("/settings"); } },
+                  { icon: User,     label: "My Suppliers", onClick: () => { setOpen(false); router.push("/suppliers"); } },
                 ].map(({ icon: Icon, label, onClick }) => (
                   <button
                     key={label}

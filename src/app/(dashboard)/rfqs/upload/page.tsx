@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { Upload, FileText, ImageIcon, Table2, Loader2, ClipboardPaste, X, CheckCircle2 } from "lucide-react";
@@ -35,6 +36,7 @@ function fileIcon(file: File, size = "w-8 h-8") {
 }
 
 export default function UploadPage() {
+  const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
 
   const [entries,     setEntries]     = useState<FileEntry[]>([]);
@@ -180,13 +182,11 @@ export default function UploadPage() {
 
     if (!anyError && lastRfqId) {
       const count = entries.length;
-      toast.success(count === 1 ? "RFQ processed! Opening in new tab…" : `${count} RFQs processed!`);
+      toast.success(count === 1 ? "RFQ processed! Opening…" : `${count} RFQs processed!`);
       if (count === 1) {
-        // Open the RFQ in a new tab so the upload page stays available
-        setTimeout(() => window.open(`/rfqs/${lastRfqId}`, "_blank"), 600);
+        setTimeout(() => router.push(`/rfqs/${lastRfqId}`), 600);
       } else {
-        // Multiple — open the RFQ list in a new tab
-        setTimeout(() => window.open("/rfqs", "_blank"), 1000);
+        setTimeout(() => router.push("/rfqs"), 1000);
       }
     } else if (anyError) {
       setState("error");
