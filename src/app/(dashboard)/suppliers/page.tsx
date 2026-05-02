@@ -6,13 +6,18 @@ import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Trash2, Users, Pencil, X, AlertTriangle } from "lucide-react";
+import { Plus, Trash2, Users, Pencil, X, AlertTriangle, Check } from "lucide-react";
 
-const ALL_CATEGORIES = [
+const BUILT_IN_CATEGORIES = [
   "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
   "FASTENERS","SANITARY_PLUMBING","PAINTS","VALVES_FITTINGS",
   "PACKAGING_MATERIALS","ELECTRICAL","HVAC","GENERAL_HARDWARE",
 ];
+
+// Normalize free-text into a CATEGORY_KEY format: uppercase, underscores, no special chars
+function normalizeCategory(raw: string): string {
+  return raw.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
 
 type Supplier = {
   id: string;
@@ -40,7 +45,66 @@ export default function SuppliersPage() {
   const [deleteId, setDeleteId]     = useState<string | null>(null);
   const [deleting, setDeleting]     = useState(false);
 
-  useEffect(() => { fetchSuppliers(); }, []);
+  // Custom categories (user-defined, persisted to user_settings)
+  const [customCategories, setCustomCategories] = useState<string[]>([]);
+  const [newCategoryInput, setNewCategoryInput] = useState("");
+  const [savingCategory,   setSavingCategory]   = useState(false);
+
+  useEffect(() => { fetchSuppliers(); fetchCustomCategories(); }, []);
+
+  async function fetchCustomCategories() {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const { data } = await supabase
+      .from("user_settings")
+      .select("value")
+      .eq("user_id", user.id)
+      .eq("key", "custom_categories")
+      .single();
+    if (data?.value) {
+      try { setCustomCategories(JSON.parse(data.value)); } catch { /* ignore */ }
+    }
+  }
+
+  async function saveCustomCategories(next: string[]) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    await supabase.from("user_settings").upsert(
+      { user_id: user.id, key: "custom_categories", value: JSON.stringify(next) },
+      { onConflict: "user_id,key" }
+    );
+  }
+
+  async function addCustomCategory() {
+    const normalized = normalizeCategory(newCategoryInput);
+    if (!normalized) return;
+    // Skip if it already exists in built-in or custom
+    if (BUILT_IN_CATEGORIES.includes(normalized) || customCategories.includes(normalized)) {
+      setNewCategoryInput("");
+      // Auto-toggle it on the form so the user sees their existing one selected
+      if (!form.categories.includes(normalized)) toggleCategory(normalized);
+      return;
+    }
+    setSavingCategory(true);
+    const next = [...customCategories, normalized];
+    setCustomCategories(next);
+    await saveCustomCategories(next);
+    // Auto-select the newly-added category for the supplier being edited
+    if (!form.categories.includes(normalized)) toggleCategory(normalized);
+    setNewCategoryInput("");
+    setSavingCategory(false);
+  }
+
+  async function removeCustomCategory(cat: string) {
+    const next = customCategories.filter((c) => c !== cat);
+    setCustomCategories(next);
+    await saveCustomCategories(next);
+    // Also unselect if currently picked on form
+    setForm((f) => ({ ...f, categories: f.categories.filter((c) => c !== cat) }));
+  }
+
+  // Combined list shown in the picker — built-ins first, then user's customs
+  const allCategoryOptions = [...BUILT_IN_CATEGORIES, ...customCategories];
 
   async function fetchSuppliers() {
     setLoading(true);
@@ -221,24 +285,80 @@ export default function SuppliersPage() {
               </div>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-3">
               <Label>Categories this supplier deals in</Label>
+
+              {/* Built-in + custom categories */}
               <div className="flex flex-wrap gap-2">
-                {ALL_CATEGORIES.map((cat) => (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => toggleCategory(cat)}
-                    className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
-                      form.categories.includes(cat)
-                        ? "bg-blue-600 text-white border-blue-600"
-                        : "bg-white text-gray-600 border-gray-200 hover:border-blue-300"
-                    }`}
-                  >
-                    {cat.replace(/_/g, " ")}
-                  </button>
-                ))}
+                {allCategoryOptions.map((cat) => {
+                  const isCustom   = customCategories.includes(cat);
+                  const isSelected = form.categories.includes(cat);
+                  return (
+                    <div key={cat} className="relative group">
+                      <button
+                        type="button"
+                        onClick={() => toggleCategory(cat)}
+                        className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+                          isSelected
+                            ? "bg-blue-600 text-white border-blue-600"
+                            : "bg-white text-gray-600 border-gray-200 hover:border-blue-300"
+                        } ${isCustom ? "pr-7" : ""}`}
+                      >
+                        {cat.replace(/_/g, " ")}
+                      </button>
+                      {/* Remove button — only on user-added categories */}
+                      {isCustom && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (confirm(`Delete custom category "${cat.replace(/_/g, " ")}"? This won't affect existing supplier records.`)) {
+                              removeCustomCategory(cat);
+                            }
+                          }}
+                          title="Remove custom category"
+                          className={`absolute top-1/2 -translate-y-1/2 right-1.5 w-4 h-4 rounded-full flex items-center justify-center transition-colors ${
+                            isSelected ? "text-white/70 hover:bg-white/20" : "text-gray-400 hover:bg-gray-100 hover:text-red-500"
+                          }`}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
+
+              {/* Add new custom category */}
+              <div className="flex items-center gap-2 pt-1">
+                <Input
+                  value={newCategoryInput}
+                  onChange={(e) => setNewCategoryInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addCustomCategory();
+                    }
+                  }}
+                  placeholder="Add a custom category (e.g. Steel, Plywood)"
+                  className="flex-1 h-9 text-sm"
+                />
+                <Button
+                  type="button"
+                  onClick={addCustomCategory}
+                  disabled={savingCategory || !newCategoryInput.trim()}
+                  variant="outline"
+                  size="sm"
+                  className="h-9 gap-1.5 border-blue-200 text-blue-600 hover:bg-blue-50"
+                >
+                  {savingCategory
+                    ? <span className="text-xs">Saving…</span>
+                    : <><Check className="w-3.5 h-3.5" /><span className="text-xs">Add</span></>}
+                </Button>
+              </div>
+              <p className="text-xs text-gray-400">
+                Custom categories are saved permanently to your account. Click the × on any custom one to remove it.
+              </p>
             </div>
 
             <div className="flex gap-3">
