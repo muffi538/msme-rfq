@@ -230,7 +230,7 @@ export default function RfqsClient({ rfqs: initial }: { rfqs: Rfq[] }) {
               {hasActiveFilter ? "No RFQs match your filters" : "No RFQs uploaded yet"}
             </p>
             {!hasActiveFilter && (
-              <Link href="/rfqs/upload" target="_blank" rel="noopener noreferrer" className="mt-4 text-blue-600 text-sm font-medium hover:underline">
+              <Link href="/rfqs/upload" className="mt-4 text-blue-600 text-sm font-medium hover:underline">
                 Upload your first RFQ →
               </Link>
             )}
@@ -252,9 +252,8 @@ export default function RfqsClient({ rfqs: initial }: { rfqs: Rfq[] }) {
               {filtered.map((rfq) => (
                 <tr key={rfq.id} className="hover:bg-gray-50 transition-colors group">
                   <td className="px-6 py-3 font-semibold text-blue-600">
-                    <Link href={`/rfqs/${rfq.id}`} target="_blank" className="hover:underline flex items-center gap-1 group">
+                    <Link href={`/rfqs/${rfq.id}`} className="hover:underline flex items-center gap-1 group">
                       {rfq.rfq_code}
-                      <svg className="w-3 h-3 text-gray-300 group-hover:text-blue-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
                     </Link>
                   </td>
                   <td className="px-6 py-3">

@@ -144,8 +144,20 @@ export default function InboxPage() {
   const [processing,   setProcessing]   = useState<Record<string, boolean>>({});
   const [justDone,     setJustDone]     = useState<Record<string, boolean>>({});
   const [labels,       setLabels]       = useState<Record<string, RfqLabel>>({});
-  const [activeFilter, setActiveFilter] = useState<FilterTab>("all");
-  const [viewMode,     setViewMode]     = useState<ViewMode>("all");
+  // ── Persist filter + view-mode in sessionStorage so navigating away and
+  // coming back keeps the user on the tab they left on (no jarring reset).
+  const [activeFilter, setActiveFilter] = useState<FilterTab>(() => {
+    if (typeof window === "undefined") return "all";
+    return (sessionStorage.getItem("inbox.activeFilter") as FilterTab) || "all";
+  });
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    if (typeof window === "undefined") return "all";
+    return (sessionStorage.getItem("inbox.viewMode") as ViewMode) || "all";
+  });
+
+  useEffect(() => { sessionStorage.setItem("inbox.activeFilter", activeFilter); }, [activeFilter]);
+  useEffect(() => { sessionStorage.setItem("inbox.viewMode",     viewMode);     }, [viewMode]);
+
   const [gmailEmail,   setGmailEmail]   = useState<string | null>(null);
   const [gmailLoading, setGmailLoading] = useState(true);
 
@@ -612,7 +624,6 @@ export default function InboxPage() {
                   {/* Clickable area */}
                   <Link
                     href={`/rfqs/${rfq.id}`}
-                    target="_blank"
                     className="flex items-center gap-3 min-w-0 flex-1"
                   >
                     <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />

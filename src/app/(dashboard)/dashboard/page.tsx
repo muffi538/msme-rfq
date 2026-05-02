@@ -183,8 +183,6 @@ export default async function DashboardPage() {
             <Link
               key={s.label}
               href={s.href}
-              target="_blank"
-              rel="noopener noreferrer"
               className="bg-card hover:bg-accent/40 transition-colors p-7 flex flex-col gap-4 group"
             >
               <div className="flex items-center justify-between">
@@ -215,8 +213,6 @@ export default async function DashboardPage() {
             </div>
             <Link
               href="/rfqs"
-              target="_blank"
-              rel="noopener noreferrer"
               className="text-xs text-muted-foreground hover:text-[#1847F5] flex items-center gap-1 transition-colors font-medium"
             >
               View all <ArrowRight className="w-3 h-3" />
@@ -230,8 +226,6 @@ export default async function DashboardPage() {
               <p className="text-muted-foreground/70 text-xs mt-1 mb-5">Upload your first RFQ to get started</p>
               <Link
                 href="/rfqs/upload"
-                target="_blank"
-                rel="noopener noreferrer"
                 className="bg-[#1847F5] hover:bg-[#0f35d4] text-white text-xs font-semibold px-5 py-2.5 rounded-full transition-colors shadow-[0_2px_8px_rgba(24,71,245,0.35)]"
               >
                 Upload RFQ
@@ -252,7 +246,7 @@ export default async function DashboardPage() {
                 {recentRfqs.map((rfq) => (
                   <tr key={rfq.id} className="hover:bg-accent/40 transition-colors">
                     <td className="px-7 py-4 font-semibold text-[#1847F5]">
-                      <Link href={`/rfqs/${rfq.id}`} target="_blank" className="hover:underline underline-offset-2">
+                      <Link href={`/rfqs/${rfq.id}`} className="hover:underline underline-offset-2">
                         {rfq.rfq_code}
                       </Link>
                     </td>
