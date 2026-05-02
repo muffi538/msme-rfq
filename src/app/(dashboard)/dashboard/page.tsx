@@ -23,7 +23,7 @@ export default async function DashboardPage() {
 
   const stats = [
     { label: "Total RFQs",  value: totalRfqs ?? 0,     icon: FileText,    href: "/rfqs",       num: "01" },
-    { label: "Processed",   value: processedRfqs ?? 0, icon: CheckCircle, href: "/rfqs",       num: "02" },
+    { label: "Completed",   value: processedRfqs ?? 0, icon: CheckCircle, href: "/rfqs",       num: "02" },
     { label: "Quotes Sent", value: sentCount ?? 0,     icon: Send,        href: "/rfqs",       num: "03" },
     { label: "Suppliers",   value: totalSuppliers ?? 0,icon: Users,       href: "/suppliers",  num: "04" },
   ];

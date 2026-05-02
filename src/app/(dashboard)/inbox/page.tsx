@@ -255,7 +255,7 @@ export default function InboxPage() {
       const res  = await fetch("/api/rfqs/sample", { method: "POST" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Could not create sample");
-      toast.success(`Sample RFQ created — click "Run AI" to try it out.`);
+      toast.success(`Sample RFQ created — click "Process it" to try it out.`);
       await loadAll();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Something went wrong";
@@ -391,7 +391,7 @@ export default function InboxPage() {
                 {gmailLoading
                   ? "Checking Gmail connection…"
                   : gmailEmail
-                  ? <>Connected to <span className="font-medium text-foreground">{gmailEmail}</span> · Step 1: Fetch · Step 2: Run AI → review → send</>
+                  ? <>Connected to <span className="font-medium text-foreground">{gmailEmail}</span> · Step 1: Fetch · Step 2: Process it → review → send</>
                   : "Not connected — connect your Gmail to start fetching RFQs"}
               </p>
             </div>
@@ -441,7 +441,7 @@ export default function InboxPage() {
               <CheckCircle className="w-4 h-4 flex-shrink-0" />
               {fetchResults.length === 0
                 ? "Inbox is up to date — no new emails."
-                : `${fetchResults.length} new email${fetchResults.length > 1 ? "s" : ""} fetched. Run AI below.`}
+                : `${fetchResults.length} new email${fetchResults.length > 1 ? "s" : ""} fetched. Process them below.`}
             </div>
           )}
         </div>
@@ -453,7 +453,7 @@ export default function InboxPage() {
               { key: "all",     label: "All",        count: pending.length + done.length, badge: "[#1847F5]" },
               { key: "new",     label: "New mail",   count: newMail.length,                badge: "blue"      },
               { key: "process", label: "Process it", count: processIt.length,              badge: "orange"    },
-              { key: "done",    label: "Processed",  count: done.length,                   badge: "green"     },
+              { key: "done",    label: "Completed",  count: done.length,                   badge: "green"     },
             ] as { key: ViewMode; label: string; count: number; badge: string }[]).map(({ key, label, count, badge }) => {
               const badgeStyle =
                 badge === "blue"   ? "bg-blue-100 text-blue-700"
@@ -528,7 +528,7 @@ export default function InboxPage() {
                 <div className="h-4 w-px bg-orange-400" />
                 <Sparkles className="w-3.5 h-3.5 text-orange-500" />
                 <span className="font-semibold text-card-foreground text-sm tracking-tight">
-                  {viewMode === "new" ? "New Mail (last 24h)" : viewMode === "process" ? "Process it (older)" : "Need AI Processing"}
+                  {viewMode === "new" ? "New Mail (last 24h)" : viewMode === "process" ? "Process it (older)" : "Needs processing"}
                 </span>
                 <span className="text-[11px] bg-orange-50 text-orange-600 border border-orange-200 px-2 py-0.5 rounded-full font-semibold">
                   {visiblePending.length}
@@ -579,7 +579,7 @@ export default function InboxPage() {
                       >
                         {processing[rfq.id]
                           ? <><Loader2 className="w-3 h-3 animate-spin" />Processing…</>
-                          : <><Sparkles className="w-3 h-3" />Run AI<ArrowRight className="w-3 h-3" /></>}
+                          : <><Sparkles className="w-3 h-3" />Process it<ArrowRight className="w-3 h-3" /></>}
                       </Button>
                     )}
                   </div>
@@ -597,13 +597,13 @@ export default function InboxPage() {
                 <div className="h-4 w-px bg-green-400" />
                 <CheckCircle className="w-3.5 h-3.5 text-green-500" />
                 <span className="font-semibold text-card-foreground text-sm tracking-tight">
-                  Processed
+                  Completed
                 </span>
                 <span className="text-[11px] bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded-full font-semibold">
                   {filteredDone.length}
                 </span>
               </div>
-              <span className="text-[11px] text-muted-foreground font-medium uppercase tracking-widest hidden sm:block">AI has run</span>
+              <span className="text-[11px] text-muted-foreground font-medium uppercase tracking-widest hidden sm:block">Done</span>
             </div>
 
             <div className="divide-y divide-border">
