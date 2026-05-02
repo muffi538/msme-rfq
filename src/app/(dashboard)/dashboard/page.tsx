@@ -85,7 +85,7 @@ export default async function DashboardPage() {
               {/* Steps */}
               <ol className="mt-3 flex flex-wrap gap-x-6 gap-y-1">
                 {[
-                  "Click "Connect Gmail" →",
+                  'Click "Connect Gmail" →',
                   "Choose your Google account",
                   "Allow inbox access",
                   "Done — RFQs flow in automatically",
