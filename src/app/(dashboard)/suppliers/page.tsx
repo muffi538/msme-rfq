@@ -50,6 +50,25 @@ export default function SuppliersPage() {
   const [newCategoryInput, setNewCategoryInput] = useState("");
   const [savingCategory,   setSavingCategory]   = useState(false);
 
+  // Standalone "Manage Categories" modal (separate from the supplier form)
+  const [categoriesModalOpen, setCategoriesModalOpen] = useState(false);
+  const [modalCategoryInput,  setModalCategoryInput]  = useState("");
+
+  async function addCategoryFromModal() {
+    const normalized = normalizeCategory(modalCategoryInput);
+    if (!normalized) return;
+    if (BUILT_IN_CATEGORIES.includes(normalized) || customCategories.includes(normalized)) {
+      setModalCategoryInput("");
+      return;
+    }
+    setSavingCategory(true);
+    const next = [...customCategories, normalized];
+    setCustomCategories(next);
+    await saveCustomCategories(next);
+    setModalCategoryInput("");
+    setSavingCategory(false);
+  }
+
   useEffect(() => { fetchSuppliers(); fetchCustomCategories(); }, []);
 
   async function fetchCustomCategories() {
@@ -198,7 +217,7 @@ export default function SuppliersPage() {
 
   return (
     <>
-      <DashboardHeader title="Suppliers" />
+      <DashboardHeader title="Suppliers & Categories" />
       <main className="flex-1 p-8 space-y-6">
 
         {/* Delete confirmation modal */}
@@ -239,11 +258,123 @@ export default function SuppliersPage() {
 
         {/* Top bar */}
         <div className="flex items-center justify-between">
-          <p className="text-gray-500 text-sm">{suppliers.length} suppliers</p>
-          <Button onClick={openAdd} className="bg-blue-600 hover:bg-blue-700 text-white gap-2">
-            <Plus className="w-4 h-4" /> Add Supplier
-          </Button>
+          <p className="text-gray-500 text-sm">
+            {suppliers.length} suppliers · {customCategories.length} custom categor{customCategories.length === 1 ? "y" : "ies"}
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={() => setCategoriesModalOpen(true)}
+              variant="outline"
+              className="border-blue-200 text-blue-600 hover:bg-blue-50 gap-2"
+            >
+              <Plus className="w-4 h-4" /> Add Category
+            </Button>
+            <Button onClick={openAdd} className="bg-blue-600 hover:bg-blue-700 text-white gap-2">
+              <Plus className="w-4 h-4" /> Add Supplier
+            </Button>
+          </div>
         </div>
+
+        {/* Manage Categories modal */}
+        {categoriesModalOpen && (
+          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-xl p-6 max-w-lg w-full space-y-5">
+
+              {/* Header */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="font-semibold text-gray-900 text-lg">Manage Categories</h3>
+                  <p className="text-sm text-gray-500 mt-0.5">
+                    Add categories that fit your business. Saved permanently.
+                  </p>
+                </div>
+                <button
+                  onClick={() => { setCategoriesModalOpen(false); setModalCategoryInput(""); }}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Add input */}
+              <div className="flex items-center gap-2">
+                <Input
+                  value={modalCategoryInput}
+                  onChange={(e) => setModalCategoryInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addCategoryFromModal();
+                    }
+                  }}
+                  placeholder="e.g. Steel, Plywood, Cement"
+                  className="flex-1 h-10"
+                  autoFocus
+                />
+                <Button
+                  onClick={addCategoryFromModal}
+                  disabled={savingCategory || !modalCategoryInput.trim()}
+                  className="bg-blue-600 hover:bg-blue-700 text-white gap-1.5 h-10"
+                >
+                  {savingCategory ? "Saving…" : <><Check className="w-3.5 h-3.5" />Add</>}
+                </Button>
+              </div>
+
+              {/* Built-in section */}
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Built-in (always available)</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {BUILT_IN_CATEGORIES.map((cat) => (
+                    <span key={cat} className="text-xs px-2.5 py-1 rounded-full bg-gray-100 text-gray-600 font-medium">
+                      {cat.replace(/_/g, " ")}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Custom section */}
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest">
+                  Your custom categories ({customCategories.length})
+                </p>
+                {customCategories.length === 0 ? (
+                  <p className="text-sm text-gray-400 italic">
+                    None yet — add one above. Custom categories appear in the supplier form alongside the built-ins.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5">
+                    {customCategories.map((cat) => (
+                      <div key={cat} className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 font-medium pr-1.5">
+                        {cat.replace(/_/g, " ")}
+                        <button
+                          onClick={() => {
+                            if (confirm(`Delete custom category "${cat.replace(/_/g, " ")}"? This won't affect existing supplier records.`)) {
+                              removeCustomCategory(cat);
+                            }
+                          }}
+                          className="w-4 h-4 rounded-full flex items-center justify-center hover:bg-blue-100 transition-colors"
+                          title="Remove"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="pt-2">
+                <Button
+                  onClick={() => { setCategoriesModalOpen(false); setModalCategoryInput(""); }}
+                  variant="outline"
+                  className="w-full"
+                >
+                  Done
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Add / Edit form */}
         {formMode !== null && (
