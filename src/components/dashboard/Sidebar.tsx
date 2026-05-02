@@ -72,7 +72,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
       {/* Logo */}
       <div className="h-16 flex items-center border-b border-gray-800 flex-shrink-0 px-4">
         <div className="w-8 h-8 bg-[#1847F5] rounded-lg flex items-center justify-center flex-shrink-0">
-          <span className="text-white font-bold text-sm">R</span>
+          <span className="text-white font-bold text-sm">P</span>
         </div>
         <span
           className={cn(
@@ -80,7 +80,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
             collapsed ? "opacity-0 w-0 ml-0 overflow-hidden" : "opacity-100"
           )}
         >
-          RFQ Flow
+          Procur.AI
         </span>
       </div>
 

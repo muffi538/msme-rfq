@@ -114,7 +114,7 @@ export async function POST(request: NextRequest) {
     .select("key, value")
     .eq("user_id", user.id)
     .in("key", ["company_name"]);
-  const companyName = settingRows?.find((r) => r.key === "company_name")?.value ?? "RFQ Flow";
+  const companyName = settingRows?.find((r) => r.key === "company_name")?.value ?? "Procur.AI";
 
   const contentType = request.headers.get("content-type") ?? "";
 

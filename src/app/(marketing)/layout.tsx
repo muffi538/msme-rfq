@@ -11,9 +11,9 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
 
             <div className="flex items-center gap-2.5">
               <div className="w-7 h-7 bg-[#1847F5] rounded-md flex items-center justify-center shadow-[0_2px_8px_rgba(24,71,245,0.4)]">
-                <span className="text-white font-black text-xs">R</span>
+                <span className="text-white font-black text-xs">P</span>
               </div>
-              <span className="font-bold text-[#faf4eb] text-sm tracking-tight">RFQ Flow</span>
+              <span className="font-bold text-[#faf4eb] text-sm tracking-tight">Procur.AI</span>
             </div>
 
             <div className="flex items-center gap-8 text-sm text-[#5a4e3f]">
@@ -24,7 +24,7 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
             </div>
 
             <p className="text-[#3a2e20] text-sm">
-              © {new Date().getFullYear()} RFQ Flow
+              © {new Date().getFullYear()} Procur.AI
             </p>
           </div>
         </div>

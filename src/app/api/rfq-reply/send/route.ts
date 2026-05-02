@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
     .eq("user_id", user.id)
     .in("key", ["company_name", "gmail_refresh_token"]);
 
-  const companyName    = settingRows?.find((r) => r.key === "company_name")?.value    ?? "RFQ Flow";
+  const companyName    = settingRows?.find((r) => r.key === "company_name")?.value    ?? "Procur.AI";
   const gmailToken     = settingRows?.find((r) => r.key === "gmail_refresh_token")?.value;
 
   if (!gmailToken) {

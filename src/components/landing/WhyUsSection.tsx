@@ -53,7 +53,7 @@ export default function WhyUsSection() {
           <div className="flex items-center justify-between text-[11px] font-semibold tracking-[0.15em] text-[#9a8674] uppercase mb-4">
             <div className="flex items-center gap-4">
               <div className="h-px w-12 bg-[#c5b5a0]" />
-              <span>Chapter 02 — Why RFQ Flow</span>
+              <span>Chapter 02 — Why Procur.AI</span>
             </div>
           </div>
           <div className="h-px bg-[#e0d5c5] mb-16" />

@@ -134,7 +134,7 @@ function LoginForm() {
       <Card className="w-full max-w-md shadow-lg border-border">
         <CardHeader className="pb-4">
           <CardTitle className="text-2xl font-bold text-card-foreground">Welcome back</CardTitle>
-          <CardDescription>Sign in to your RFQ Flow account</CardDescription>
+          <CardDescription>Sign in to your Procur.AI account</CardDescription>
         </CardHeader>
 
         <CardContent className="space-y-5">

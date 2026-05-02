@@ -44,10 +44,10 @@ export default function Navbar() {
               boxShadow: "0 2px 8px rgba(24,71,245,0.4)",
             }}
           >
-            <span style={{ color: "white", fontWeight: 900, fontSize: "14px" }}>R</span>
+            <span style={{ color: "white", fontWeight: 900, fontSize: "14px" }}>P</span>
           </div>
           <span style={{ fontWeight: 700, color: "#1a1209", fontSize: "15px", letterSpacing: "-0.02em" }}>
-            RFQ Flow
+            Procur.AI
           </span>
         </div>
 

@@ -64,7 +64,7 @@ export default function AdminPage() {
         <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100">
             <h2 className="font-semibold text-gray-900">Signed-up Users</h2>
-            <p className="text-sm text-gray-500 mt-0.5">Every account that has registered on RFQ Flow</p>
+            <p className="text-sm text-gray-500 mt-0.5">Every account that has registered on Procur.AI</p>
           </div>
 
           {loading && (

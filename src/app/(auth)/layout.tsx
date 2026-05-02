@@ -14,9 +14,9 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
               boxShadow: "0 2px 8px rgba(24,71,245,0.4)",
             }}
           >
-            <span style={{ color: "white", fontWeight: 900, fontSize: 14 }}>R</span>
+            <span style={{ color: "white", fontWeight: 900, fontSize: 14 }}>P</span>
           </div>
-          <span className="font-bold text-[#1a1209] text-[15px] tracking-tight">RFQ Flow</span>
+          <span className="font-bold text-[#1a1209] text-[15px] tracking-tight">Procur.AI</span>
         </Link>
       </div>
 

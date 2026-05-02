@@ -95,7 +95,7 @@ export async function GET(request: NextRequest) {
         `Open the dashboard to run AI and split them to suppliers:`,
         `https://msme-rfq.vercel.app/inbox`,
         ``,
-        `— RFQ Flow`,
+        `— Procur.AI`,
         `(This digest is sent once a day at 9 AM. To stop receiving it, reply STOP.)`,
       ].join("\n");
 
@@ -103,7 +103,7 @@ export async function GET(request: NextRequest) {
         to: userEmail,
         subject,
         body,
-        fromName: "RFQ Flow Digest",
+        fromName: "Procur.AI Digest",
         refreshToken: row.value,
       });
 

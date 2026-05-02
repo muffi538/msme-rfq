@@ -44,7 +44,7 @@ Sharma Construction Pvt Ltd
       user_id:     user.id,
       rfq_code:    rfqCode,
       buyer_name:  "Ramesh Sharma (Sample)",
-      buyer_email: "sample@rfqflow.app",
+      buyer_email: "sample@procur.ai",
       file_name:   `sample:${Date.now()}`,
       file_type:   "text",
       raw_text:    sampleText,

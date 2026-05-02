@@ -22,7 +22,7 @@ const playfair = Playfair_Display({
 });
 
 export const metadata: Metadata = {
-  title: "RFQ Flow — MSME RFQ Automation",
+  title: "Procur.AI — MSME RFQ Automation",
   description: "Turn RFQs into supplier-ready quotes in seconds",
 };
 

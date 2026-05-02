@@ -101,7 +101,7 @@ export default function SignupPage() {
     <Card className="w-full max-w-md shadow-lg border-border">
       <CardHeader className="pb-4">
         <CardTitle className="text-2xl font-bold text-card-foreground">Create your account</CardTitle>
-        <CardDescription>Join RFQ Flow — start automating in minutes</CardDescription>
+        <CardDescription>Join Procur.AI — start automating in minutes</CardDescription>
       </CardHeader>
 
       <CardContent className="space-y-5">
