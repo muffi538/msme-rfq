@@ -10,7 +10,6 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import {
   Loader2, ArrowRight, AlertCircle,
   Mail, Lock, LogIn,
-  UserCircle2, Inbox, Zap,
 } from "lucide-react";
 
 function GoogleIcon() {
@@ -23,29 +22,6 @@ function GoogleIcon() {
     </svg>
   );
 }
-
-const STEPS = [
-  {
-    icon: LogIn,
-    title: "Sign in",
-    desc: "Use Google for instant access, or enter your email and password.",
-  },
-  {
-    icon: UserCircle2,
-    title: "Your profile",
-    desc: "Company name and contact details — takes 30 seconds.",
-  },
-  {
-    icon: Inbox,
-    title: "Connect Gmail",
-    desc: "Link your inbox so RFQs are read automatically.",
-  },
-  {
-    icon: Zap,
-    title: "Go live",
-    desc: "Incoming RFQs are parsed and replied to on your behalf.",
-  },
-];
 
 function LoginForm() {
   const searchParams = useSearchParams();
@@ -98,40 +74,7 @@ function LoginForm() {
   }
 
   return (
-    <div className="w-full flex items-start gap-10 max-w-3xl">
-
-      {/* ── Steps panel (desktop only) ── */}
-      <div className="hidden lg:flex flex-col gap-6 w-64 shrink-0 pt-2">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-[#1847F5] mb-1">How it works</p>
-          <h2 className="text-xl font-bold text-[#1a1209] leading-snug">
-            From sign-in to<br />live in minutes
-          </h2>
-        </div>
-
-        <div className="flex flex-col gap-5">
-          {STEPS.map(({ icon: Icon, title, desc }, i) => (
-            <div key={i} className="flex items-start gap-3">
-              {/* Step number + connector */}
-              <div className="flex flex-col items-center">
-                <div className="w-8 h-8 rounded-full bg-[#1847F5]/10 flex items-center justify-center shrink-0">
-                  <Icon className="w-4 h-4 text-[#1847F5]" />
-                </div>
-                {i < STEPS.length - 1 && (
-                  <div className="w-px flex-1 bg-[#1847F5]/20 mt-1 mb-[-8px] min-h-[20px]" />
-                )}
-              </div>
-              <div className="pb-4">
-                <p className="text-sm font-semibold text-[#1a1209]">{title}</p>
-                <p className="text-xs text-[#7a6a52] leading-relaxed mt-0.5">{desc}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Login card ── */}
-      <Card className="w-full max-w-md shadow-lg border-border">
+    <Card className="w-full max-w-md shadow-lg border-border">
         <CardHeader className="pb-4">
           <CardTitle className="text-2xl font-bold text-card-foreground">Welcome back</CardTitle>
           <CardDescription>Sign in to your Procur.AI account</CardDescription>
@@ -225,7 +168,6 @@ function LoginForm() {
 
         </CardContent>
       </Card>
-    </div>
   );
 }
 
