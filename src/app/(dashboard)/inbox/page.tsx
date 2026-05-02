@@ -18,7 +18,7 @@ type PendingRfq  = { id: string; rfq_code: string; buyer_name: string | null; bu
 type DoneRfq     = { id: string; rfq_code: string; buyer_name: string | null; status: string; created_at: string };
 type RfqLabel    = "important" | "waiting_reply" | "in_progress" | "spam";
 type FilterTab   = "all" | RfqLabel;
-type ViewMode    = "all" | "pending" | "done";
+type ViewMode    = "all" | "new" | "process" | "done";
 
 /* ── Label config ───────────────────────────────────────── */
 const LABELS: { value: RfqLabel; emoji: string; label: string; pill: string }[] = [
@@ -313,6 +313,12 @@ export default function InboxPage() {
   };
 
   /* ── Filtered lists ───────────────────────────────────── */
+  // Split pending into "new mail" (last 24h) vs "process it" (older backlog)
+  const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - TWENTY_FOUR_HOURS_MS;
+  const newMail   = pending.filter((r) => r.created_at && new Date(r.created_at).getTime() >= cutoff);
+  const processIt = pending.filter((r) => !(r.created_at && new Date(r.created_at).getTime() >= cutoff));
+
   const filteredPending = activeFilter === "all"
     ? pending
     : pending.filter((r) => labels[r.id] === activeFilter);
@@ -320,6 +326,17 @@ export default function InboxPage() {
   const filteredDone = activeFilter === "all"
     ? done
     : done.filter((r) => labels[r.id] === activeFilter);
+
+  // What pending items show, given the view mode
+  const pendingForView =
+    viewMode === "new"     ? newMail
+    : viewMode === "process" ? processIt
+    : filteredPending;
+
+  // Label-filter on top of view-mode
+  const visiblePending = activeFilter === "all"
+    ? pendingForView
+    : pendingForView.filter((r) => labels[r.id] === activeFilter);
 
   const statusLabel: Record<string, string> = {
     processed: "AI done",
@@ -429,39 +446,41 @@ export default function InboxPage() {
           )}
         </div>
 
-        {/* ── View mode toggle (Pending / Processed) ── */}
+        {/* ── View mode toggle (All / New mail / Process it / Processed) ── */}
         {(pending.length > 0 || done.length > 0) && (
-          <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-full w-fit">
+          <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-full w-fit overflow-x-auto no-scrollbar">
             {([
-              { key: "all",     label: "All",       count: pending.length + done.length },
-              { key: "pending", label: "Need AI",   count: pending.length },
-              { key: "done",    label: "Processed", count: done.length },
-            ] as { key: ViewMode; label: string; count: number }[]).map(({ key, label, count }) => (
-              <button
-                key={key}
-                onClick={() => setViewMode(key)}
-                className={cn(
-                  "flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold transition-all",
-                  viewMode === key
-                    ? "bg-card text-[#1a1209] shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {label}
-                <span className={cn(
-                  "text-[11px] px-1.5 py-0.5 rounded-full font-bold",
-                  viewMode === key
-                    ? key === "pending"
-                      ? "bg-orange-100 text-orange-700"
-                      : key === "done"
-                        ? "bg-green-100 text-green-700"
-                        : "bg-[#1847F5]/10 text-[#1847F5]"
-                    : "bg-muted text-muted-foreground"
-                )}>
-                  {count}
-                </span>
-              </button>
-            ))}
+              { key: "all",     label: "All",        count: pending.length + done.length, badge: "[#1847F5]" },
+              { key: "new",     label: "New mail",   count: newMail.length,                badge: "blue"      },
+              { key: "process", label: "Process it", count: processIt.length,              badge: "orange"    },
+              { key: "done",    label: "Processed",  count: done.length,                   badge: "green"     },
+            ] as { key: ViewMode; label: string; count: number; badge: string }[]).map(({ key, label, count, badge }) => {
+              const badgeStyle =
+                badge === "blue"   ? "bg-blue-100 text-blue-700"
+                : badge === "orange" ? "bg-orange-100 text-orange-700"
+                : badge === "green"  ? "bg-green-100 text-green-700"
+                : "bg-[#1847F5]/10 text-[#1847F5]";
+              return (
+                <button
+                  key={key}
+                  onClick={() => setViewMode(key)}
+                  className={cn(
+                    "flex-shrink-0 flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold transition-all",
+                    viewMode === key
+                      ? "bg-card text-[#1a1209] shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {label}
+                  <span className={cn(
+                    "text-[11px] px-1.5 py-0.5 rounded-full font-bold",
+                    viewMode === key ? badgeStyle : "bg-muted text-muted-foreground"
+                  )}>
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -501,25 +520,25 @@ export default function InboxPage() {
           </div>
         )}
 
-        {/* ── Pending — AI not yet run ── */}
-        {filteredPending.length > 0 && viewMode !== "done" && (
+        {/* ── Pending — AI not yet run (shown in All / New mail / Process it views) ── */}
+        {visiblePending.length > 0 && viewMode !== "done" && (
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
             <div className="px-5 py-4 border-b border-border flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="h-4 w-px bg-orange-400" />
                 <Sparkles className="w-3.5 h-3.5 text-orange-500" />
                 <span className="font-semibold text-card-foreground text-sm tracking-tight">
-                  Need AI Processing
+                  {viewMode === "new" ? "New Mail (last 24h)" : viewMode === "process" ? "Process it (older)" : "Need AI Processing"}
                 </span>
                 <span className="text-[11px] bg-orange-50 text-orange-600 border border-orange-200 px-2 py-0.5 rounded-full font-semibold">
-                  {filteredPending.length}
+                  {visiblePending.length}
                 </span>
               </div>
               <span className="text-[11px] text-muted-foreground font-medium uppercase tracking-widest hidden sm:block">Newest first</span>
             </div>
 
             <div className="divide-y divide-border">
-              {filteredPending.map((rfq) => (
+              {visiblePending.map((rfq) => (
                 <div
                   key={rfq.id}
                   className={cn(
@@ -570,8 +589,8 @@ export default function InboxPage() {
           </div>
         )}
 
-        {/* ── Done — AI already ran ── */}
-        {filteredDone.length > 0 && viewMode !== "pending" && (
+        {/* ── Done — AI already ran (only shows in All / Processed views) ── */}
+        {filteredDone.length > 0 && (viewMode === "all" || viewMode === "done") && (
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
             <div className="px-5 py-4 border-b border-border flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -632,6 +651,19 @@ export default function InboxPage() {
             <Tag className="w-8 h-8 mx-auto mb-3 opacity-30" />
             <p className="font-medium">No emails labelled &quot;{LABELS.find((l) => l.value === activeFilter)?.label}&quot;</p>
             <p className="text-sm mt-1 opacity-70">Use the label button on any email to tag it</p>
+          </div>
+        )}
+
+        {/* Empty state when current view-mode has no items */}
+        {pending.length + done.length > 0 && visiblePending.length === 0 && (viewMode === "new" || viewMode === "process") && (
+          <div className="text-center py-12 text-muted-foreground">
+            <CheckCircle className="w-7 h-7 mx-auto mb-2 opacity-30" />
+            <p className="font-medium">
+              {viewMode === "new" ? "Nothing new in the last 24 hours" : "No older backlog — you're caught up!"}
+            </p>
+            <p className="text-sm mt-1 opacity-70">
+              {viewMode === "new" ? "Click \"Fetch New Emails\" to pull the latest." : "All older RFQs have been processed."}
+            </p>
           </div>
         )}
 
