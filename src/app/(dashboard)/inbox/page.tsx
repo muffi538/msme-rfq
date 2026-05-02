@@ -18,6 +18,7 @@ type PendingRfq  = { id: string; rfq_code: string; buyer_name: string | null; bu
 type DoneRfq     = { id: string; rfq_code: string; buyer_name: string | null; status: string; created_at: string };
 type RfqLabel    = "important" | "waiting_reply" | "in_progress" | "spam";
 type FilterTab   = "all" | RfqLabel;
+type ViewMode    = "all" | "pending" | "done";
 
 /* ── Label config ───────────────────────────────────────── */
 const LABELS: { value: RfqLabel; emoji: string; label: string; pill: string }[] = [
@@ -144,6 +145,7 @@ export default function InboxPage() {
   const [justDone,     setJustDone]     = useState<Record<string, boolean>>({});
   const [labels,       setLabels]       = useState<Record<string, RfqLabel>>({});
   const [activeFilter, setActiveFilter] = useState<FilterTab>("all");
+  const [viewMode,     setViewMode]     = useState<ViewMode>("all");
   const [gmailEmail,   setGmailEmail]   = useState<string | null>(null);
   const [gmailLoading, setGmailLoading] = useState(true);
 
@@ -427,6 +429,42 @@ export default function InboxPage() {
           )}
         </div>
 
+        {/* ── View mode toggle (Pending / Processed) ── */}
+        {(pending.length > 0 || done.length > 0) && (
+          <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-full w-fit">
+            {([
+              { key: "all",     label: "All",       count: pending.length + done.length },
+              { key: "pending", label: "Need AI",   count: pending.length },
+              { key: "done",    label: "Processed", count: done.length },
+            ] as { key: ViewMode; label: string; count: number }[]).map(({ key, label, count }) => (
+              <button
+                key={key}
+                onClick={() => setViewMode(key)}
+                className={cn(
+                  "flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold transition-all",
+                  viewMode === key
+                    ? "bg-card text-[#1a1209] shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {label}
+                <span className={cn(
+                  "text-[11px] px-1.5 py-0.5 rounded-full font-bold",
+                  viewMode === key
+                    ? key === "pending"
+                      ? "bg-orange-100 text-orange-700"
+                      : key === "done"
+                        ? "bg-green-100 text-green-700"
+                        : "bg-[#1847F5]/10 text-[#1847F5]"
+                    : "bg-muted text-muted-foreground"
+                )}>
+                  {count}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* ── Filter tabs ── */}
         {allItems.length > 0 && (
           <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar">
@@ -464,7 +502,7 @@ export default function InboxPage() {
         )}
 
         {/* ── Pending — AI not yet run ── */}
-        {filteredPending.length > 0 && (
+        {filteredPending.length > 0 && viewMode !== "done" && (
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
             <div className="px-5 py-4 border-b border-border flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -533,7 +571,7 @@ export default function InboxPage() {
         )}
 
         {/* ── Done — AI already ran ── */}
-        {filteredDone.length > 0 && (
+        {filteredDone.length > 0 && viewMode !== "pending" && (
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
             <div className="px-5 py-4 border-b border-border flex items-center justify-between">
               <div className="flex items-center gap-3">
