@@ -44,7 +44,15 @@ export default function SuppliersPage() {
 
   async function fetchSuppliers() {
     setLoading(true);
-    const { data } = await supabase.from("suppliers").select("*").order("name");
+    // Explicit user_id filter — defense-in-depth so each tenant only ever
+    // sees their own suppliers, even if RLS is misconfigured.
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { setSuppliers([]); setLoading(false); return; }
+    const { data } = await supabase
+      .from("suppliers")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("name");
     setSuppliers(data ?? []);
     setLoading(false);
   }

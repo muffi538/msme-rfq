@@ -20,6 +20,25 @@ const PRESET_CATEGORIES = [
 
 const CUSTOM_VALUE = "__CUSTOM__";
 
+/* ── WhatsApp helpers ──────────────────────────────────────────────
+ * normalizePhone: strip non-digits and add India's +91 country code
+ * if the user saved the number without one. wa.me silently fails on
+ * a 10-digit local number — it must be in international form.
+ */
+function normalizePhone(raw: string): string {
+  const digits = raw.replace(/[^0-9]/g, "");
+  if (!digits) return "";
+  // 10-digit Indian mobile → prepend 91
+  if (digits.length === 10) return `91${digits}`;
+  // 11 digits starting with 0 → drop the 0, prepend 91
+  if (digits.length === 11 && digits.startsWith("0")) return `91${digits.slice(1)}`;
+  return digits;
+}
+
+function buildWaUrl(phone: string, message: string): string {
+  return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
+}
+
 const statusStyle: Record<string, string> = {
   draft:       "bg-gray-100 text-gray-600",
   approved:    "bg-blue-100 text-blue-700",
@@ -203,10 +222,18 @@ export default function RfqDetailClient({
     if (!groupModal) return;
     const { outgoingId } = groupModal;
 
-    // Always copy message first so it's ready to paste the moment WhatsApp opens
-    try { await navigator.clipboard.writeText(groupModal.message); } catch { /* ignore */ }
+    // ⚠️ window.open MUST run synchronously inside the click handler — any
+    // `await` before it causes Chrome/Safari to flag it as a programmatic
+    // pop-up and silently block it. So open the group FIRST, do everything
+    // else after.
+    const newWin = window.open(groupModal.groupLink, "_blank", "noopener,noreferrer");
+    if (!newWin) {
+      toast.error("Pop-up blocked — please allow pop-ups for this site, then try again.");
+      return;
+    }
 
-    window.open(groupModal.groupLink, "_blank");
+    // Now safe to do async work
+    try { await navigator.clipboard.writeText(groupModal.message); } catch { /* ignore */ }
 
     toast.success("✅ Message copied! Click the text box in the group and press Ctrl+V to paste.", { duration: 6000 });
 
@@ -232,10 +259,23 @@ export default function RfqDetailClient({
         openGroupModal(outgoingId, groupLink, message ?? "", supplierName ?? "Supplier");
         return;
       } else if (channel === "whatsapp" && whatsappNumber) {
-        const phone = whatsappNumber.replace(/[^0-9]/g, "");
-        const text  = encodeURIComponent(message ?? "");
-        window.open(`https://wa.me/${phone}?text=${text}`, "_blank");
-        toast.success("WhatsApp opened — send the message to complete.");
+        const phone = normalizePhone(whatsappNumber);
+        if (!phone) {
+          toast.error("This supplier has no valid WhatsApp number. Add one in Suppliers.");
+          setSending(null);
+          return;
+        }
+        const newWin = window.open(buildWaUrl(phone, message ?? ""), "_blank", "noopener,noreferrer");
+        if (!newWin) {
+          toast.error("Pop-up blocked — please allow pop-ups for this site, then try again.");
+          setSending(null);
+          return;
+        }
+        toast.success("WhatsApp opened — tap Send in WhatsApp to deliver the message.");
+      } else if (channel === "whatsapp" || channel === "whatsapp_group") {
+        toast.error("This supplier is missing a WhatsApp number or group link. Update them in Suppliers.");
+        setSending(null);
+        return;
       } else {
         toast.info("Email channel — marking as sent.");
       }
