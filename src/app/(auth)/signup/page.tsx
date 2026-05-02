@@ -6,7 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Loader2, Mail, ArrowRight, CheckCircle } from "lucide-react";
+import { Loader2, Mail, Lock, ArrowRight } from "lucide-react";
 
 function GoogleIcon() {
   return (
@@ -19,13 +19,11 @@ function GoogleIcon() {
   );
 }
 
-type View = "form" | "sent";
-
 export default function SignupPage() {
-  const [view,          setView]         = useState<View>("form");
-  const [email,         setEmail]        = useState("");
+  const [email,         setEmail]         = useState("");
+  const [password,      setPassword]      = useState("");
   const [googleLoading, setGoogleLoading] = useState(false);
-  const [magicLoading,  setMagicLoading]  = useState(false);
+  const [loading,       setLoading]       = useState(false);
   const [error,         setError]         = useState("");
 
   /* ── Google OAuth ── */
@@ -43,60 +41,53 @@ export default function SignupPage() {
     if (err) { setError(err.message); setGoogleLoading(false); }
   }
 
-  /* ── Magic link (no password, no OTP) ── */
-  async function handleMagicLink(e: React.FormEvent) {
+  /* ── Email + Password sign-up ── */
+  async function handleEmailSignup(e: React.FormEvent) {
     e.preventDefault();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      setError("Enter a valid email address.");
+      setError("Please enter a valid email address.");
       return;
     }
-    setMagicLoading(true);
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+
+    setLoading(true);
     setError("");
     const supabase = createClient();
-    const { error: err } = await supabase.auth.signInWithOtp({
+
+    const { data, error: err } = await supabase.auth.signUp({
       email,
+      password,
       options: {
         emailRedirectTo: `${window.location.origin}/auth/callback`,
-        shouldCreateUser: true,
       },
     });
-    setMagicLoading(false);
-    if (err) { setError(err.message); return; }
-    setView("sent");
+    setLoading(false);
+
+    if (err) {
+      // Friendlier copy for the most common error
+      if (err.message.toLowerCase().includes("already registered") ||
+          err.message.toLowerCase().includes("user already")) {
+        setError("This email is already registered. Try logging in instead.");
+      } else {
+        setError(err.message);
+      }
+      return;
+    }
+
+    // If a session was returned (Supabase email-confirmation OFF), go straight in
+    if (data.session) {
+      window.location.href = "/onboarding";
+      return;
+    }
+
+    // Otherwise we'd hit confirm-email — but we recommend turning that off in Supabase.
+    // Until then, route them to login with a friendly message.
+    window.location.href = "/login?message=Check+your+email+to+confirm+your+account%2C+then+log+in.";
   }
 
-  /* ── Sent screen ── */
-  if (view === "sent") {
-    return (
-      <Card className="w-full max-w-md shadow-lg border-border">
-        <CardContent className="pt-8 pb-8">
-          <div className="flex flex-col items-center text-center space-y-4">
-            <div className="w-16 h-16 bg-green-50 rounded-2xl flex items-center justify-center">
-              <CheckCircle className="w-8 h-8 text-green-500" />
-            </div>
-            <h2 className="text-xl font-bold text-card-foreground">Check your inbox</h2>
-            <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
-              We sent a sign-in link to{" "}
-              <span className="font-semibold text-card-foreground">{email}</span>.
-              <br /><br />
-              Click it to instantly access your dashboard — no password needed.
-            </p>
-            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-700 text-left w-full">
-              <strong>Can&apos;t find it?</strong> Check your spam folder. The link expires in 1 hour.
-            </div>
-            <button
-              onClick={() => { setView("form"); setError(""); }}
-              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
-            >
-              ← Try a different email
-            </button>
-          </div>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  /* ── Main form ── */
   return (
     <Card className="w-full max-w-md shadow-lg border-border">
       <CardHeader className="pb-4">
@@ -118,21 +109,21 @@ export default function SignupPage() {
             : <><GoogleIcon /><span>Continue with Google</span><ArrowRight className="w-4 h-4" /></>}
         </button>
 
-        <p className="text-center text-xs text-muted-foreground">
-          Instant access — Google verifies your identity. No email confirmation needed.
-        </p>
-
         {/* Divider */}
         <div className="flex items-center gap-3">
           <div className="flex-1 h-px bg-border" />
-          <span className="text-xs text-muted-foreground">or use email</span>
+          <span className="text-xs text-muted-foreground">or sign up with email</span>
           <div className="flex-1 h-px bg-border" />
         </div>
 
-        {/* Magic link form */}
-        <form onSubmit={handleMagicLink} className="space-y-4">
+        {/* Email + password form */}
+        <form onSubmit={handleEmailSignup} className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="email">Work email</Label>
+            <Label htmlFor="email">
+              <span className="flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5" /> Work email
+              </span>
+            </Label>
             <Input
               id="email"
               type="email"
@@ -140,6 +131,22 @@ export default function SignupPage() {
               value={email}
               onChange={(e) => { setEmail(e.target.value); setError(""); }}
               autoComplete="email"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="password">
+              <span className="flex items-center gap-1.5">
+                <Lock className="w-3.5 h-3.5" /> Password
+              </span>
+            </Label>
+            <Input
+              id="password"
+              type="password"
+              placeholder="Min. 8 characters"
+              value={password}
+              onChange={(e) => { setPassword(e.target.value); setError(""); }}
+              autoComplete="new-password"
             />
           </div>
 
@@ -151,17 +158,13 @@ export default function SignupPage() {
 
           <button
             type="submit"
-            disabled={magicLoading}
+            disabled={loading}
             className="w-full h-11 flex items-center justify-center gap-2 rounded-full border border-border bg-background text-sm font-medium text-card-foreground hover:bg-muted/50 transition-all disabled:opacity-60 shadow-sm"
           >
-            {magicLoading
+            {loading
               ? <Loader2 className="w-4 h-4 animate-spin" />
-              : <><Mail className="w-4 h-4" /><span>Send me a sign-in link</span></>}
+              : <><span>Create account</span><ArrowRight className="w-4 h-4" /></>}
           </button>
-
-          <p className="text-center text-xs text-muted-foreground">
-            We&apos;ll email you a one-click link — no password required.
-          </p>
         </form>
 
         <p className="text-center text-sm text-muted-foreground">

@@ -35,14 +35,15 @@ function PasswordChecker({ password }: { password: string }) {
 }
 
 export default function OnboardingPage() {
-  const [fullName,    setFullName]    = useState("");
-  const [companyName, setCompanyName] = useState("");
-  const [password,    setPassword]    = useState("");
-  const [confirmPass, setConfirmPass] = useState("");
-  const [email,       setEmail]       = useState("");
-  const [loading,     setLoading]     = useState(false);
-  const [booting,     setBooting]     = useState(true);
-  const [error,       setError]       = useState("");
+  const [fullName,        setFullName]        = useState("");
+  const [companyName,     setCompanyName]     = useState("");
+  const [password,        setPassword]        = useState("");
+  const [confirmPass,     setConfirmPass]     = useState("");
+  const [email,           setEmail]           = useState("");
+  const [hasPassword,     setHasPassword]     = useState(false);
+  const [loading,         setLoading]         = useState(false);
+  const [booting,         setBooting]         = useState(true);
+  const [error,           setError]           = useState("");
 
   useEffect(() => {
     (async () => {
@@ -63,6 +64,11 @@ export default function OnboardingPage() {
         ""
       );
 
+      // If they signed up via email+password, the 'email' identity is present
+      // and they already have a password — skip the password section entirely.
+      const providers = user.identities?.map((i) => i.provider) ?? [];
+      setHasPassword(providers.includes("email"));
+
       setBooting(false);
     })();
   }, []);
@@ -77,24 +83,31 @@ export default function OnboardingPage() {
 
     if (!fullName.trim())    { setError("Please enter your full name."); return; }
     if (!companyName.trim()) { setError("Please enter your company name."); return; }
-    if (!password)           { setError("Please set a password for your account."); return; }
-    if (!isPasswordStrong(password)) {
-      setError("Password doesn't meet the requirements. Please check the rules below.");
-      return;
+
+    // Password section only enforced for users who DON'T already have one
+    // (i.e. Google OAuth users — email/password signups already set theirs).
+    if (!hasPassword) {
+      if (!password)           { setError("Please set a password for your account."); return; }
+      if (!isPasswordStrong(password)) {
+        setError("Password doesn't meet the requirements. Please check the rules below.");
+        return;
+      }
+      if (password !== confirmPass) { setError("Passwords don't match."); return; }
     }
-    if (password !== confirmPass) { setError("Passwords don't match."); return; }
 
     setLoading(true);
     const supabase = createClient();
 
-    const { error: metaErr } = await supabase.auth.updateUser({
-      password,
+    const updatePayload: Parameters<typeof supabase.auth.updateUser>[0] = {
       data: {
         full_name:           fullName.trim(),
         company_name:        companyName.trim(),
         onboarding_complete: true,
       },
-    });
+    };
+    if (!hasPassword && password) updatePayload.password = password;
+
+    const { error: metaErr } = await supabase.auth.updateUser(updatePayload);
 
     if (metaErr) {
       setError(metaErr.message);
@@ -172,7 +185,8 @@ export default function OnboardingPage() {
             />
           </div>
 
-          {/* Password section */}
+          {/* Password section — skipped for users who already set a password at signup */}
+          {!hasPassword && (
           <div className="space-y-3 pt-1">
             <div className="flex items-center gap-2">
               <div className="flex-1 h-px bg-border" />
@@ -239,6 +253,7 @@ export default function OnboardingPage() {
               </div>
             )}
           </div>
+          )}
 
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-600 text-sm px-3 py-2.5 rounded-xl">
