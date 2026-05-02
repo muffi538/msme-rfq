@@ -135,6 +135,7 @@ function LabelSelector({
 /* ── Main page ──────────────────────────────────────────── */
 export default function InboxPage() {
   const [fetching,     setFetching]     = useState(false);
+  const [creatingSample, setCreatingSample] = useState(false);
   const [fetchResults, setFetchResults] = useState<FetchResult[] | null>(null);
   const [fetchError,   setFetchError]   = useState("");
   const [pending,      setPending]      = useState<PendingRfq[]>([]);
@@ -242,6 +243,23 @@ export default function InboxPage() {
       toast.error(msg);
     } finally {
       setFetching(false);
+    }
+  }
+
+  /* ── Try a sample RFQ (first-run helper) ─────────────── */
+  async function handleSampleRfq() {
+    setCreatingSample(true);
+    try {
+      const res  = await fetch("/api/rfqs/sample", { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Could not create sample");
+      toast.success(`Sample RFQ created — click "Run AI" to try it out.`);
+      await loadAll();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Something went wrong";
+      toast.error(msg);
+    } finally {
+      setCreatingSample(false);
     }
   }
 
@@ -584,7 +602,27 @@ export default function InboxPage() {
           <div className="text-center py-16 text-muted-foreground">
             <Mail className="w-8 h-8 mx-auto mb-3 opacity-30" />
             <p className="font-medium">No emails yet</p>
-            <p className="text-sm mt-1 opacity-70">Click &quot;Fetch New Emails&quot; to pull your Gmail inbox</p>
+            <p className="text-sm mt-1 opacity-70">
+              {gmailEmail
+                ? <>Click &quot;Fetch New Emails&quot; to pull your Gmail inbox</>
+                : <>Connect Gmail above to start pulling RFQs automatically</>}
+            </p>
+
+            {/* Try-a-sample CTA — solves the "I signed up at midnight, no real RFQs yet" problem */}
+            <div className="mt-6 inline-flex flex-col items-center gap-1.5">
+              <button
+                onClick={handleSampleRfq}
+                disabled={creatingSample}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-card border border-[#1847F5]/30 text-[#1847F5] text-sm font-semibold hover:bg-[#1847F5]/5 hover:border-[#1847F5] transition-all disabled:opacity-60"
+              >
+                {creatingSample
+                  ? <><Loader2 className="w-4 h-4 animate-spin" />Creating…</>
+                  : <><Sparkles className="w-4 h-4" />Try with a sample RFQ</>}
+              </button>
+              <p className="text-[11px] opacity-60">
+                Creates a demo RFQ in your account so you can try the full flow now.
+              </p>
+            </div>
           </div>
         )}
 

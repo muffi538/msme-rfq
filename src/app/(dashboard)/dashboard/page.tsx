@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
-import { FileText, CheckCircle, Users, Send, ArrowRight, Mail, AlertCircle } from "lucide-react";
+import { FileText, CheckCircle, Users, Send, ArrowRight, Mail, Sparkles, Circle } from "lucide-react";
 import Link from "next/link";
 
 export default async function DashboardPage() {
@@ -28,7 +28,7 @@ export default async function DashboardPage() {
     { label: "Suppliers",   value: totalSuppliers ?? 0,icon: Users,       href: "/suppliers",  num: "04" },
   ];
 
-  // Check if user has connected Gmail
+  // Setup checklist state — drives the onboarding banner
   const { data: gmailRow } = await supabase
     .from("user_settings")
     .select("value")
@@ -36,6 +36,22 @@ export default async function DashboardPage() {
     .eq("key", "gmail_refresh_token")
     .single();
   const gmailConnected = !!gmailRow?.value;
+
+  const { count: supplierCount } = await supabase
+    .from("suppliers")
+    .select("*", { count: "exact", head: true })
+    .eq("user_id", user.id);
+  const hasSupplier = (supplierCount ?? 0) > 0;
+
+  const { count: processedCount } = await supabase
+    .from("rfqs")
+    .select("*", { count: "exact", head: true })
+    .eq("user_id", user.id)
+    .in("status", ["processed", "approved", "sent"]);
+  const hasProcessedRfq = (processedCount ?? 0) > 0;
+
+  const onboardingDone = gmailConnected && hasSupplier && hasProcessedRfq;
+  const completedSteps = [gmailConnected, hasSupplier, hasProcessedRfq].filter(Boolean).length;
 
   const { data: recentRfqs } = await supabase
     .from("rfqs")
@@ -65,48 +81,95 @@ export default async function DashboardPage() {
           <div className="h-px bg-border" />
         </div>
 
-        {/* ── Gmail connect banner (only when not connected) ── */}
-        {!gmailConnected && (
-          <div className="flex items-start gap-4 bg-[#1847F5]/5 border border-[#1847F5]/20 rounded-2xl px-6 py-5">
-            {/* Icon */}
-            <div className="w-10 h-10 bg-[#1847F5]/10 rounded-xl flex items-center justify-center shrink-0 mt-0.5">
-              <Mail className="w-5 h-5 text-[#1847F5]" />
-            </div>
-
-            {/* Text */}
-            <div className="flex-1 min-w-0">
-              <p className="font-semibold text-[#1a1209] text-sm">
-                Connect your Gmail to start receiving RFQs
-              </p>
-              <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-                Link your inbox so incoming RFQ emails are automatically read, parsed, and ready to action — right from this dashboard.
-              </p>
-
-              {/* Steps */}
-              <ol className="mt-3 flex flex-wrap gap-x-6 gap-y-1">
-                {[
-                  'Click "Connect Gmail" →',
-                  "Choose your Google account",
-                  "Allow inbox access",
-                  "Done — RFQs flow in automatically",
-                ].map((step, i) => (
-                  <li key={i} className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <span className="w-4 h-4 rounded-full bg-[#1847F5]/15 text-[#1847F5] font-bold text-[10px] flex items-center justify-center shrink-0">
-                      {i + 1}
-                    </span>
-                    {step}
-                  </li>
+        {/* ── Onboarding checklist (hides once all 3 steps are complete) ── */}
+        {!onboardingDone && (
+          <div className="bg-[#1847F5]/5 border border-[#1847F5]/20 rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <p className="font-semibold text-[#1a1209] text-sm">
+                  Get set up in 3 steps
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {completedSteps} of 3 done — you&apos;re almost there.
+                </p>
+              </div>
+              {/* Progress pills */}
+              <div className="flex gap-1">
+                {[0, 1, 2].map((i) => (
+                  <div
+                    key={i}
+                    className={`h-1.5 w-8 rounded-full ${i < completedSteps ? "bg-[#1847F5]" : "bg-[#1847F5]/15"}`}
+                  />
                 ))}
-              </ol>
+              </div>
             </div>
 
-            {/* CTA */}
-            <Link
-              href="/inbox"
-              className="shrink-0 flex items-center gap-2 bg-[#1847F5] hover:bg-[#0f35d4] text-white text-xs font-semibold px-4 py-2.5 rounded-full shadow-[0_2px_10px_rgba(24,71,245,0.35)] transition-all whitespace-nowrap"
-            >
-              Connect Gmail <ArrowRight className="w-3.5 h-3.5" />
-            </Link>
+            <div className="space-y-2">
+              {[
+                {
+                  done:  gmailConnected,
+                  icon:  Mail,
+                  title: "Connect your Gmail",
+                  desc:  "Link your inbox so incoming RFQ emails arrive here automatically.",
+                  href:  "/inbox",
+                  cta:   "Connect Gmail",
+                },
+                {
+                  done:  hasSupplier,
+                  icon:  Users,
+                  title: "Add your first supplier",
+                  desc:  "RFQs get split and sent to suppliers based on item categories.",
+                  href:  "/suppliers",
+                  cta:   "Add suppliers",
+                },
+                {
+                  done:  hasProcessedRfq,
+                  icon:  Sparkles,
+                  title: "Process your first RFQ",
+                  desc:  "Run the AI on any email to extract items and generate supplier messages.",
+                  href:  "/inbox",
+                  cta:   "Open inbox",
+                },
+              ].map((step) => {
+                const Icon = step.icon;
+                return (
+                  <div
+                    key={step.title}
+                    className={`flex items-center gap-3 p-3 rounded-xl transition-colors ${step.done ? "bg-green-50/50" : "bg-card hover:bg-card/80"}`}
+                  >
+                    {/* Status circle */}
+                    <div className="shrink-0">
+                      {step.done
+                        ? <CheckCircle className="w-5 h-5 text-green-500" />
+                        : <Circle      className="w-5 h-5 text-[#1847F5]/30" />}
+                    </div>
+
+                    {/* Icon */}
+                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${step.done ? "bg-green-100" : "bg-[#1847F5]/10"}`}>
+                      <Icon className={`w-4 h-4 ${step.done ? "text-green-600" : "text-[#1847F5]"}`} />
+                    </div>
+
+                    {/* Content */}
+                    <div className="flex-1 min-w-0">
+                      <p className={`font-semibold text-sm ${step.done ? "text-green-700 line-through decoration-1" : "text-[#1a1209]"}`}>
+                        {step.title}
+                      </p>
+                      <p className="text-xs text-muted-foreground truncate">{step.desc}</p>
+                    </div>
+
+                    {/* CTA — hidden once done */}
+                    {!step.done && (
+                      <Link
+                        href={step.href}
+                        className="shrink-0 flex items-center gap-1.5 bg-[#1847F5] hover:bg-[#0f35d4] text-white text-xs font-semibold px-3.5 py-2 rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.3)] transition-all whitespace-nowrap"
+                      >
+                        {step.cta} <ArrowRight className="w-3 h-3" />
+                      </Link>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
