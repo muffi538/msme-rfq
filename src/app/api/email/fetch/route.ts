@@ -3,14 +3,9 @@ import { createClient } from "@/lib/supabase/server";
 import { fetchUnreadEmails } from "@/lib/email/gmail";
 import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
+import { generateRfqCode } from "@/lib/rfq";
 
 export const maxDuration = 60;
-
-function generateRfqCode(): string {
-  const year = new Date().getFullYear();
-  const seq  = Math.floor(Math.random() * 90000) + 10000;
-  return `RFQ-${year}-${seq}`;
-}
 
 function detectType(mime: string, filename: string): "pdf" | "excel" | "image" | "text" | null {
   if (mime.includes("pdf") || filename.endsWith(".pdf"))                       return "pdf";
@@ -135,7 +130,7 @@ export async function POST() {
         fileType = "text";
       }
 
-      const rfqCode = generateRfqCode();
+      const rfqCode = await generateRfqCode(supabase, user.id);
       const { data: rfq } = await supabase
         .from("rfqs")
         .insert({

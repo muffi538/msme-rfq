@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { generateRfqCode } from "@/lib/rfq";
 
 /**
  * Creates a realistic-looking sample RFQ in the user's account so first-time
@@ -11,9 +12,7 @@ export async function POST() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
-  const year = new Date().getFullYear();
-  const seq  = Math.floor(Math.random() * 90000) + 10000;
-  const rfqCode = `RFQ-${year}-${seq}`;
+  const rfqCode = await generateRfqCode(supabase, user.id);
 
   const sampleText = `
 Subject: Quotation Required — Site Hardware Order

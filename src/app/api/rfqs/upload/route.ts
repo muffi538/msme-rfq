@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { normalizeAndCategorize } from "@/lib/ai/normalize";
+import { generateRfqCode } from "@/lib/rfq";
 
 async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Promise<string> {
   const base64 = buffer.toString("base64");
@@ -28,13 +29,6 @@ async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Promise<s
   });
   const json = await res.json();
   return json.choices?.[0]?.message?.content ?? "";
-}
-
-// Generate sequential RFQ code like RFQ-2026-00001
-function generateRfqCode(): string {
-  const year = new Date().getFullYear();
-  const seq = Math.floor(Math.random() * 90000) + 10000;
-  return `RFQ-${year}-${seq}`;
 }
 
 function detectFileType(filename: string, mime: string): "pdf" | "excel" | "image" | "text" {
@@ -93,7 +87,7 @@ export async function POST(request: NextRequest) {
     });
 
     // 3 — Insert RFQ row
-    const rfqCode = generateRfqCode();
+    const rfqCode = await generateRfqCode(supabase, user.id);
     const { data: rfq, error: rfqError } = await supabase
       .from("rfqs")
       .insert({
