@@ -4,12 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { createClient } from "@/lib/supabase/client";
-import { Settings, LogOut, KeyRound, User, ChevronDown, Sun, Moon, Monitor } from "lucide-react";
+import { Settings, LogOut, KeyRound, User, ChevronDown, Sun, Moon } from "lucide-react";
 
 const THEMES = [
   { value: "light",  label: "Light",  icon: Sun },
   { value: "dark",   label: "Dark",   icon: Moon },
-  { value: "system", label: "System", icon: Monitor },
 ] as const;
 
 export default function DashboardHeader({ title }: { title: string }) {
@@ -60,7 +59,7 @@ export default function DashboardHeader({ title }: { title: string }) {
   const ThemeIcon = resolvedTheme === "dark" ? Moon : Sun;
 
   function cycleTheme() {
-    setTheme(theme === "light" ? "dark" : theme === "dark" ? "system" : "light");
+    setTheme(theme === "light" ? "dark" : "light");
   }
 
   return (
