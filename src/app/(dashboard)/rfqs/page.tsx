@@ -10,9 +10,12 @@ export default async function RfqsPage() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
+  // Only show RFQs that have actually been processed — pending ones stay in
+  // the email inbox until the user clicks "Process it".
   const { data: rfqs } = await supabase
     .from("rfqs")
     .select("id, rfq_code, buyer_name, buyer_email, status, priority, file_type, created_at")
+    .not("status", "in", "(pending,needs_processing)")
     .order("created_at", { ascending: false });
 
   return (

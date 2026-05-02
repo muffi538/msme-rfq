@@ -15,7 +15,8 @@ export default async function DashboardPage() {
     { count: sentCount },
     { count: totalSuppliers },
   ] = await Promise.all([
-    supabase.from("rfqs").select("*", { count: "exact", head: true }),
+    // Total = only RFQs that have been processed (pending stay in inbox only)
+    supabase.from("rfqs").select("*", { count: "exact", head: true }).not("status", "in", "(pending,needs_processing)"),
     supabase.from("rfqs").select("*", { count: "exact", head: true }).eq("status", "processed"),
     supabase.from("outgoing_rfqs").select("*", { count: "exact", head: true }).eq("status", "sent"),
     supabase.from("suppliers").select("*", { count: "exact", head: true }),
@@ -53,9 +54,12 @@ export default async function DashboardPage() {
   const onboardingDone = gmailConnected && hasSupplier && hasProcessedRfq;
   const completedSteps = [gmailConnected, hasSupplier, hasProcessedRfq].filter(Boolean).length;
 
+  // Recent RFQs widget — also excludes pending/needs_processing so unprocessed
+  // emails don't leak out of the inbox into the main dashboard view
   const { data: recentRfqs } = await supabase
     .from("rfqs")
     .select("id, rfq_code, buyer_name, status, priority, created_at")
+    .not("status", "in", "(pending,needs_processing)")
     .order("created_at", { ascending: false })
     .limit(5);
 
