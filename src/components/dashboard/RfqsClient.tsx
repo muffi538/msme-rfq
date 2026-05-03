@@ -27,7 +27,9 @@ type Rfq = {
 
 type SortDir = "desc" | "asc";
 
-const ALL_STATUSES = ["pending", "processing", "processed", "approved", "sent"];
+// Simplified to 3 user-facing states. Internal 'processing' and 'approved'
+// are bucketed into 'processed' for the filter UI.
+const ALL_STATUSES = ["pending", "processed", "sent"];
 const ALL_PRIORITIES = ["normal", "urgent"];
 
 export default function RfqsClient({ rfqs: initial }: { rfqs: Rfq[] }) {
@@ -52,7 +54,13 @@ export default function RfqsClient({ rfqs: initial }: { rfqs: Rfq[] }) {
       );
     }
 
-    if (statusFilter)    list = list.filter((r) => r.status   === statusFilter);
+    if (statusFilter) {
+      // Bucket internal statuses into the 3 user-facing buckets
+      list = list.filter((r) => {
+        if (statusFilter === "processed") return ["processing", "processed", "approved"].includes(r.status);
+        return r.status === statusFilter;
+      });
+    }
     if (priorityFilter)  list = list.filter((r) => r.priority === priorityFilter);
 
     list.sort((a, b) => {

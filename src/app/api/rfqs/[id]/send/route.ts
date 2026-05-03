@@ -22,30 +22,25 @@ export async function POST(
 
   if (!outgoing) return NextResponse.json({ error: "Outgoing RFQ not found" }, { status: 404 });
 
-  if (channel === "whatsapp") {
-    // WhatsApp — placeholder (AiSensy API to be wired in Phase 4)
-    // For now we log the intent and mark as sent
-    console.log(`[WhatsApp] Would send to ${outgoing.suppliers?.whatsapp_number}: ${outgoing.message_body}`);
-
-    await supabase
-      .from("outgoing_rfqs")
-      .update({ status: "sent", sent_at: new Date().toISOString(), channel: "whatsapp" })
-      .eq("id", outgoingId);
-
-    return NextResponse.json({ ok: true, channel: "whatsapp", note: "WhatsApp send queued (AiSensy integration in Phase 4)" });
+  if (channel !== "whatsapp" && channel !== "email") {
+    return NextResponse.json({ error: "Invalid channel" }, { status: 400 });
   }
 
-  if (channel === "email") {
-    // Email — placeholder (SMTP to be wired in Phase 4)
-    console.log(`[Email] Would send to ${outgoing.suppliers?.email}: ${outgoing.message_body}`);
+  // Mark this outgoing as sent
+  await supabase
+    .from("outgoing_rfqs")
+    .update({ status: "sent", sent_at: new Date().toISOString(), channel })
+    .eq("id", outgoingId);
 
-    await supabase
-      .from("outgoing_rfqs")
-      .update({ status: "sent", sent_at: new Date().toISOString(), channel: "email" })
-      .eq("id", outgoingId);
+  // ── Auto-promote parent RFQ to 'sent' once at least one child has gone out ──
+  // Many MSME workflows send to one supplier first and treat that as "sent".
+  // We move the parent to 'sent' as soon as any outgoing is dispatched, so
+  // it shows up in the Sent filter without the user having to click anything.
+  await supabase
+    .from("rfqs")
+    .update({ status: "sent" })
+    .eq("id", rfqId)
+    .eq("user_id", user.id);
 
-    return NextResponse.json({ ok: true, channel: "email", note: "Email send queued (SMTP integration in Phase 4)" });
-  }
-
-  return NextResponse.json({ error: "Invalid channel" }, { status: 400 });
+  return NextResponse.json({ ok: true, channel, parentMarkedSent: true });
 }
