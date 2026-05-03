@@ -19,12 +19,17 @@ import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
-const navItems = [
-  { href: "/dashboard",              label: "Dashboard",    icon: LayoutDashboard },
-  { href: "/inbox",                  label: "Email Inbox",  icon: Inbox },
-  { href: "/rfqs",                   label: "RFQs",         icon: FileText },
-  { href: "/rfqs/upload",            label: "Upload RFQ",   icon: Upload },
-  { href: "/rfq-reply",              label: "RFQ Reply",    icon: MessageSquareReply },
+// Daily-use sections — what the user touches every day
+const dailyNav = [
+  { href: "/dashboard",   label: "Dashboard",   icon: LayoutDashboard },
+  { href: "/inbox",       label: "Email Inbox", icon: Inbox },
+  { href: "/rfqs",        label: "RFQs",        icon: FileText },
+  { href: "/rfqs/upload", label: "Upload RFQ",  icon: Upload },
+  { href: "/rfq-reply",   label: "RFQ Reply",   icon: MessageSquareReply },
+];
+
+// Setup / config sections — usually touched once or rarely
+const setupNav = [
   { href: "/suppliers",              label: "Suppliers",    icon: Users },
   { href: "/suppliers/tally-import", label: "Tally Import", icon: Database },
   { href: "/settings",               label: "Settings",     icon: Settings },
@@ -85,7 +90,47 @@ export default function Sidebar({ collapsed }: SidebarProps) {
 
       {/* Nav */}
       <nav className="flex-1 px-2 py-4 space-y-0.5 overflow-y-auto overflow-x-hidden">
-        {navItems.map((item) => {
+        {/* Daily-use group */}
+        {dailyNav.map((item) => {
+          const active = pathname === item.href;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              title={collapsed ? item.label : undefined}
+              className={cn(
+                "flex items-center gap-3 rounded-lg text-sm font-medium transition-colors h-10 px-3",
+                collapsed ? "justify-center" : "justify-start",
+                active
+                  ? "bg-[#1847F5] text-white"
+                  : "text-gray-400 hover:bg-gray-800 hover:text-white"
+              )}
+            >
+              <item.icon className="w-4 h-4 flex-shrink-0" />
+              <span
+                className={cn(
+                  "whitespace-nowrap transition-all duration-200",
+                  collapsed ? "opacity-0 w-0 overflow-hidden" : "opacity-100"
+                )}
+              >
+                {item.label}
+              </span>
+            </Link>
+          );
+        })}
+
+        {/* Divider — separates daily-use from setup/config */}
+        <div className="my-3 px-3">
+          <div className="h-px bg-gray-800" />
+          {!collapsed && (
+            <p className="text-[10px] font-semibold tracking-widest text-gray-600 uppercase mt-2.5 mb-1">
+              Setup
+            </p>
+          )}
+        </div>
+
+        {/* Setup / config group */}
+        {setupNav.map((item) => {
           const active = pathname === item.href;
           return (
             <Link
