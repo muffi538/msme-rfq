@@ -45,7 +45,15 @@ async function extractWithVision(base64: string, mimeType: string): Promise<stri
   return json.choices?.[0]?.message?.content ?? "";
 }
 
-async function parseQuote(rawText: string, companyName: string): Promise<ExtractedQuote> {
+async function parseQuote(
+  rawText: string,
+  companyName: string,
+  buyerReplyTemplate: string | null
+): Promise<ExtractedQuote> {
+  const templateGuide = buyerReplyTemplate
+    ? `\n\nUse this template as the structure/tone for the email_body. Substitute the placeholders with the extracted values, keep the wording natural, and adapt it as needed:\n\n---\n${buyerReplyTemplate}\n---\n\nPlaceholders the user defined: {customer} = the buyer name (use a polite generic like "Sir/Madam" if unknown), {items} = item-wise list with qty + unit price, {totalPrice} = sum total in ₹, {deliveryDays}, {paymentTerms}, {validityDays}, {company} = "${companyName}".`
+    : `\n\nFor email_body: write in warm Indian business English. Include a friendly opening, a clear item-wise price list (with quantities and units), delivery and payment terms, and end with a call to confirm or contact. Sign off as "${companyName}".`;
+
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -71,8 +79,8 @@ Return ONLY valid JSON matching this schema exactly:
   "email_subject": string,
   "email_body": string
 }
-
-For email_body: write in warm Indian business English. Include a friendly opening, a clear item-wise price list (with quantities and units), delivery and payment terms, and end with a call to confirm or contact. Sign off as "${companyName}". Do NOT include a subject line inside the body.`,
+${templateGuide}
+Do NOT include a subject line inside the body.`,
         },
         {
           role: "user",
@@ -113,8 +121,9 @@ export async function POST(request: NextRequest) {
     .from("user_settings")
     .select("key, value")
     .eq("user_id", user.id)
-    .in("key", ["company_name"]);
-  const companyName = settingRows?.find((r) => r.key === "company_name")?.value ?? "Procur.AI";
+    .in("key", ["company_name", "buyer_reply_template"]);
+  const companyName        = settingRows?.find((r) => r.key === "company_name")?.value         ?? "Procur.AI";
+  const buyerReplyTemplate = settingRows?.find((r) => r.key === "buyer_reply_template")?.value ?? null;
 
   const contentType = request.headers.get("content-type") ?? "";
 
@@ -155,7 +164,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const quote = await parseQuote(rawText, companyName);
+    const quote = await parseQuote(rawText, companyName, buyerReplyTemplate);
     return NextResponse.json(quote);
   } catch (err: unknown) {
     return NextResponse.json(
