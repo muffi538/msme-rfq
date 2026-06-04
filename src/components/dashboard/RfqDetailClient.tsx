@@ -13,6 +13,15 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { RfqWorkflowTracker } from "@/components/dashboard/RfqWorkflowTracker";
+import { RfqLifecycleExpand } from "@/components/dashboard/RfqLifecycleExpand";
+import {
+  type BuyerReplyLog,
+  type OutgoingStats,
+  computeWorkflowSteps,
+  isWorkflowComplete,
+} from "@/lib/rfq-lifecycle";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 const PRESET_CATEGORIES = [
   "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
@@ -334,11 +343,14 @@ function SupplierSplitCard({
 
 export default function RfqDetailClient({
   rfq, items: initialItems, outgoing: initialOutgoing, outgoingItems,
+  outgoingStats, buyerLog,
 }: {
   rfq: Rfq;
   items: Item[];
   outgoing: OutgoingRfq[];
   outgoingItems: OutgoingItem[];
+  outgoingStats: OutgoingStats;
+  buyerLog: BuyerReplyLog | null;
 }) {
   const [items, setItems]         = useState<Item[]>(initialItems);
   const [outgoing, setOutgoing]   = useState<OutgoingRfq[]>(initialOutgoing);
@@ -347,6 +359,10 @@ export default function RfqDetailClient({
   const [splitError, setSplitError] = useState("");
   const [selected, setSelected]   = useState<Set<string>>(new Set());
   const [expanded, setExpanded]   = useState<Set<string>>(new Set());
+  const [lifecycleOpen, setLifecycleOpen] = useState(false);
+
+  const workflowSteps = computeWorkflowSteps(outgoingStats, buyerLog);
+  const workflowComplete = isWorkflowComplete(workflowSteps);
 
   // Group send modal
   const [groupModal, setGroupModal] = useState<{ outgoingId: string; groupLink: string; message: string; supplierName: string } | null>(null);
@@ -546,8 +562,34 @@ export default function RfqDetailClient({
         </div>
       )}
 
-      {/* RFQ meta */}
-      <div className="bg-white rounded-2xl border border-gray-100 p-6 mb-6 flex flex-wrap gap-6">
+      {/* RFQ meta + lifecycle */}
+      <div className="bg-white rounded-2xl border border-gray-100 p-5 mb-6 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="space-y-2 min-w-0 flex-1">
+            <RfqWorkflowTracker steps={workflowSteps} showLabels />
+            {workflowComplete ? (
+              <p className="text-sm font-medium text-green-700">Completed · Buyer notified</p>
+            ) : (
+              <p className="text-sm text-gray-500">
+                Current step: <span className="font-medium text-gray-700">{workflowSteps.find((s) => s.state === "current")?.label}</span>
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setLifecycleOpen((o) => !o)}
+            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 shrink-0"
+          >
+            {lifecycleOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+            {lifecycleOpen ? "Hide details" : "Lifecycle details"}
+          </button>
+        </div>
+        {lifecycleOpen && (
+          <div className="pt-3 border-t border-gray-100">
+            <RfqLifecycleExpand buyerLog={buyerLog} />
+          </div>
+        )}
+        <div className="flex flex-wrap gap-6 pt-1 border-t border-gray-50">
         <div>
           <p className="text-xs text-gray-400 mb-1">Buyer</p>
           <p className="font-semibold text-gray-800">{rfq.buyer_name ?? "—"}</p>
@@ -576,6 +618,7 @@ export default function RfqDetailClient({
         <div>
           <p className="text-xs text-gray-400 mb-1">Date</p>
           <p className="text-sm text-gray-600">{new Date(rfq.created_at).toLocaleDateString("en-IN")}</p>
+        </div>
         </div>
       </div>
 

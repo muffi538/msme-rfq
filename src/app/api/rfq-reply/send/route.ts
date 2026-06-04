@@ -7,10 +7,12 @@ export async function POST(request: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
-  const { to, subject, body } = await request.json() as {
+  const { to, subject, body, supplierName, quoteSummary } = await request.json() as {
     to: string;
     subject: string;
     body: string;
+    supplierName?: string | null;
+    quoteSummary?: Record<string, unknown> | null;
   };
 
   if (!to || !subject || !body) {
@@ -36,7 +38,20 @@ export async function POST(request: NextRequest) {
 
   try {
     await sendEmail({ to, subject, body, fromName: companyName, refreshToken: gmailToken });
-    return NextResponse.json({ ok: true });
+
+    const sentAt = new Date().toISOString();
+    const { error: logError } = await supabase.from("buyer_reply_logs").insert({
+      user_id:       user.id,
+      buyer_email:   to.trim(),
+      supplier_name: supplierName ?? null,
+      quote_summary: quoteSummary ?? null,
+      email_subject: subject,
+      email_body:    body,
+      sent_at:       sentAt,
+    });
+    if (logError) console.warn("buyer_reply_logs insert:", logError.message);
+
+    return NextResponse.json({ ok: true, sentAt });
   } catch (err: unknown) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to send email" },

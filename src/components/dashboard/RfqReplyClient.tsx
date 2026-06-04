@@ -12,6 +12,10 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ExtractedQuote, QuoteItem } from "@/app/api/rfq-reply/extract/route";
+import { RfqWorkflowTracker } from "@/components/dashboard/RfqWorkflowTracker";
+import { RfqLifecycleExpand } from "@/components/dashboard/RfqLifecycleExpand";
+import { WORKFLOW_STEPS, type WorkflowStepView } from "@/lib/rfq-lifecycle";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 type Step = "input" | "extracting" | "review";
 
@@ -35,6 +39,8 @@ export default function RfqReplyClient() {
   const [body, setBody]               = useState("");
   const [sending, setSending]         = useState(false);
   const [sent, setSent]               = useState(false);
+  const [sentAt, setSentAt]           = useState<string | null>(null);
+  const [sentDetailsOpen, setSentDetailsOpen] = useState(false);
 
   // ── Clipboard paste (Ctrl+V anywhere) ──
   const handlePaste = useCallback((e: ClipboardEvent) => {
@@ -104,6 +110,34 @@ export default function RfqReplyClient() {
     setSubject("");
     setBody("");
     setSent(false);
+    setSentAt(null);
+    setSentDetailsOpen(false);
+  }
+
+  function replyWorkflowSteps(): WorkflowStepView[] {
+    const flags = {
+      inquiry: true,
+      supplier_sent: true,
+      quote_received: step === "review" || sent,
+      buyer_notified: sent,
+    };
+    const order = WORKFLOW_STEPS.map((s) => s.id);
+    const allComplete = order.every((id) => flags[id as keyof typeof flags]);
+    let currentId = order[order.length - 1];
+    for (const id of order) {
+      if (!flags[id as keyof typeof flags]) {
+        currentId = id;
+        break;
+      }
+    }
+    return WORKFLOW_STEPS.map((s) => ({
+      ...s,
+      state: flags[s.id as keyof typeof flags]
+        ? "completed"
+        : !allComplete && s.id === currentId
+          ? "current"
+          : "pending",
+    }));
   }
 
   async function handleExtract() {
@@ -152,14 +186,30 @@ export default function RfqReplyClient() {
       const res = await fetch("/api/rfq-reply/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to: toEmail, subject, body }),
+        body: JSON.stringify({
+          to: toEmail,
+          subject,
+          body,
+          supplierName: quote?.supplier_name ?? null,
+          quoteSummary: quote
+            ? {
+                supplier_name: quote.supplier_name,
+                items,
+                delivery_days: quote.delivery_days,
+                payment_terms: quote.payment_terms,
+                validity_days: quote.validity_days,
+              }
+            : null,
+        }),
       });
       if (!res.ok) {
         const err = await res.json() as { error?: string };
         throw new Error(err.error ?? "Send failed");
       }
+      const json = await res.json() as { sentAt?: string };
       setSent(true);
-      toast.success("Email sent successfully!");
+      setSentAt(json.sentAt ?? new Date().toISOString());
+      toast.success("Buyer notified successfully");
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to send email");
     } finally {
@@ -205,30 +255,17 @@ export default function RfqReplyClient() {
   return (
     <div className="max-w-3xl mx-auto space-y-6">
 
-      {/* ── Step indicator ── */}
-      <div className="flex items-center gap-3 text-sm">
-        {(["input", "review"] as const).map((s, i) => (
-          <div key={s} className="flex items-center gap-3">
-            {i > 0 && <div className={cn("h-px w-8", step === "input" ? "bg-border" : "bg-blue-600")} />}
-            <div className={cn(
-              "flex items-center gap-2 font-medium",
-              step === s ? "text-blue-600" : step === "review" && s === "input" ? "text-muted-foreground" : "text-muted-foreground"
-            )}>
-              <span className={cn(
-                "w-6 h-6 rounded-full text-xs flex items-center justify-center font-bold",
-                step === s ? "bg-blue-600 text-white" : s === "input" && step === "review" ? "bg-green-500 text-white" : "bg-muted text-muted-foreground"
-              )}>
-                {s === "input" && step === "review" ? <CheckCircle2 className="w-3.5 h-3.5" /> : i + 1}
-              </span>
-              {s === "input" ? "Supplier Quote" : "Review & Send"}
-            </div>
-          </div>
-        ))}
+      {/* ── Lifecycle tracker ── */}
+      <div className="bg-card border border-border rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+        <RfqWorkflowTracker steps={replyWorkflowSteps()} showLabels />
         {step === "extracting" && (
-          <div className="ml-auto flex items-center gap-2 text-blue-600 font-medium">
+          <div className="flex items-center gap-2 text-blue-600 text-sm font-medium">
             <Loader2 className="w-4 h-4 animate-spin" />
             AI extracting quote…
           </div>
+        )}
+        {sent && (
+          <span className="text-sm font-medium text-green-700">Completed · Buyer notified</span>
         )}
       </div>
 
@@ -483,11 +520,47 @@ export default function RfqReplyClient() {
             </div>
 
             {sent ? (
-              <div className="px-6 py-12 flex flex-col items-center gap-3 text-center">
-                <CheckCircle2 className="w-12 h-12 text-green-500" />
-                <p className="text-lg font-semibold text-card-foreground">Email sent!</p>
-                <p className="text-sm text-muted-foreground">The buyer at <b>{toEmail}</b> has been notified with the quotation.</p>
-                <Button variant="outline" onClick={reset} className="mt-2">
+              <div className="px-6 py-8 space-y-4">
+                <div className="flex flex-col items-center gap-2 text-center">
+                  <CheckCircle2 className="w-10 h-10 text-green-500" />
+                  <p className="text-lg font-semibold text-card-foreground">Completed · Buyer notified</p>
+                  <p className="text-sm text-muted-foreground">
+                    <b>{toEmail}</b>
+                    {sentAt && (
+                      <> · {new Date(sentAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</>
+                    )}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSentDetailsOpen((o) => !o)}
+                  className="w-full flex items-center justify-center gap-1 text-xs text-muted-foreground hover:text-foreground py-1"
+                >
+                  {sentDetailsOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                  {sentDetailsOpen ? "Hide summary" : "View quote & message sent"}
+                </button>
+                {sentDetailsOpen && quote && (
+                  <div className="border-t border-border pt-4">
+                    <RfqLifecycleExpand
+                      buyerLog={{
+                        id: "local",
+                        buyer_email: toEmail,
+                        supplier_name: quote.supplier_name,
+                        quote_summary: {
+                          supplier_name: quote.supplier_name,
+                          items,
+                          delivery_days: quote.delivery_days,
+                          payment_terms: quote.payment_terms,
+                          validity_days: quote.validity_days,
+                        },
+                        email_subject: subject,
+                        email_body: body,
+                        sent_at: sentAt ?? new Date().toISOString(),
+                      }}
+                    />
+                  </div>
+                )}
+                <Button variant="outline" onClick={reset} className="w-full">
                   Send another reply
                 </Button>
               </div>

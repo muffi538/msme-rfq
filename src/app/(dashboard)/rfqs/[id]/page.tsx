@@ -39,6 +39,24 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
     .select("outgoing_rfq_id, item_id")
     .in("outgoing_rfq_id", (outgoing ?? []).map((o) => o.id));
 
+  const outgoingStats = {
+    total: (outgoing ?? []).length,
+    sent:  (outgoing ?? []).filter((o) => o.status === "sent").length,
+  };
+
+  let buyerLog = null;
+  if (rfq.buyer_email) {
+    const { data } = await supabase
+      .from("buyer_reply_logs")
+      .select("id, buyer_email, supplier_name, quote_summary, email_subject, email_body, sent_at")
+      .eq("user_id", user.id)
+      .ilike("buyer_email", rfq.buyer_email.trim())
+      .order("sent_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    buyerLog = data;
+  }
+
   return (
     <>
       <DashboardHeader title={rfq.rfq_code} />
@@ -47,6 +65,8 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
         items={items ?? []}
         outgoing={outgoing ?? []}
         outgoingItems={outgoingItems ?? []}
+        outgoingStats={outgoingStats}
+        buyerLog={buyerLog}
       />
     </>
   );

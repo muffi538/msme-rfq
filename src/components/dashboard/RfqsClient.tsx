@@ -1,8 +1,17 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { Fragment, useState, useMemo } from "react";
 import Link from "next/link";
-import { Upload, AlertTriangle, ChevronUp, ChevronDown, X, Trash2, Download } from "lucide-react";
+import { Upload, AlertTriangle, ChevronUp, ChevronDown, ChevronRight, X, Trash2, Download } from "lucide-react";
+import { RfqWorkflowTracker } from "@/components/dashboard/RfqWorkflowTracker";
+import { RfqLifecycleExpand } from "@/components/dashboard/RfqLifecycleExpand";
+import {
+  type BuyerReplyLog,
+  aggregateOutgoingByRfq,
+  computeWorkflowSteps,
+  isWorkflowComplete,
+  matchBuyerReplyLog,
+} from "@/lib/rfq-lifecycle";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
 
@@ -32,7 +41,15 @@ type SortDir = "desc" | "asc";
 const ALL_STATUSES = ["pending", "processed", "sent"];
 const ALL_PRIORITIES = ["normal", "urgent"];
 
-export default function RfqsClient({ rfqs: initial }: { rfqs: Rfq[] }) {
+export default function RfqsClient({
+  rfqs: initial,
+  outgoingRows,
+  buyerLogs,
+}: {
+  rfqs: Rfq[];
+  outgoingRows: { rfq_id: string; status: string }[];
+  buyerLogs: BuyerReplyLog[];
+}) {
   const [rfqs,          setRfqs]          = useState<Rfq[]>(initial);
   const [search,        setSearch]        = useState("");
   const [statusFilter,  setStatusFilter]  = useState<string | null>(null);
@@ -40,6 +57,9 @@ export default function RfqsClient({ rfqs: initial }: { rfqs: Rfq[] }) {
   const [sortDir,       setSortDir]       = useState<SortDir>("desc");
   const [deleteTarget,  setDeleteTarget]  = useState<Rfq | null>(null);
   const [deleting,      setDeleting]      = useState(false);
+  const [expanded,      setExpanded]      = useState<Set<string>>(new Set());
+
+  const outgoingByRfq = useMemo(() => aggregateOutgoingByRfq(outgoingRows), [outgoingRows]);
 
   const filtered = useMemo(() => {
     let list = [...rfqs];
@@ -247,57 +267,97 @@ export default function RfqsClient({ rfqs: initial }: { rfqs: Rfq[] }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50">
-                <th className="px-6 py-3">RFQ Code</th>
-                <th className="px-6 py-3">Buyer</th>
-                <th className="px-6 py-3">Type</th>
-                <th className="px-6 py-3">Status</th>
-                <th className="px-6 py-3">Priority</th>
-                <th className="px-6 py-3">Date &amp; Time</th>
-                <th className="px-6 py-3"></th>
+                <th className="px-4 py-2 w-8"></th>
+                <th className="px-3 py-2">RFQ</th>
+                <th className="px-3 py-2">Buyer</th>
+                <th className="px-3 py-2 min-w-[140px]">Workflow</th>
+                <th className="px-3 py-2">Date</th>
+                <th className="px-3 py-2 w-8"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
-              {filtered.map((rfq) => (
-                <tr key={rfq.id} className="hover:bg-gray-50 transition-colors group">
-                  <td className="px-6 py-3 font-semibold text-blue-600">
-                    <Link href={`/rfqs/${rfq.id}`} className="hover:underline flex items-center gap-1 group">
-                      {rfq.rfq_code}
-                    </Link>
-                  </td>
-                  <td className="px-6 py-3">
-                    <p className="text-gray-800 font-medium">{rfq.buyer_name ?? "—"}</p>
-                    {rfq.buyer_email && (
-                      <p className="text-gray-400 text-xs">{rfq.buyer_email}</p>
+              {filtered.map((rfq) => {
+                const stats = outgoingByRfq[rfq.id] ?? { total: 0, sent: 0 };
+                const buyerLog = matchBuyerReplyLog(rfq.buyer_email, buyerLogs);
+                const steps = computeWorkflowSteps(stats, buyerLog);
+                const complete = isWorkflowComplete(steps);
+                const isOpen = expanded.has(rfq.id);
+
+                return (
+                  <Fragment key={rfq.id}>
+                    <tr className="hover:bg-gray-50/80 transition-colors group">
+                      <td className="px-4 py-2 align-middle">
+                        <button
+                          type="button"
+                          onClick={() => setExpanded((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(rfq.id)) next.delete(rfq.id);
+                            else next.add(rfq.id);
+                            return next;
+                          })}
+                          className="p-0.5 text-gray-300 hover:text-gray-600 rounded"
+                          aria-expanded={isOpen}
+                          aria-label="Show lifecycle details"
+                        >
+                          <ChevronRight className={`w-4 h-4 transition-transform ${isOpen ? "rotate-90" : ""}`} />
+                        </button>
+                      </td>
+                      <td className="px-3 py-2 align-middle">
+                        <Link href={`/rfqs/${rfq.id}`} className="font-semibold text-blue-600 hover:underline text-sm">
+                          {rfq.rfq_code}
+                        </Link>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          {rfq.priority === "urgent" && (
+                            <span className="text-[10px] text-red-600 font-medium flex items-center gap-0.5">
+                              <AlertTriangle className="w-2.5 h-2.5" /> urgent
+                            </span>
+                          )}
+                          <span className="text-[10px] text-gray-400 capitalize">{rfq.file_type ?? "—"}</span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 align-middle max-w-[180px]">
+                        <p className="text-gray-800 font-medium text-sm truncate">{rfq.buyer_name ?? "—"}</p>
+                        {rfq.buyer_email && (
+                          <p className="text-gray-400 text-[11px] truncate">{rfq.buyer_email}</p>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 align-middle">
+                        <div className="flex flex-col gap-1 min-w-0">
+                          <RfqWorkflowTracker steps={steps} compact showLabels />
+                          {complete ? (
+                            <span className="text-[11px] font-medium text-green-700">
+                              Completed · Buyer notified
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-gray-400 truncate">
+                              {steps.find((s) => s.state === "current")?.label ?? "In progress"}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 align-middle text-gray-400 whitespace-nowrap text-xs">
+                        {new Date(rfq.created_at).toLocaleDateString("en-IN")}
+                      </td>
+                      <td className="px-3 py-2 align-middle">
+                        <button
+                          onClick={() => setDeleteTarget(rfq)}
+                          className="text-gray-200 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                          title="Delete RFQ"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr className="bg-gray-50/60">
+                        <td colSpan={6} className="px-4 py-2 border-t border-gray-100">
+                          <RfqLifecycleExpand buyerLog={buyerLog} />
+                        </td>
+                      </tr>
                     )}
-                  </td>
-                  <td className="px-6 py-3 text-gray-500 capitalize">{rfq.file_type ?? "—"}</td>
-                  <td className="px-6 py-3">
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium border ${statusStyle[rfq.status] ?? "bg-gray-100 text-gray-600 border-gray-200"}`}>
-                      {rfq.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-3">
-                    {rfq.priority === "urgent" && (
-                      <span className="flex items-center gap-1 text-xs text-red-600 font-medium">
-                        <AlertTriangle className="w-3 h-3" /> urgent
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-6 py-3 text-gray-400 whitespace-nowrap">
-                    <p>{new Date(rfq.created_at).toLocaleDateString("en-IN")}</p>
-                    <p className="text-xs">{new Date(rfq.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</p>
-                  </td>
-                  <td className="px-6 py-3">
-                    <button
-                      onClick={() => setDeleteTarget(rfq)}
-                      className="text-gray-200 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
-                      title="Delete RFQ"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         )}
