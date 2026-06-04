@@ -2,26 +2,16 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useTheme } from "next-themes";
 import { createClient } from "@/lib/supabase/client";
-import { Settings, LogOut, KeyRound, User, ChevronDown, Sun, Moon } from "lucide-react";
-
-const THEMES = [
-  { value: "light",  label: "Light",  icon: Sun },
-  { value: "dark",   label: "Dark",   icon: Moon },
-] as const;
+import { Settings, LogOut, KeyRound, User, ChevronDown } from "lucide-react";
 
 export default function DashboardHeader({ title }: { title: string }) {
   const router  = useRouter();
-  const { theme, setTheme, resolvedTheme } = useTheme();
   const [company,   setCompany]   = useState("Your Company");
   const [email,     setEmail]     = useState("");
   const [open,      setOpen]      = useState(false);
   const [resetSent, setResetSent] = useState(false);
-  const [mounted,   setMounted]   = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => setMounted(true), []);
 
   useEffect(() => {
     const supabase = createClient();
@@ -56,11 +46,6 @@ export default function DashboardHeader({ title }: { title: string }) {
   }
 
   const initials  = company.slice(0, 2).toUpperCase();
-  const ThemeIcon = resolvedTheme === "dark" ? Moon : Sun;
-
-  function cycleTheme() {
-    setTheme(theme === "light" ? "dark" : "light");
-  }
 
   return (
     <header className="h-[68px] border-b border-border bg-card flex items-center justify-between px-8 relative z-30 flex-shrink-0">
@@ -76,17 +61,6 @@ export default function DashboardHeader({ title }: { title: string }) {
       </div>
 
       <div className="flex items-center gap-1.5">
-        {/* Theme toggle */}
-        {mounted && (
-          <button
-            onClick={cycleTheme}
-            title={`Theme: ${theme}`}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-          >
-            <ThemeIcon className="w-3.5 h-3.5" />
-          </button>
-        )}
-
         {/* Account menu */}
         <div ref={menuRef} className="relative">
           <button
@@ -115,26 +89,7 @@ export default function DashboardHeader({ title }: { title: string }) {
                 </div>
               </div>
 
-              {/* Theme selector */}
-              <div className="px-4 py-3 border-b border-border">
-                <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-widest mb-2">Appearance</p>
-                <div className="flex gap-1.5">
-                  {THEMES.map(({ value, label, icon: Icon }) => (
-                    <button
-                      key={value}
-                      onClick={() => setTheme(value)}
-                      className={`flex-1 flex flex-col items-center gap-1 py-2 rounded-lg text-xs font-medium transition-colors border ${
-                        theme === value
-                          ? "border-[#1847F5] bg-[#1847F5]/8 text-[#1847F5]"
-                          : "border-border text-muted-foreground hover:bg-accent"
-                      }`}
-                    >
-                      <Icon className="w-3.5 h-3.5" />
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+
 
               {/* Menu items */}
               <div className="py-1.5">
