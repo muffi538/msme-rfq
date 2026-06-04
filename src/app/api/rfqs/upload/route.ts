@@ -48,7 +48,8 @@ export async function POST(request: NextRequest) {
     const formData  = await request.formData();
     const file      = formData.get("file") as File | null;
     const buyerName = (formData.get("buyerName") as string) || null;
-    const buyerEmail = (formData.get("buyerEmail") as string) || null;
+    const buyerEmailRaw = (formData.get("buyerEmail") as string)?.trim();
+    const buyerEmail = buyerEmailRaw || null;
     const priority  = (formData.get("priority") as string) || "normal";
 
     if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });

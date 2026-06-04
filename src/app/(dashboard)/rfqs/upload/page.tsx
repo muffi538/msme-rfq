@@ -135,8 +135,7 @@ export default function UploadPage() {
     if (!entries.length) { setError("Please select at least one file."); return; }
     if (!buyerName.trim()) { setError("Buyer name is required."); return; }
     if (!/^[a-zA-Z\s.&'-]+$/.test(buyerName.trim())) { setError("Buyer name must contain letters only, no numbers."); return; }
-    if (!buyerEmail.trim()) { setError("Buyer email is required."); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(buyerEmail.trim())) { setError("Enter a valid email address."); return; }
+    if (buyerEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(buyerEmail.trim())) { setError("Enter a valid email address."); return; }
 
     setState("uploading");
     setError("");
@@ -159,7 +158,7 @@ export default function UploadPage() {
       const form = new FormData();
       form.append("file", entry.file);
       form.append("buyerName",  buyerName);
-      form.append("buyerEmail", buyerEmail);
+      form.append("buyerEmail", buyerEmail.trim());
       form.append("priority",   priority);
 
       try {
@@ -383,13 +382,12 @@ export default function UploadPage() {
                   <p className="text-xs text-gray-400">Letters only — no numbers</p>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Buyer email <span className="text-red-500">*</span></Label>
+                  <Label>Buyer email</Label>
                   <Input
                     placeholder="buyer@example.com"
                     type="email"
                     value={buyerEmail}
                     onChange={(e) => setBuyerEmail(e.target.value)}
-                    className={!buyerEmail.trim() && error ? "border-red-400" : ""}
                   />
                 </div>
               </div>
@@ -430,7 +428,7 @@ export default function UploadPage() {
 
             <Button
               type="submit"
-              disabled={!hasFiles || !buyerName.trim() || !buyerEmail.trim() || busy}
+              disabled={!hasFiles || !buyerName.trim() || busy}
               className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-base"
             >
               {busy ? (
