@@ -7,8 +7,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Input } from "@/components/ui/input";
 import {
   Loader2, Split, Send, CheckCircle, AlertTriangle,
-  MessageCircle, Mail, Package, Pencil, Copy, ExternalLink, Users
+  MessageCircle, Mail, Package, Pencil, Copy, ExternalLink, Users,
+  ChevronDown, ChevronUp,
 } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -156,6 +158,180 @@ function CategoryCell({
   );
 }
 
+function SupplierSplitCard({
+  outgoing: o,
+  supplierItems,
+  isSending,
+  isSelected,
+  isSent,
+  isExpanded,
+  onToggleExpand,
+  onSelect,
+  onMessageChange,
+  onSend,
+  onOpenGroup,
+}: {
+  outgoing: OutgoingRfq;
+  supplierItems: Item[];
+  isSending: boolean;
+  isSelected: boolean;
+  isSent: boolean;
+  isExpanded: boolean;
+  onToggleExpand: () => void;
+  onSelect: (checked: boolean) => void;
+  onMessageChange: (body: string) => void;
+  onSend: (channel: string, whatsappNumber?: string | null) => void;
+  onOpenGroup: () => void;
+}) {
+  const supplierName = o.suppliers?.name ?? "No supplier matched";
+  const meta = `${o.child_code} · ${o.category.replace(/_/g, " ")} · ${supplierItems.length} item${supplierItems.length === 1 ? "" : "s"}`;
+
+  return (
+    <div
+      className={cn(
+        "bg-white rounded-lg border overflow-hidden transition-colors",
+        isSelected ? "border-blue-300 ring-1 ring-blue-200" : "border-gray-100",
+      )}
+    >
+      <div className="flex items-center gap-2 px-3 py-2 min-h-[44px]">
+        {!isSent && (
+          <input
+            type="checkbox"
+            className="w-4 h-4 rounded accent-blue-600 cursor-pointer flex-shrink-0"
+            checked={isSelected}
+            onChange={(e) => onSelect(e.target.checked)}
+            onClick={(e) => e.stopPropagation()}
+          />
+        )}
+
+        <button
+          type="button"
+          onClick={onToggleExpand}
+          className="flex-shrink-0 p-1 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+          aria-expanded={isExpanded}
+          aria-label={isExpanded ? "Collapse supplier card" : "Expand message and items"}
+        >
+          {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+        </button>
+
+        <button
+          type="button"
+          onClick={onToggleExpand}
+          className="flex-1 min-w-0 text-left"
+        >
+          <p className="font-medium text-sm text-gray-900 truncate">{supplierName}</p>
+          <p className="text-xs text-gray-400 truncate">{meta}</p>
+        </button>
+
+        <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0", statusStyle[o.status])}>
+          {o.status}
+        </span>
+
+        {isSent ? (
+          <span className="flex items-center gap-1 text-green-600 text-xs font-medium flex-shrink-0">
+            <CheckCircle className="w-3.5 h-3.5" /> Sent
+          </span>
+        ) : o.suppliers ? (
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {o.suppliers.whatsapp_number && (
+              <Button
+                size="sm"
+                onClick={() => onSend("whatsapp", o.suppliers?.whatsapp_number)}
+                disabled={isSending}
+                className="bg-green-600 hover:bg-green-700 text-white h-7 px-2 text-xs gap-1"
+                title="Send via WhatsApp"
+              >
+                {isSending ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageCircle className="w-3 h-3" />}
+                <span className="hidden sm:inline">WA</span>
+              </Button>
+            )}
+            {o.suppliers.whatsapp_group_link && (
+              <Button
+                size="sm"
+                onClick={onOpenGroup}
+                disabled={isSending}
+                className="bg-teal-600 hover:bg-teal-700 text-white h-7 px-2 text-xs gap-1"
+                title="Send to WhatsApp group"
+              >
+                <Users className="w-3 h-3" />
+                <span className="hidden sm:inline">Group</span>
+              </Button>
+            )}
+            {o.suppliers.email && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onSend("email")}
+                disabled={isSending}
+                className="h-7 px-2 text-xs gap-1"
+                title="Send via email"
+              >
+                {isSending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Mail className="w-3 h-3" />}
+                <span className="hidden sm:inline">Email</span>
+              </Button>
+            )}
+          </div>
+        ) : null}
+      </div>
+
+      {isExpanded && (
+        <div className="border-t border-gray-100 bg-gray-50/60 px-3 py-3 space-y-3">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-medium text-gray-500">Message</p>
+              <button
+                type="button"
+                onClick={onToggleExpand}
+                className="text-xs text-gray-400 hover:text-gray-600"
+              >
+                Collapse
+              </button>
+            </div>
+            <Textarea
+              value={o.message_body ?? ""}
+              onChange={(e) => onMessageChange(e.target.value)}
+              rows={8}
+              className="text-xs font-sans resize-y min-h-[120px] max-h-64 bg-white"
+              placeholder="Edit the message sent to this supplier…"
+            />
+          </div>
+
+          {supplierItems.length > 0 && (
+            <details className="group">
+              <summary className="text-xs font-medium text-gray-500 cursor-pointer hover:text-gray-700 list-none flex items-center gap-1">
+                <ChevronDown className="w-3 h-3 group-open:rotate-180 transition-transform" />
+                Items ({supplierItems.length})
+              </summary>
+              <div className="mt-2 rounded-lg border border-gray-100 bg-white overflow-hidden max-h-48 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-gray-50">
+                    <tr className="text-left text-gray-400 border-b border-gray-100">
+                      <th className="px-3 py-1.5 font-medium">Item</th>
+                      <th className="px-3 py-1.5 font-medium w-20">Qty</th>
+                      <th className="px-3 py-1.5 font-medium">Spec</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {supplierItems.map((item) => (
+                      <tr key={item.id}>
+                        <td className="px-3 py-1.5 font-medium text-gray-800">{item.name}</td>
+                        <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap">
+                          {item.qty != null ? `${item.qty} ${item.unit ?? ""}` : "—"}
+                        </td>
+                        <td className="px-3 py-1.5 text-gray-400 truncate max-w-[140px]">{item.spec ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function RfqDetailClient({
   rfq, items: initialItems, outgoing: initialOutgoing, outgoingItems,
 }: {
@@ -170,6 +346,7 @@ export default function RfqDetailClient({
   const [sending, setSending]     = useState<string | null>(null);
   const [splitError, setSplitError] = useState("");
   const [selected, setSelected]   = useState<Set<string>>(new Set());
+  const [expanded, setExpanded]   = useState<Set<string>>(new Set());
 
   // Group send modal
   const [groupModal, setGroupModal] = useState<{ outgoingId: string; groupLink: string; message: string; supplierName: string } | null>(null);
@@ -195,6 +372,7 @@ export default function RfqDetailClient({
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Split failed");
       setOutgoing(json.outgoing);
+      setExpanded(new Set());
       toast.success(`Split complete — ${json.outgoing.length} supplier RFQ(s) generated`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Split failed";
@@ -299,6 +477,19 @@ export default function RfqDetailClient({
   function itemsForOutgoing(outgoingId: string): Item[] {
     const itemIds = new Set(outgoingItems.filter((oi) => oi.outgoing_rfq_id === outgoingId).map((oi) => oi.item_id));
     return items.filter((i) => itemIds.has(i.id));
+  }
+
+  function toggleExpanded(outgoingId: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(outgoingId)) next.delete(outgoingId);
+      else next.add(outgoingId);
+      return next;
+    });
+  }
+
+  function updateOutgoingMessage(outgoingId: string, body: string) {
+    setOutgoing((prev) => prev.map((o) => (o.id === outgoingId ? { ...o, message_body: body } : o)));
   }
 
   return (
@@ -469,9 +660,9 @@ export default function RfqDetailClient({
               <p className="text-gray-400 text-sm mt-1 mb-4">Go to the Items tab and click "Split by Supplier"</p>
             </div>
           ) : (
-            <div className="space-y-4">
+            <div className="space-y-2">
               {/* Select all toolbar */}
-              <div className="bg-white rounded-2xl border border-gray-100 px-5 py-3 flex items-center justify-between">
+              <div className="bg-white rounded-xl border border-gray-100 px-4 py-2.5 flex items-center justify-between sticky top-0 z-10 shadow-sm">
                 <div className="flex items-center gap-3">
                   <input
                     type="checkbox"
@@ -536,112 +727,36 @@ export default function RfqDetailClient({
                 const isSelected = selected.has(o.id);
                 const isSent = o.status === "sent";
                 return (
-                  <div key={o.id} className={cn("bg-white rounded-2xl border overflow-hidden transition-colors", isSelected ? "border-blue-300 ring-1 ring-blue-200" : "border-gray-100")}>
-                    <div className="flex items-center justify-between px-6 py-4 border-b border-gray-50">
-                      <div className="flex items-center gap-3">
-                        {/* Checkbox */}
-                        {!isSent && (
-                          <input
-                            type="checkbox"
-                            className="w-4 h-4 rounded accent-blue-600 cursor-pointer flex-shrink-0"
-                            checked={isSelected}
-                            onChange={(e) => {
-                              setSelected(prev => {
-                                const next = new Set(prev);
-                                if (e.target.checked) next.add(o.id);
-                                else next.delete(o.id);
-                                return next;
-                              });
-                            }}
-                          />
-                        )}
-                        <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center flex-shrink-0">
-                          <Package className="w-5 h-5 text-blue-600" />
-                        </div>
-                        <div>
-                          <p className="font-semibold text-gray-900">
-                            {o.suppliers?.name ?? "No supplier matched"}
-                          </p>
-                          <p className="text-xs text-gray-400">
-                            {o.child_code} · {o.category.replace(/_/g, " ")} · {supplierItems.length} items
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusStyle[o.status]}`}>
-                          {o.status}
-                        </span>
-                        {!isSent && o.suppliers && (
-                          <div className="flex gap-2 flex-wrap">
-                            {o.suppliers.whatsapp_number && (
-                              <Button
-                                size="sm"
-                                onClick={() => handleSend(o.id, "whatsapp", o.suppliers?.whatsapp_number, o.message_body)}
-                                disabled={isSending}
-                                className="bg-green-600 hover:bg-green-700 text-white gap-1.5 h-8 text-xs"
-                              >
-                                {isSending ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageCircle className="w-3 h-3" />}
-                                WhatsApp
-                              </Button>
-                            )}
-                            {o.suppliers.whatsapp_group_link && (
-                              <Button
-                                size="sm"
-                                onClick={() => openGroupModal(o.id, o.suppliers!.whatsapp_group_link!, o.message_body, o.suppliers!.name)}
-                                disabled={isSending}
-                                className="bg-teal-600 hover:bg-teal-700 text-white gap-1.5 h-8 text-xs"
-                              >
-                                <Users className="w-3 h-3" /> Group
-                              </Button>
-                            )}
-                            {o.suppliers.email && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => handleSend(o.id, "email")}
-                                disabled={isSending}
-                                className="gap-1.5 h-8 text-xs"
-                              >
-                                {isSending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Mail className="w-3 h-3" />}
-                                Email
-                              </Button>
-                            )}
-                          </div>
-                        )}
-                        {isSent && (
-                          <span className="flex items-center gap-1 text-green-600 text-xs font-medium">
-                            <CheckCircle className="w-4 h-4" /> Sent
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-left text-xs text-gray-400 bg-gray-50 border-b border-gray-100">
-                          <th className="px-6 py-2">Item</th>
-                          <th className="px-6 py-2">Qty</th>
-                          <th className="px-6 py-2">Spec</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-50">
-                        {supplierItems.map((item) => (
-                          <tr key={item.id}>
-                            <td className="px-6 py-2 font-medium text-gray-800">{item.name}</td>
-                            <td className="px-6 py-2 text-gray-500">{item.qty != null ? `${item.qty} ${item.unit ?? ""}` : "—"}</td>
-                            <td className="px-6 py-2 text-gray-400 text-xs">{item.spec ?? "—"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-
-                    {o.message_body && (
-                      <div className="px-6 py-4 border-t border-gray-50 bg-gray-50/50">
-                        <p className="text-xs text-gray-400 mb-1 font-medium">Message preview</p>
-                        <pre className="text-xs text-gray-600 whitespace-pre-wrap font-sans leading-relaxed">{o.message_body}</pre>
-                      </div>
-                    )}
-                  </div>
+                  <SupplierSplitCard
+                    key={o.id}
+                    outgoing={o}
+                    supplierItems={supplierItems}
+                    isSending={isSending}
+                    isSelected={isSelected}
+                    isSent={isSent}
+                    isExpanded={expanded.has(o.id)}
+                    onToggleExpand={() => toggleExpanded(o.id)}
+                    onSelect={(checked) => {
+                      setSelected((prev) => {
+                        const next = new Set(prev);
+                        if (checked) next.add(o.id);
+                        else next.delete(o.id);
+                        return next;
+                      });
+                    }}
+                    onMessageChange={(body) => updateOutgoingMessage(o.id, body)}
+                    onSend={(channel, whatsappNumber) =>
+                      handleSend(o.id, channel, whatsappNumber, o.message_body, undefined, o.suppliers?.name)
+                    }
+                    onOpenGroup={() =>
+                      openGroupModal(
+                        o.id,
+                        o.suppliers!.whatsapp_group_link!,
+                        o.message_body,
+                        o.suppliers!.name,
+                      )
+                    }
+                  />
                 );
               })}
             </div>
