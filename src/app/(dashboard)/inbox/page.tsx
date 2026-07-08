@@ -170,25 +170,34 @@ export default function InboxPage() {
     const params = new URLSearchParams(window.location.search);
     const connected = params.get("gmail_connected");
     const error = params.get("gmail_error");
+    const detail = params.get("detail");
     if (!connected && !error) return;
 
-    if (connected) toast.success("Gmail connected!");
+    if (detail) console.error("[gmail-oauth]", error ?? "connected", "-", detail);
+
+    const withDetail = (msg: string) => detail ? `${msg} (${detail})` : msg;
+
+    if (connected) {
+      toast.success("Gmail connected!");
+      loadGmailStatus();
+    }
     else if (error === "not_configured") {
       toast.error("Gmail login isn't set up yet. Ask your admin to configure GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET.");
     } else if (error === "access_denied") {
-      toast.error("Gmail connection was cancelled.");
+      toast.error(withDetail("Gmail connection was cancelled."));
     } else if (error === "token_failed") {
-      toast.error("Couldn't finish connecting to Gmail. Please try again.");
+      toast.error(withDetail("Couldn't finish connecting to Gmail. Please try again."), { duration: 15000 });
     } else if (error === "profile_failed") {
-      toast.error("Couldn't read your Gmail address from Google. Please try connecting again.");
+      toast.error(withDetail("Couldn't read your Gmail address from Google. Please try connecting again."), { duration: 15000 });
     } else if (error === "save_failed") {
-      toast.error("Connected to Gmail, but couldn't save it to your account. Please try again.");
+      toast.error(withDetail("Connected to Gmail, but couldn't save it to your account. Please try again."), { duration: 15000 });
     } else {
-      toast.error("Something went wrong connecting Gmail.");
+      toast.error(withDetail("Something went wrong connecting Gmail."), { duration: 15000 });
     }
 
     params.delete("gmail_connected");
     params.delete("gmail_error");
+    params.delete("detail");
     const query = params.toString();
     router.replace(query ? `/inbox?${query}` : "/inbox");
   }, [router]);
@@ -199,13 +208,18 @@ export default function InboxPage() {
     const supabase = createClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { setGmailLoading(false); return; }
-    const { data } = await supabase
+    // .limit(1) instead of .single() — .single() throws (and yields no data)
+    // if more than one row ever matched this user_id+key, which would
+    // silently look like "not connected" even after a successful save.
+    const { data, error } = await supabase
       .from("user_settings")
       .select("value")
       .eq("user_id", user.id)
       .eq("key", "gmail_email")
-      .single();
-    setGmailEmail(data?.value ?? null);
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (error) console.error("[gmail-status] lookup failed", error);
+    setGmailEmail(data?.[0]?.value || null);
     setGmailLoading(false);
   }
 
