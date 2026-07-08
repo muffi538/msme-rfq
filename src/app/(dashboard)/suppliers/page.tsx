@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Plus, Trash2, Users, Pencil, X, AlertTriangle, Check } from "lucide-react";
+import { toast } from "sonner";
 
 const BUILT_IN_CATEGORIES = [
   "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
@@ -176,28 +177,33 @@ export default function SuppliersPage() {
     setSaving(true);
     const { data: { user } } = await supabase.auth.getUser();
 
-    if (formMode === "add") {
-      await supabase.from("suppliers").insert({
-        user_id:              user!.id,
-        name:                 form.name,
-        contact_person:       form.contact_person || null,
-        email:                form.email || null,
-        whatsapp_number:      form.whatsapp_number || null,
-        whatsapp_group_link:  form.whatsapp_group_link || null,
-        categories:           form.categories,
-      });
-    } else {
-      await supabase.from("suppliers").update({
-        name:                 form.name,
-        contact_person:       form.contact_person || null,
-        email:                form.email || null,
-        whatsapp_number:      form.whatsapp_number || null,
-        whatsapp_group_link:  form.whatsapp_group_link || null,
-        categories:           form.categories,
-      }).eq("id", formMode!);
-    }
+    const { error } = formMode === "add"
+      ? await supabase.from("suppliers").insert({
+          user_id:              user!.id,
+          name:                 form.name,
+          contact_person:       form.contact_person || null,
+          email:                form.email || null,
+          whatsapp_number:      form.whatsapp_number || null,
+          whatsapp_group_link:  form.whatsapp_group_link || null,
+          categories:           form.categories,
+        })
+      : await supabase.from("suppliers").update({
+          name:                 form.name,
+          contact_person:       form.contact_person || null,
+          email:                form.email || null,
+          whatsapp_number:      form.whatsapp_number || null,
+          whatsapp_group_link:  form.whatsapp_group_link || null,
+          categories:           form.categories,
+        }).eq("id", formMode!);
 
     setSaving(false);
+
+    if (error) {
+      console.error("[suppliers] save failed", error);
+      toast.error(`Couldn't save supplier: ${error.message}`);
+      return;
+    }
+
     closeForm();
     fetchSuppliers();
   }
@@ -205,10 +211,17 @@ export default function SuppliersPage() {
   async function confirmDelete() {
     if (!deleteId) return;
     setDeleting(true);
-    await supabase.from("suppliers").delete().eq("id", deleteId);
+    const { error } = await supabase.from("suppliers").delete().eq("id", deleteId);
+    setDeleting(false);
+
+    if (error) {
+      console.error("[suppliers] delete failed", error);
+      toast.error(`Couldn't delete supplier: ${error.message}`);
+      return;
+    }
+
     setSuppliers((prev) => prev.filter((s) => s.id !== deleteId));
     setDeleteId(null);
-    setDeleting(false);
   }
 
   const editingSupplier = typeof formMode === "string" && formMode !== "add"
