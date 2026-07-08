@@ -8,8 +8,13 @@ export async function GET(request: NextRequest) {
 
   if (!user) return NextResponse.redirect(`${origin}/login`);
 
+  if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) {
+    console.error("Gmail OAuth is not configured: GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET missing");
+    return NextResponse.redirect(`${origin}/inbox?gmail_error=not_configured`);
+  }
+
   const params = new URLSearchParams({
-    client_id:     process.env.GMAIL_CLIENT_ID!,
+    client_id:     process.env.GMAIL_CLIENT_ID,
     redirect_uri:  `${origin}/api/auth/gmail/callback`,
     response_type: "code",
     scope: [
