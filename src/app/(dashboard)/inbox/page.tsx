@@ -292,8 +292,15 @@ export default function InboxPage() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Fetch failed");
       setFetchResults(json.results ?? []);
-      if (json.created === 0) toast.info("No new emails found.");
-      else toast.success(`${json.created} new email${json.created > 1 ? "s" : ""} fetched!`);
+      if (json.created > 0) {
+        toast.success(`${json.created} new email${json.created > 1 ? "s" : ""} fetched!`);
+      } else if (json.insertFailed > 0) {
+        toast.error(`Found ${json.fetched} unread email(s) but couldn't save ${json.insertFailed} of them: ${json.lastInsertError ?? "unknown error"}`, { duration: 15000 });
+      } else if (json.deduped > 0) {
+        toast.info(`Found ${json.fetched} unread email(s), but they were already imported previously.`);
+      } else {
+        toast.info("No new emails found.");
+      }
       await loadAll();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Something went wrong";
@@ -442,12 +449,7 @@ export default function InboxPage() {
               <Mail className="w-5 h-5 text-[#1847F5]" />
             </div>
             <div className="flex-1 min-w-0">
-              <h2 className="font-semibold text-card-foreground">
-                Gmail RFQ Importer
-                <span className="ml-2 align-middle text-[10px] font-mono font-normal text-white bg-purple-600 px-1.5 py-0.5 rounded">
-                  build gmail-debug-4
-                </span>
-              </h2>
+              <h2 className="font-semibold text-card-foreground">Gmail RFQ Importer</h2>
               <p className="text-muted-foreground text-xs mt-0.5 truncate">
                 {gmailLoading
                   ? "Checking Gmail connection…"

@@ -80,9 +80,13 @@ export async function POST() {
 
     // Fetch up to 20 newest unread emails (was 5 — too few to keep up)
     const emails = await fetchUnreadEmails(20, refreshToken);
-    if (emails.length === 0) return NextResponse.json({ created: 0, message: "No new emails found" });
+    console.log("[email-fetch] Gmail returned", emails.length, "unread message(s)");
+    if (emails.length === 0) return NextResponse.json({ created: 0, fetched: 0, message: "No new emails found" });
 
     let created = 0;
+    let deduped = 0;
+    let insertFailed = 0;
+    let lastInsertError: string | null = null;
     const results: { rfqCode: string; subject: string; from: string; hasAttachment: boolean }[] = [];
 
     for (const email of emails) {
@@ -91,7 +95,7 @@ export async function POST() {
         .from("rfqs")
         .select("*", { count: "exact", head: true })
         .like("file_name", `msgid:${email.messageId}%`);
-      if ((count ?? 0) > 0) continue;
+      if ((count ?? 0) > 0) { deduped++; continue; }
 
       let rawText     = "";
       let fileType: string | null = null;
@@ -137,7 +141,7 @@ export async function POST() {
       }
 
       const rfqCode = await generateRfqCode(supabase, user.id);
-      const { data: rfq } = await supabase
+      const { data: rfq, error: insertError } = await supabase
         .from("rfqs")
         .insert({
           user_id:     user.id,
@@ -154,12 +158,18 @@ export async function POST() {
         .select("id")
         .single();
 
-      if (!rfq) continue;
+      if (insertError || !rfq) {
+        insertFailed++;
+        lastInsertError = insertError?.message ?? "insert returned no row";
+        console.error("[email-fetch] rfq insert failed", { messageId: email.messageId, error: insertError });
+        continue;
+      }
       results.push({ rfqCode, subject: email.subject, from: email.from, hasAttachment });
       created++;
     }
 
-    return NextResponse.json({ created, results });
+    console.log("[email-fetch] done", { fetched: emails.length, created, deduped, insertFailed });
+    return NextResponse.json({ created, results, fetched: emails.length, deduped, insertFailed, lastInsertError });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Internal error";
     console.error("Email fetch error:", msg);
