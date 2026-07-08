@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { fetchUnreadEmails } from "@/lib/email/gmail";
+import { fetchUnreadEmails, markAsRead } from "@/lib/email/gmail";
 import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { generateRfqCode } from "@/lib/rfq";
@@ -95,7 +95,13 @@ export async function POST() {
         .from("rfqs")
         .select("*", { count: "exact", head: true })
         .like("file_name", `msgid:${email.messageId}%`);
-      if ((count ?? 0) > 0) { deduped++; continue; }
+      if ((count ?? 0) > 0) {
+        deduped++;
+        // Already saved previously — safe to clear from unread so it stops
+        // showing up in every future fetch.
+        try { await markAsRead(email.messageId, refreshToken); } catch { /* best-effort */ }
+        continue;
+      }
 
       let rawText     = "";
       let fileType: string | null = null;
@@ -164,6 +170,10 @@ export async function POST() {
         console.error("[email-fetch] rfq insert failed", { messageId: email.messageId, error: insertError });
         continue;
       }
+      // Only mark read now that it's safely saved — if this fails, we still
+      // want the message to be picked up again on the next fetch.
+      try { await markAsRead(email.messageId, refreshToken); } catch { /* best-effort */ }
+
       results.push({ rfqCode, subject: email.subject, from: email.from, hasAttachment });
       created++;
     }
