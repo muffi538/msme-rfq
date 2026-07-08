@@ -19,7 +19,7 @@ function buildMessage(
   template: string,
   supplierName: string,
   rfqCode: string,
-  category: string,
+  categories: string[],
   items: { name: string; qty: number | null; unit: string | null; spec: string | null }[]
 ): string {
   const itemLines = items
@@ -33,7 +33,7 @@ function buildMessage(
   return template
     .replace("{supplier}", supplierName)
     .replace("{rfqCode}", rfqCode)
-    .replace("{category}", category.replace(/_/g, " "))
+    .replace("{category}", categories.map((c) => c.replace(/_/g, " ")).join(", "))
     .replace("{items}", itemLines);
 }
 
@@ -71,13 +71,6 @@ export async function POST(
     .eq("user_id", user.id)
     .eq("active", true);
 
-  // Group items by category
-  const byCategory: Record<string, typeof items> = {};
-  for (const item of items) {
-    if (!byCategory[item.category]) byCategory[item.category] = [];
-    byCategory[item.category].push(item);
-  }
-
   // Delete existing outgoing RFQs for this parent (re-split)
   const { error: clearError } = await supabase.from("outgoing_rfqs").delete().eq("rfq_id", rfqId).eq("user_id", user.id);
   if (clearError) {
@@ -88,63 +81,71 @@ export async function POST(
   const outgoingRows: unknown[] = [];
   let seq = 1;
 
-  for (const [category, catItems] of Object.entries(byCategory)) {
-    // Find suppliers for this category
-    const matched = (suppliers ?? []).filter((s) =>
-      s.categories?.includes(category)
-    );
+  // One outgoing RFQ per SUPPLIER, combining every item across every
+  // category that supplier deals in — not one message per category.
+  const activeSuppliers = suppliers ?? [];
+  const unmatchedItems: typeof items = [];
 
-    if (matched.length === 0) {
-      // No supplier — still create a row so staff can see the gap
-      const childCode = `${rfq.rfq_code}-${category.slice(0, 3)}-${String(seq++).padStart(2, "0")}`;
-      const { data: outgoing, error: outgoingError } = await supabase
-        .from("outgoing_rfqs")
-        .insert({
-          rfq_id: rfqId, user_id: user.id, supplier_id: null,
-          child_code: childCode, category,
-          message_body: null, channel: "whatsapp", status: "no_supplier",
-        })
-        .select("*, suppliers(name, whatsapp_number, email)")
-        .single();
-      if (outgoingError || !outgoing) {
-        console.error("[rfqs/split] outgoing_rfqs insert failed (no supplier)", { category, error: outgoingError });
-      } else {
-        outgoingRows.push(outgoing);
-        const itemRows = catItems.map((i) => ({
-          outgoing_rfq_id: outgoing.id, item_id: i.id, user_id: user.id,
-        }));
-        const { error: itemsError } = await supabase.from("outgoing_rfq_items").insert(itemRows);
-        if (itemsError) console.error("[rfqs/split] outgoing_rfq_items insert failed", { category, error: itemsError });
-      }
+  for (const item of items) {
+    const hasMatch = activeSuppliers.some((s) => s.categories?.includes(item.category));
+    if (!hasMatch) unmatchedItems.push(item);
+  }
+
+  for (const supplier of activeSuppliers) {
+    const supplierItems = items.filter((i) => supplier.categories?.includes(i.category));
+    if (supplierItems.length === 0) continue;
+
+    const categories = [...new Set(supplierItems.map((i) => i.category))];
+    const childCode = `${rfq.rfq_code}-${categories[0].slice(0, 3)}-${String(seq++).padStart(2, "0")}`;
+    const message = buildMessage(messageTemplate, supplier.name, rfq.rfq_code, categories, supplierItems);
+
+    const { data: outgoing, error: outgoingError } = await supabase
+      .from("outgoing_rfqs")
+      .insert({
+        rfq_id: rfqId, user_id: user.id, supplier_id: supplier.id,
+        child_code: childCode, category: categories.join(", "), message_body: message,
+        channel: supplier.whatsapp_number ? "whatsapp" : "email",
+        status: "draft",
+      })
+      .select("*, suppliers(name, whatsapp_number, email)")
+      .single();
+
+    if (outgoingError || !outgoing) {
+      console.error("[rfqs/split] outgoing_rfqs insert failed", { supplierId: supplier.id, error: outgoingError });
       continue;
     }
 
-    // One outgoing RFQ per matched supplier
-    for (const supplier of matched) {
-      const childCode = `${rfq.rfq_code}-${category.slice(0, 3)}-${String(seq++).padStart(2, "0")}`;
-      const message = buildMessage(messageTemplate, supplier.name, rfq.rfq_code, category, catItems);
+    outgoingRows.push(outgoing);
+    const itemRows = supplierItems.map((i) => ({
+      outgoing_rfq_id: outgoing.id, item_id: i.id, user_id: user.id,
+    }));
+    const { error: itemsError } = await supabase.from("outgoing_rfq_items").insert(itemRows);
+    if (itemsError) console.error("[rfqs/split] outgoing_rfq_items insert failed", { supplierId: supplier.id, error: itemsError });
+  }
 
-      const { data: outgoing, error: outgoingError } = await supabase
-        .from("outgoing_rfqs")
-        .insert({
-          rfq_id: rfqId, user_id: user.id, supplier_id: supplier.id,
-          child_code: childCode, category, message_body: message,
-          channel: supplier.whatsapp_number ? "whatsapp" : "email",
-          status: "draft",
-        })
-        .select("*, suppliers(name, whatsapp_number, email)")
-        .single();
-
-      if (outgoingError || !outgoing) {
-        console.error("[rfqs/split] outgoing_rfqs insert failed", { category, supplierId: supplier.id, error: outgoingError });
-      } else {
-        outgoingRows.push(outgoing);
-        const itemRows = catItems.map((i) => ({
-          outgoing_rfq_id: outgoing.id, item_id: i.id, user_id: user.id,
-        }));
-        const { error: itemsError } = await supabase.from("outgoing_rfq_items").insert(itemRows);
-        if (itemsError) console.error("[rfqs/split] outgoing_rfq_items insert failed", { category, supplierId: supplier.id, error: itemsError });
-      }
+  // Items whose category matched no active supplier — one combined row so
+  // staff can see the gap instead of a separate row per empty category.
+  if (unmatchedItems.length > 0) {
+    const categories = [...new Set(unmatchedItems.map((i) => i.category))];
+    const childCode = `${rfq.rfq_code}-${categories[0].slice(0, 3)}-${String(seq++).padStart(2, "0")}`;
+    const { data: outgoing, error: outgoingError } = await supabase
+      .from("outgoing_rfqs")
+      .insert({
+        rfq_id: rfqId, user_id: user.id, supplier_id: null,
+        child_code: childCode, category: categories.join(", "),
+        message_body: null, channel: "whatsapp", status: "no_supplier",
+      })
+      .select("*, suppliers(name, whatsapp_number, email)")
+      .single();
+    if (outgoingError || !outgoing) {
+      console.error("[rfqs/split] outgoing_rfqs insert failed (no supplier)", { error: outgoingError });
+    } else {
+      outgoingRows.push(outgoing);
+      const itemRows = unmatchedItems.map((i) => ({
+        outgoing_rfq_id: outgoing.id, item_id: i.id, user_id: user.id,
+      }));
+      const { error: itemsError } = await supabase.from("outgoing_rfq_items").insert(itemRows);
+      if (itemsError) console.error("[rfqs/split] outgoing_rfq_items insert failed (no supplier)", { error: itemsError });
     }
   }
 
