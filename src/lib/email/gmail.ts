@@ -143,11 +143,20 @@ export async function sendEmail({
   await gmailPost("/messages/send", token, { raw: encoded });
 }
 
+export async function markAsRead(messageId: string, refreshToken: string): Promise<void> {
+  const token = await getAccessToken(refreshToken);
+  await gmailPost(`/messages/${messageId}/modify`, token, {
+    removeLabelIds: ["UNREAD"],
+  });
+}
+
 export async function fetchUnreadEmails(limit = 20, refreshToken: string): Promise<FetchedEmail[]> {
   const token = await getAccessToken(refreshToken);
 
   // Only fetch emails still marked UNREAD — Gmail's own flag is the dedup mechanism.
-  // After we save to DB we mark them read, so re-fetching is a no-op.
+  // Caller marks each message read only AFTER successfully saving it (see
+  // markAsRead above) — marking read here unconditionally would permanently
+  // lose any message whose DB save failed, since it'd never be re-fetched.
   const query = `is:unread in:inbox`;
 
   const listRes = await gmailGet(
@@ -191,11 +200,6 @@ export async function fetchUnreadEmails(limit = 20, refreshToken: string): Promi
       date:      new Date(Number(msg.internalDate)),
       bodyText,
       attachments,
-    });
-
-    // Mark as read
-    await gmailPost(`/messages/${id}/modify`, token, {
-      removeLabelIds: ["UNREAD"],
     });
   }
 
