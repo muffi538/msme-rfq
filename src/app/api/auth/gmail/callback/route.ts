@@ -43,16 +43,25 @@ export async function GET(request: NextRequest) {
     headers: { Authorization: `Bearer ${tokens.access_token}` },
   });
   const profile = await profileRes.json() as { email?: string };
-  const gmailEmail = profile.email ?? "";
+
+  if (!profileRes.ok || !profile.email) {
+    console.error("Gmail profile fetch failed:", profileRes.status, profile);
+    return NextResponse.redirect(`${origin}/inbox?gmail_error=profile_failed`);
+  }
 
   // Save per-user Gmail credentials to user_settings
-  await supabase.from("user_settings").upsert(
+  const { error: saveError } = await supabase.from("user_settings").upsert(
     [
       { user_id: user.id, key: "gmail_refresh_token", value: tokens.refresh_token },
-      { user_id: user.id, key: "gmail_email",         value: gmailEmail },
+      { user_id: user.id, key: "gmail_email",         value: profile.email },
     ],
     { onConflict: "user_id,key" }
   );
+
+  if (saveError) {
+    console.error("Failed to save Gmail credentials:", saveError);
+    return NextResponse.redirect(`${origin}/inbox?gmail_error=save_failed`);
+  }
 
   return NextResponse.redirect(`${origin}/inbox?gmail_connected=1`);
 }
