@@ -179,6 +179,10 @@ export default function InboxPage() {
       toast.error("Gmail connection was cancelled.");
     } else if (error === "token_failed") {
       toast.error("Couldn't finish connecting to Gmail. Please try again.");
+    } else if (error === "profile_failed") {
+      toast.error("Couldn't read your Gmail address from Google. Please try connecting again.");
+    } else if (error === "save_failed") {
+      toast.error("Connected to Gmail, but couldn't save it to your account. Please try again.");
     } else {
       toast.error("Something went wrong connecting Gmail.");
     }
