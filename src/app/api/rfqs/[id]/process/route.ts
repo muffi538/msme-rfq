@@ -65,8 +65,14 @@ export async function POST(
   }
 
   if (items.length > 0) {
-    await supabase.from("rfq_items").delete().eq("rfq_id", id);
-    await supabase.from("rfq_items").insert(
+    const { error: deleteError } = await supabase.from("rfq_items").delete().eq("rfq_id", id);
+    if (deleteError) {
+      console.error("[rfqs/process] rfq_items delete failed", deleteError);
+      await supabase.from("rfqs").update({ status: "pending" }).eq("id", id);
+      return NextResponse.json({ error: `Could not clear old items: ${deleteError.message}` }, { status: 500 });
+    }
+
+    const { error: itemsError } = await supabase.from("rfq_items").insert(
       items.map((item) => ({
         rfq_id:              id,
         user_id:             user.id,
@@ -84,8 +90,14 @@ export async function POST(
         flagged:             item.category_confidence < 0.7,
       }))
     );
+    if (itemsError) {
+      console.error("[rfqs/process] rfq_items insert failed", itemsError);
+      await supabase.from("rfqs").update({ status: "pending" }).eq("id", id);
+      return NextResponse.json({ error: `Could not save extracted items: ${itemsError.message}` }, { status: 500 });
+    }
   }
 
-  await supabase.from("rfqs").update({ status: "processed" }).eq("id", id);
+  const { error: statusError } = await supabase.from("rfqs").update({ status: "processed" }).eq("id", id);
+  if (statusError) console.error("[rfqs/process] status update failed", statusError);
   return NextResponse.json({ itemCount: items.length });
 }

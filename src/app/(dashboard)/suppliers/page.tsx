@@ -89,10 +89,14 @@ export default function SuppliersPage() {
   async function saveCustomCategories(next: string[]) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    await supabase.from("user_settings").upsert(
+    const { error } = await supabase.from("user_settings").upsert(
       { user_id: user.id, key: "custom_categories", value: JSON.stringify(next) },
       { onConflict: "user_id,key" }
     );
+    if (error) {
+      console.error("[suppliers] custom category save failed", error);
+      toast.error(`Couldn't save category: ${error.message}`);
+    }
   }
 
   async function addCustomCategory() {

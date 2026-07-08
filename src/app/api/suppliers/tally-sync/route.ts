@@ -142,8 +142,10 @@ export async function POST(request: NextRequest) {
         },
         { onConflict: "user_id,name" }
       );
-    if (error) skipped++;
-    else imported++;
+    if (error) {
+      console.error("[tally-sync] supplier upsert failed", { name: s.name, error });
+      skipped++;
+    } else imported++;
   }
 
   return NextResponse.json({ imported, skipped, total: suppliers.length });

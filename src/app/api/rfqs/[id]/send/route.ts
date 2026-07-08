@@ -27,20 +27,27 @@ export async function POST(
   }
 
   // Mark this outgoing as sent
-  await supabase
+  const { error: outgoingError } = await supabase
     .from("outgoing_rfqs")
     .update({ status: "sent", sent_at: new Date().toISOString(), channel })
     .eq("id", outgoingId);
+
+  if (outgoingError) {
+    console.error("[rfqs/send] outgoing_rfqs status update failed", outgoingError);
+    return NextResponse.json({ error: `Could not mark as sent: ${outgoingError.message}` }, { status: 500 });
+  }
 
   // ── Auto-promote parent RFQ to 'sent' once at least one child has gone out ──
   // Many MSME workflows send to one supplier first and treat that as "sent".
   // We move the parent to 'sent' as soon as any outgoing is dispatched, so
   // it shows up in the Sent filter without the user having to click anything.
-  await supabase
+  const { error: parentError } = await supabase
     .from("rfqs")
     .update({ status: "sent" })
     .eq("id", rfqId)
     .eq("user_id", user.id);
 
-  return NextResponse.json({ ok: true, channel, parentMarkedSent: true });
+  if (parentError) console.error("[rfqs/send] parent rfq status update failed", parentError);
+
+  return NextResponse.json({ ok: true, channel, parentMarkedSent: !parentError });
 }

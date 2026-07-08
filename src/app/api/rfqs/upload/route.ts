@@ -82,10 +82,14 @@ export async function POST(request: NextRequest) {
 
     // 2 — Upload file to Supabase Storage
     const filePath = `${user.id}/${Date.now()}-${file.name}`;
-    await supabase.storage.from("rfq-files").upload(filePath, buffer, {
+    const { error: storageError } = await supabase.storage.from("rfq-files").upload(filePath, buffer, {
       contentType: file.type,
       upsert: false,
     });
+    if (storageError) {
+      console.error("[rfqs/upload] storage upload failed", storageError);
+      return NextResponse.json({ error: `File upload failed: ${storageError.message}` }, { status: 500 });
+    }
 
     // 3 — Insert RFQ row
     const rfqCode = await generateRfqCode(supabase, user.id);
@@ -132,11 +136,16 @@ export async function POST(request: NextRequest) {
         flagged:             item.category_confidence < 0.7,
       }));
 
-      await supabase.from("rfq_items").insert(rows);
+      const { error: itemsError } = await supabase.from("rfq_items").insert(rows);
+      if (itemsError) {
+        console.error("[rfqs/upload] rfq_items insert failed", itemsError);
+        return NextResponse.json({ error: `Could not save extracted items: ${itemsError.message}` }, { status: 500 });
+      }
     }
 
     // 6 — Mark RFQ as processed
-    await supabase.from("rfqs").update({ status: "processed" }).eq("id", rfq.id);
+    const { error: statusError } = await supabase.from("rfqs").update({ status: "processed" }).eq("id", rfq.id);
+    if (statusError) console.error("[rfqs/upload] status update failed", statusError);
 
     return NextResponse.json({ rfqId: rfq.id, rfqCode, itemCount: items.length });
   } catch (err: unknown) {

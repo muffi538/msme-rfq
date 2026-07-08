@@ -24,9 +24,13 @@ export async function POST(request: NextRequest) {
   const body = await request.json() as Record<string, string>;
 
   for (const [key, value] of Object.entries(body)) {
-    await supabase
+    const { error } = await supabase
       .from("user_settings")
       .upsert({ user_id: user.id, key, value }, { onConflict: "user_id,key" });
+    if (error) {
+      console.error("[settings] upsert failed", { key, error });
+      return NextResponse.json({ error: `Could not save "${key}": ${error.message}` }, { status: 500 });
+    }
   }
 
   return NextResponse.json({ ok: true });

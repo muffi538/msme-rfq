@@ -276,10 +276,15 @@ export default function InboxPage() {
     const supabase = createClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    await supabase.from("user_settings").upsert(
+    const { error } = await supabase.from("user_settings").upsert(
       { user_id: user.id, key: "rfq_labels", value: JSON.stringify(next) },
       { onConflict: "user_id,key" }
     );
+    if (error) {
+      console.error("[inbox] label save failed", error);
+      toast.error(`Couldn't save label: ${error.message}`);
+      setLabels(labels); // revert the optimistic update
+    }
   }
 
   /* ── Fetch emails ─────────────────────────────────────── */
