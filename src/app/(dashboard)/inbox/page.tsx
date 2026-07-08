@@ -165,6 +165,30 @@ export default function InboxPage() {
 
   useEffect(() => { loadAll(); loadLabels(); loadGmailStatus(); }, []);
 
+  /* ── Surface the result of the Gmail OAuth redirect ────── */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("gmail_connected");
+    const error = params.get("gmail_error");
+    if (!connected && !error) return;
+
+    if (connected) toast.success("Gmail connected!");
+    else if (error === "not_configured") {
+      toast.error("Gmail login isn't set up yet. Ask your admin to configure GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET.");
+    } else if (error === "access_denied") {
+      toast.error("Gmail connection was cancelled.");
+    } else if (error === "token_failed") {
+      toast.error("Couldn't finish connecting to Gmail. Please try again.");
+    } else {
+      toast.error("Something went wrong connecting Gmail.");
+    }
+
+    params.delete("gmail_connected");
+    params.delete("gmail_error");
+    const query = params.toString();
+    router.replace(query ? `/inbox?${query}` : "/inbox");
+  }, [router]);
+
   /* ── Gmail status ────────────────────────────────────── */
   async function loadGmailStatus() {
     setGmailLoading(true);
