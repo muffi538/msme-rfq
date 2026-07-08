@@ -442,12 +442,7 @@ export default function InboxPage() {
               <Mail className="w-5 h-5 text-[#1847F5]" />
             </div>
             <div className="flex-1 min-w-0">
-              <h2 className="font-semibold text-card-foreground">
-                Gmail RFQ Importer
-                <span className="ml-2 align-middle text-[10px] font-mono font-normal text-white bg-purple-600 px-1.5 py-0.5 rounded">
-                  build gmail-debug-4
-                </span>
-              </h2>
+              <h2 className="font-semibold text-card-foreground">Gmail RFQ Importer</h2>
               <p className="text-muted-foreground text-xs mt-0.5 truncate">
                 {gmailLoading
                   ? "Checking Gmail connection…"
