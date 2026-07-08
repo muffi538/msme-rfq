@@ -79,7 +79,11 @@ export async function POST(
   }
 
   // Delete existing outgoing RFQs for this parent (re-split)
-  await supabase.from("outgoing_rfqs").delete().eq("rfq_id", rfqId).eq("user_id", user.id);
+  const { error: clearError } = await supabase.from("outgoing_rfqs").delete().eq("rfq_id", rfqId).eq("user_id", user.id);
+  if (clearError) {
+    console.error("[rfqs/split] clearing old outgoing rfqs failed", clearError);
+    return NextResponse.json({ error: `Could not clear previous split: ${clearError.message}` }, { status: 500 });
+  }
 
   const outgoingRows: unknown[] = [];
   let seq = 1;
@@ -93,7 +97,7 @@ export async function POST(
     if (matched.length === 0) {
       // No supplier — still create a row so staff can see the gap
       const childCode = `${rfq.rfq_code}-${category.slice(0, 3)}-${String(seq++).padStart(2, "0")}`;
-      const { data: outgoing } = await supabase
+      const { data: outgoing, error: outgoingError } = await supabase
         .from("outgoing_rfqs")
         .insert({
           rfq_id: rfqId, user_id: user.id, supplier_id: null,
@@ -102,12 +106,15 @@ export async function POST(
         })
         .select("*, suppliers(name, whatsapp_number, email)")
         .single();
-      if (outgoing) {
+      if (outgoingError || !outgoing) {
+        console.error("[rfqs/split] outgoing_rfqs insert failed (no supplier)", { category, error: outgoingError });
+      } else {
         outgoingRows.push(outgoing);
         const itemRows = catItems.map((i) => ({
           outgoing_rfq_id: outgoing.id, item_id: i.id, user_id: user.id,
         }));
-        await supabase.from("outgoing_rfq_items").insert(itemRows);
+        const { error: itemsError } = await supabase.from("outgoing_rfq_items").insert(itemRows);
+        if (itemsError) console.error("[rfqs/split] outgoing_rfq_items insert failed", { category, error: itemsError });
       }
       continue;
     }
@@ -117,7 +124,7 @@ export async function POST(
       const childCode = `${rfq.rfq_code}-${category.slice(0, 3)}-${String(seq++).padStart(2, "0")}`;
       const message = buildMessage(messageTemplate, supplier.name, rfq.rfq_code, category, catItems);
 
-      const { data: outgoing } = await supabase
+      const { data: outgoing, error: outgoingError } = await supabase
         .from("outgoing_rfqs")
         .insert({
           rfq_id: rfqId, user_id: user.id, supplier_id: supplier.id,
@@ -128,18 +135,22 @@ export async function POST(
         .select("*, suppliers(name, whatsapp_number, email)")
         .single();
 
-      if (outgoing) {
+      if (outgoingError || !outgoing) {
+        console.error("[rfqs/split] outgoing_rfqs insert failed", { category, supplierId: supplier.id, error: outgoingError });
+      } else {
         outgoingRows.push(outgoing);
         const itemRows = catItems.map((i) => ({
           outgoing_rfq_id: outgoing.id, item_id: i.id, user_id: user.id,
         }));
-        await supabase.from("outgoing_rfq_items").insert(itemRows);
+        const { error: itemsError } = await supabase.from("outgoing_rfq_items").insert(itemRows);
+        if (itemsError) console.error("[rfqs/split] outgoing_rfq_items insert failed", { category, supplierId: supplier.id, error: itemsError });
       }
     }
   }
 
   // Mark parent RFQ as approved
-  await supabase.from("rfqs").update({ status: "approved" }).eq("id", rfqId);
+  const { error: statusError } = await supabase.from("rfqs").update({ status: "approved" }).eq("id", rfqId);
+  if (statusError) console.error("[rfqs/split] status update failed", statusError);
 
   return NextResponse.json({ outgoing: outgoingRows });
 }
