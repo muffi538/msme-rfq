@@ -9,17 +9,47 @@ export default async function DashboardPage() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
+  // Every query below is independent of the others — fire them all at once
+  // instead of round-tripping one at a time.
   const [
     { count: totalRfqs },
     { count: processedRfqs },
     { count: sentCount },
     { count: totalSuppliers },
+    { data: gmailRows },
+    { count: supplierCount },
+    { count: processedCount },
+    { data: recentRfqs },
   ] = await Promise.all([
     // Total = only RFQs that have been processed (pending stay in inbox only)
     supabase.from("rfqs").select("*", { count: "exact", head: true }).not("status", "in", "(pending,needs_processing)"),
     supabase.from("rfqs").select("*", { count: "exact", head: true }).eq("status", "processed"),
     supabase.from("outgoing_rfqs").select("*", { count: "exact", head: true }).eq("status", "sent"),
     supabase.from("suppliers").select("*", { count: "exact", head: true }),
+    // Setup checklist state — drives the onboarding banner.
+    // .limit(1) instead of .single() — a duplicate row for this user_id+key
+    // would make .single() error out and look like "not connected".
+    supabase
+      .from("user_settings")
+      .select("value")
+      .eq("user_id", user.id)
+      .eq("key", "gmail_refresh_token")
+      .order("created_at", { ascending: false })
+      .limit(1),
+    supabase.from("suppliers").select("*", { count: "exact", head: true }).eq("user_id", user.id),
+    supabase
+      .from("rfqs")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .in("status", ["processed", "approved", "sent"]),
+    // Recent RFQs widget — also excludes pending/needs_processing so unprocessed
+    // emails don't leak out of the inbox into the main dashboard view
+    supabase
+      .from("rfqs")
+      .select("id, rfq_code, buyer_name, status, priority, created_at")
+      .not("status", "in", "(pending,needs_processing)")
+      .order("created_at", { ascending: false })
+      .limit(5),
   ]);
 
   const stats = [
@@ -29,42 +59,12 @@ export default async function DashboardPage() {
     { label: "Suppliers",   value: totalSuppliers ?? 0,icon: Users,       href: "/suppliers",  num: "04" },
   ];
 
-  // Setup checklist state — drives the onboarding banner
-  // .limit(1) instead of .single() — a duplicate row for this user_id+key
-  // would make .single() error out and look like "not connected".
-  const { data: gmailRows } = await supabase
-    .from("user_settings")
-    .select("value")
-    .eq("user_id", user.id)
-    .eq("key", "gmail_refresh_token")
-    .order("created_at", { ascending: false })
-    .limit(1);
   const gmailConnected = !!gmailRows?.[0]?.value;
-
-  const { count: supplierCount } = await supabase
-    .from("suppliers")
-    .select("*", { count: "exact", head: true })
-    .eq("user_id", user.id);
   const hasSupplier = (supplierCount ?? 0) > 0;
-
-  const { count: processedCount } = await supabase
-    .from("rfqs")
-    .select("*", { count: "exact", head: true })
-    .eq("user_id", user.id)
-    .in("status", ["processed", "approved", "sent"]);
   const hasProcessedRfq = (processedCount ?? 0) > 0;
 
   const onboardingDone = gmailConnected && hasSupplier && hasProcessedRfq;
   const completedSteps = [gmailConnected, hasSupplier, hasProcessedRfq].filter(Boolean).length;
-
-  // Recent RFQs widget — also excludes pending/needs_processing so unprocessed
-  // emails don't leak out of the inbox into the main dashboard view
-  const { data: recentRfqs } = await supabase
-    .from("rfqs")
-    .select("id, rfq_code, buyer_name, status, priority, created_at")
-    .not("status", "in", "(pending,needs_processing)")
-    .order("created_at", { ascending: false })
-    .limit(5);
 
   const statusStyle: Record<string, string> = {
     pending:    "bg-amber-50 text-amber-700 border border-amber-200",
