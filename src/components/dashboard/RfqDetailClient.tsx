@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import {
   Loader2, Split, Send, CheckCircle, AlertTriangle,
   MessageCircle, Mail, Package, Pencil, Copy, ExternalLink, Users,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, ChevronRight,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -21,7 +21,6 @@ import {
   computeWorkflowSteps,
   isWorkflowComplete,
 } from "@/lib/rfq-lifecycle";
-import { ChevronDown, ChevronRight } from "lucide-react";
 
 const PRESET_CATEGORIES = [
   "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
