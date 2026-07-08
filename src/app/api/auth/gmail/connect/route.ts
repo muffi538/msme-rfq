@@ -9,9 +9,11 @@ export async function GET(request: NextRequest) {
   if (!user) return NextResponse.redirect(`${origin}/login`);
 
   if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) {
-    console.error("Gmail OAuth is not configured: GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET missing");
+    console.error("[gmail-oauth] connect: GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET missing");
     return NextResponse.redirect(`${origin}/inbox?gmail_error=not_configured`);
   }
+
+  console.log("[gmail-oauth] connect: redirecting to Google", { userId: user.id, origin });
 
   const params = new URLSearchParams({
     client_id:     process.env.GMAIL_CLIENT_ID,

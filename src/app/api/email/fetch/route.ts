@@ -57,15 +57,21 @@ export async function POST() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
-    // Look up this user's own Gmail refresh token
-    const { data: tokenRow } = await supabase
+    // Look up this user's own Gmail refresh token.
+    // .limit(1) instead of .single() — a duplicate row for this user_id+key
+    // would make .single() error out and look like "not connected".
+    const { data: tokenRows, error: tokenLookupError } = await supabase
       .from("user_settings")
       .select("value")
       .eq("user_id", user.id)
       .eq("key", "gmail_refresh_token")
-      .single();
+      .order("created_at", { ascending: false })
+      .limit(1);
 
-    if (!tokenRow?.value) {
+    if (tokenLookupError) console.error("[email-fetch] token lookup failed", tokenLookupError);
+    const refreshToken = tokenRows?.[0]?.value;
+
+    if (!refreshToken) {
       return NextResponse.json(
         { error: "Gmail not connected. Please connect your Gmail account first." },
         { status: 400 }
@@ -73,7 +79,7 @@ export async function POST() {
     }
 
     // Fetch up to 20 newest unread emails (was 5 — too few to keep up)
-    const emails = await fetchUnreadEmails(20, tokenRow.value);
+    const emails = await fetchUnreadEmails(20, refreshToken);
     if (emails.length === 0) return NextResponse.json({ created: 0, message: "No new emails found" });
 
     let created = 0;

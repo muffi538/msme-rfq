@@ -30,13 +30,16 @@ export default async function DashboardPage() {
   ];
 
   // Setup checklist state — drives the onboarding banner
-  const { data: gmailRow } = await supabase
+  // .limit(1) instead of .single() — a duplicate row for this user_id+key
+  // would make .single() error out and look like "not connected".
+  const { data: gmailRows } = await supabase
     .from("user_settings")
     .select("value")
     .eq("user_id", user.id)
     .eq("key", "gmail_refresh_token")
-    .single();
-  const gmailConnected = !!gmailRow?.value;
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const gmailConnected = !!gmailRows?.[0]?.value;
 
   const { count: supplierCount } = await supabase
     .from("suppliers")
