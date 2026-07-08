@@ -292,8 +292,15 @@ export default function InboxPage() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Fetch failed");
       setFetchResults(json.results ?? []);
-      if (json.created === 0) toast.info("No new emails found.");
-      else toast.success(`${json.created} new email${json.created > 1 ? "s" : ""} fetched!`);
+      if (json.created > 0) {
+        toast.success(`${json.created} new email${json.created > 1 ? "s" : ""} fetched!`);
+      } else if (json.insertFailed > 0) {
+        toast.error(`Found ${json.fetched} unread email(s) but couldn't save ${json.insertFailed} of them: ${json.lastInsertError ?? "unknown error"}`, { duration: 15000 });
+      } else if (json.deduped > 0) {
+        toast.info(`Found ${json.fetched} unread email(s), but they were already imported previously.`);
+      } else {
+        toast.info("No new emails found.");
+      }
       await loadAll();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Something went wrong";
