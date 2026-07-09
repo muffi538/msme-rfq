@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { normalizeAndCategorize } from "@/lib/ai/normalize";
 import { parsePdf } from "@/lib/parsers/pdf";
+import { checkRateLimit } from "@/lib/rateLimit";
 
 export const maxDuration = 60;
 
@@ -13,6 +14,11 @@ export async function POST(
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const allowed = await checkRateLimit(supabase, user.id, "rfq-process", 600, 20);
+  if (!allowed) {
+    return NextResponse.json({ error: "Too many processing requests. Please wait a few minutes and try again." }, { status: 429 });
+  }
 
   const { data: rfq } = await supabase
     .from("rfqs")

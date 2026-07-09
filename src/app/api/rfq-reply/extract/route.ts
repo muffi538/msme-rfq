@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
+import { checkRateLimit } from "@/lib/rateLimit";
 
 export const maxDuration = 60;
 
@@ -40,6 +41,7 @@ async function extractWithVision(base64: string, mimeType: string): Promise<stri
         ],
       }],
     }),
+    signal: AbortSignal.timeout(45000),
   });
   const json = await res.json() as { choices: { message: { content: string } }[] };
   return json.choices?.[0]?.message?.content ?? "";
@@ -88,6 +90,7 @@ Do NOT include a subject line inside the body.`,
         },
       ],
     }),
+    signal: AbortSignal.timeout(45000),
   });
 
   if (!res.ok) {
@@ -95,8 +98,9 @@ Do NOT include a subject line inside the body.`,
     throw new Error(`OpenAI error: ${err}`);
   }
 
-  const json = await res.json() as { choices: { message: { content: string } }[] };
-  const content = json.choices[0].message.content;
+  const json = await res.json() as { choices?: { message: { content: string } }[] };
+  const content = json.choices?.[0]?.message?.content;
+  if (!content) throw new Error("OpenAI returned no content");
 
   let parsed: ExtractedQuote;
   try {
@@ -116,6 +120,11 @@ export async function POST(request: NextRequest) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const allowed = await checkRateLimit(supabase, user.id, "rfq-reply-extract", 600, 20);
+  if (!allowed) {
+    return NextResponse.json({ error: "Too many requests. Please wait a few minutes and try again." }, { status: 429 });
+  }
 
   const { data: settingRows } = await supabase
     .from("user_settings")

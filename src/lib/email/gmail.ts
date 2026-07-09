@@ -12,6 +12,8 @@ export type FetchedEmail = {
   }[];
 };
 
+const API_TIMEOUT_MS = 15000;
+
 async function getAccessToken(refreshToken: string): Promise<string> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -22,6 +24,7 @@ async function getAccessToken(refreshToken: string): Promise<string> {
       refresh_token: refreshToken,
       grant_type:    "refresh_token",
     }),
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
   });
   const data = await res.json() as { access_token?: string; error?: string };
   if (!data.access_token) throw new Error(`OAuth token error: ${data.error ?? "unknown"}`);
@@ -31,6 +34,7 @@ async function getAccessToken(refreshToken: string): Promise<string> {
 async function gmailGet(path: string, token: string) {
   const res  = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me${path}`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
   });
   const json = await res.json() as Record<string, unknown>;
   if (!res.ok || json.error) {
@@ -43,6 +47,7 @@ async function gmailGet(path: string, token: string) {
 async function gmailPost(path: string, token: string, body: unknown) {
   const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me${path}`, {
     method: "POST",
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });

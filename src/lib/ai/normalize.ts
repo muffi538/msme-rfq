@@ -56,6 +56,7 @@ ${text}`,
         },
       ],
     }),
+    signal: AbortSignal.timeout(45000),
   });
 
   if (!res.ok) {
@@ -63,8 +64,9 @@ ${text}`,
     throw new Error(`OpenAI error: ${err}`);
   }
 
-  const json = await res.json() as { choices: { message: { content: string } }[] };
-  const content = json.choices[0].message.content;
+  const json = await res.json() as { choices?: { message: { content: string } }[] };
+  const content = json.choices?.[0]?.message?.content;
+  if (!content) throw new Error("OpenAI returned no content");
 
   let parsed: { items?: unknown[] };
   try {

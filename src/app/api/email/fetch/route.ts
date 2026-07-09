@@ -4,6 +4,7 @@ import { fetchUnreadEmails, markAsRead } from "@/lib/email/gmail";
 import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { generateRfqCode } from "@/lib/rfq";
+import { checkRateLimit } from "@/lib/rateLimit";
 
 export const maxDuration = 60;
 
@@ -45,6 +46,7 @@ async function extractPdfWithOpenAI(buffer: Buffer): Promise<string> {
         ],
       }],
     }),
+    signal: AbortSignal.timeout(30000),
   });
   const json = await res.json() as { choices?: { message: { content: string } }[]; error?: { message: string } };
   if (json.error) throw new Error(`OpenAI: ${json.error.message}`);
@@ -56,6 +58,13 @@ export async function POST() {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+    // Each fetch can trigger up to 20 Gmail API calls plus OpenAI fallback
+    // calls — cap how often it can be triggered.
+    const allowed = await checkRateLimit(supabase, user.id, "email-fetch", 300, 10);
+    if (!allowed) {
+      return NextResponse.json({ error: "Too many fetch requests. Please wait a few minutes and try again." }, { status: 429 });
+    }
 
     // Look up this user's own Gmail refresh token.
     // .limit(1) instead of .single() — a duplicate row for this user_id+key
