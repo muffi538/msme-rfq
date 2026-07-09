@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
 import { fetchUnreadEmails, markAsRead } from "@/lib/email/gmail";
@@ -6,6 +6,8 @@ import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { generateRfqCode } from "@/lib/rfq";
 import { checkRateLimit } from "@/lib/rateLimit";
+import { createJob, updateJob } from "@/lib/jobs";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const maxDuration = 60;
 
@@ -54,44 +56,23 @@ async function extractPdfWithOpenAI(buffer: Buffer): Promise<string> {
   return json.choices?.[0]?.message?.content ?? "";
 }
 
-export async function POST() {
+// The actual work — runs after the response has already gone back to the
+// client (see after() in POST below), so it never blocks the UI. Every step
+// updates the job row instead of returning anything directly.
+async function runEmailFetchJob(supabase: SupabaseClient, userId: string, jobId: string, refreshToken: string) {
   try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+    await updateJob(supabase, jobId, { status: "running" });
 
-    // Each fetch can trigger up to 20 Gmail API calls plus OpenAI fallback
-    // calls — cap how often it can be triggered.
-    const allowed = await checkRateLimit(supabase, user.id, "email-fetch", 300, 10);
-    if (!allowed) {
-      return NextResponse.json({ error: "Too many fetch requests. Please wait a few minutes and try again." }, { status: 429 });
-    }
-
-    // Look up this user's own Gmail refresh token.
-    // .limit(1) instead of .single() — a duplicate row for this user_id+key
-    // would make .single() error out and look like "not connected".
-    const { data: tokenRows, error: tokenLookupError } = await supabase
-      .from("user_settings")
-      .select("value")
-      .eq("user_id", user.id)
-      .eq("key", "gmail_refresh_token")
-      .order("created_at", { ascending: false })
-      .limit(1);
-
-    if (tokenLookupError) logError("[email-fetch] token lookup failed", tokenLookupError);
-    const refreshToken = tokenRows?.[0]?.value;
-
-    if (!refreshToken) {
-      return NextResponse.json(
-        { error: "Gmail not connected. Please connect your Gmail account first." },
-        { status: 400 }
-      );
-    }
-
-    // Fetch up to 20 newest unread emails (was 5 — too few to keep up)
     const emails = await fetchUnreadEmails(20, refreshToken);
     console.log("[email-fetch] Gmail returned", emails.length, "unread message(s)");
-    if (emails.length === 0) return NextResponse.json({ created: 0, fetched: 0, message: "No new emails found" });
+
+    if (emails.length === 0) {
+      await updateJob(supabase, jobId, {
+        status: "done",
+        result: { created: 0, fetched: 0, message: "No new emails found" },
+      });
+      return;
+    }
 
     let created = 0;
     let deduped = 0;
@@ -99,7 +80,10 @@ export async function POST() {
     let lastInsertError: string | null = null;
     const results: { rfqCode: string; subject: string; from: string; hasAttachment: boolean }[] = [];
 
-    for (const email of emails) {
+    for (let i = 0; i < emails.length; i++) {
+      const email = emails[i];
+      await updateJob(supabase, jobId, { progress: { processed: i, total: emails.length } });
+
       // Dedup: skip if this message was already fetched
       const { count } = await supabase
         .from("rfqs")
@@ -156,11 +140,11 @@ export async function POST() {
         fileType = "text";
       }
 
-      const rfqCode = await generateRfqCode(supabase, user.id);
+      const rfqCode = await generateRfqCode(supabase, userId);
       const { data: rfq, error: insertError } = await supabase
         .from("rfqs")
         .insert({
-          user_id:     user.id,
+          user_id:     userId,
           rfq_code:    rfqCode,
           buyer_name:  email.from,
           buyer_email: email.fromEmail,
@@ -189,10 +173,60 @@ export async function POST() {
     }
 
     console.log("[email-fetch] done", { fetched: emails.length, created, deduped, insertFailed });
-    return NextResponse.json({ created, results, fetched: emails.length, deduped, insertFailed, lastInsertError });
+    await updateJob(supabase, jobId, {
+      status: "done",
+      progress: { processed: emails.length, total: emails.length },
+      result: { created, results, fetched: emails.length, deduped, insertFailed, lastInsertError },
+    });
   } catch (err: unknown) {
-    logError("Email fetch error:", err);
+    logError("Email fetch job failed:", err);
     const msg = err instanceof Error ? err.message : "Internal error";
-    return NextResponse.json({ error: msg }, { status: 500 });
+    await updateJob(supabase, jobId, { status: "failed", error: msg });
   }
+}
+
+export async function POST() {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  // Each fetch can trigger up to 20 Gmail API calls plus OpenAI fallback
+  // calls — cap how often it can be triggered.
+  const allowed = await checkRateLimit(supabase, user.id, "email-fetch", 300, 10);
+  if (!allowed) {
+    return NextResponse.json({ error: "Too many fetch requests. Please wait a few minutes and try again." }, { status: 429 });
+  }
+
+  // Look up this user's own Gmail refresh token.
+  // .limit(1) instead of .single() — a duplicate row for this user_id+key
+  // would make .single() error out and look like "not connected".
+  const { data: tokenRows, error: tokenLookupError } = await supabase
+    .from("user_settings")
+    .select("value")
+    .eq("user_id", user.id)
+    .eq("key", "gmail_refresh_token")
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (tokenLookupError) logError("[email-fetch] token lookup failed", tokenLookupError);
+  const refreshToken = tokenRows?.[0]?.value;
+
+  if (!refreshToken) {
+    return NextResponse.json(
+      { error: "Gmail not connected. Please connect your Gmail account first." },
+      { status: 400 }
+    );
+  }
+
+  const { job, error: jobError } = await createJob(supabase, user.id, "email_fetch");
+  if (jobError || !job) {
+    logError("[email-fetch] could not create job", jobError);
+    return NextResponse.json({ error: "Could not start email fetch. Please try again." }, { status: 500 });
+  }
+
+  // Runs after this response is sent — the client gets the job id back
+  // immediately and polls /api/jobs/[id] instead of waiting on this request.
+  after(() => runEmailFetchJob(supabase, user.id, job.id, refreshToken));
+
+  return NextResponse.json({ jobId: job.id }, { status: 202 });
 }
