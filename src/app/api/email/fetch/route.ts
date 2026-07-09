@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
 import { fetchUnreadEmails, markAsRead } from "@/lib/email/gmail";
 import { parsePdf } from "@/lib/parsers/pdf";
@@ -77,7 +78,7 @@ export async function POST() {
       .order("created_at", { ascending: false })
       .limit(1);
 
-    if (tokenLookupError) console.error("[email-fetch] token lookup failed", tokenLookupError);
+    if (tokenLookupError) logError("[email-fetch] token lookup failed", tokenLookupError);
     const refreshToken = tokenRows?.[0]?.value;
 
     if (!refreshToken) {
@@ -176,7 +177,7 @@ export async function POST() {
       if (insertError || !rfq) {
         insertFailed++;
         lastInsertError = insertError?.message ?? "insert returned no row";
-        console.error("[email-fetch] rfq insert failed", { messageId: email.messageId, error: insertError });
+        logError("[email-fetch] rfq insert failed", { messageId: email.messageId, error: insertError });
         continue;
       }
       // Only mark read now that it's safely saved — if this fails, we still
@@ -190,8 +191,8 @@ export async function POST() {
     console.log("[email-fetch] done", { fetched: emails.length, created, deduped, insertFailed });
     return NextResponse.json({ created, results, fetched: emails.length, deduped, insertFailed, lastInsertError });
   } catch (err: unknown) {
+    logError("Email fetch error:", err);
     const msg = err instanceof Error ? err.message : "Internal error";
-    console.error("Email fetch error:", msg);
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

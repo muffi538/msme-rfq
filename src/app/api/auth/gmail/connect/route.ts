@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { logError } from "@/lib/logError";
 import { NextResponse, type NextRequest } from "next/server";
 
 export async function GET(request: NextRequest) {
@@ -9,7 +10,7 @@ export async function GET(request: NextRequest) {
   if (!user) return NextResponse.redirect(`${origin}/login`);
 
   if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) {
-    console.error("[gmail-oauth] connect: GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET missing");
+    logError("[gmail-oauth] connect: GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET missing");
     return NextResponse.redirect(`${origin}/inbox?gmail_error=not_configured`);
   }
 

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
 
 const DEFAULT_TEMPLATE = `Hello {supplier},
@@ -74,7 +75,7 @@ export async function POST(
   // Delete existing outgoing RFQs for this parent (re-split)
   const { error: clearError } = await supabase.from("outgoing_rfqs").delete().eq("rfq_id", rfqId).eq("user_id", user.id);
   if (clearError) {
-    console.error("[rfqs/split] clearing old outgoing rfqs failed", clearError);
+    logError("[rfqs/split] clearing old outgoing rfqs failed", clearError);
     return NextResponse.json({ error: `Could not clear previous split: ${clearError.message}` }, { status: 500 });
   }
 
@@ -111,7 +112,7 @@ export async function POST(
       .single();
 
     if (outgoingError || !outgoing) {
-      console.error("[rfqs/split] outgoing_rfqs insert failed", { supplierId: supplier.id, error: outgoingError });
+      logError("[rfqs/split] outgoing_rfqs insert failed", { supplierId: supplier.id, error: outgoingError });
       continue;
     }
 
@@ -120,7 +121,7 @@ export async function POST(
       outgoing_rfq_id: outgoing.id, item_id: i.id, user_id: user.id,
     }));
     const { error: itemsError } = await supabase.from("outgoing_rfq_items").insert(itemRows);
-    if (itemsError) console.error("[rfqs/split] outgoing_rfq_items insert failed", { supplierId: supplier.id, error: itemsError });
+    if (itemsError) logError("[rfqs/split] outgoing_rfq_items insert failed", { supplierId: supplier.id, error: itemsError });
   }
 
   // Items whose category matched no active supplier — one combined row so
@@ -138,20 +139,20 @@ export async function POST(
       .select("*, suppliers(name, whatsapp_number, email)")
       .single();
     if (outgoingError || !outgoing) {
-      console.error("[rfqs/split] outgoing_rfqs insert failed (no supplier)", { error: outgoingError });
+      logError("[rfqs/split] outgoing_rfqs insert failed (no supplier)", { error: outgoingError });
     } else {
       outgoingRows.push(outgoing);
       const itemRows = unmatchedItems.map((i) => ({
         outgoing_rfq_id: outgoing.id, item_id: i.id, user_id: user.id,
       }));
       const { error: itemsError } = await supabase.from("outgoing_rfq_items").insert(itemRows);
-      if (itemsError) console.error("[rfqs/split] outgoing_rfq_items insert failed (no supplier)", { error: itemsError });
+      if (itemsError) logError("[rfqs/split] outgoing_rfq_items insert failed (no supplier)", { error: itemsError });
     }
   }
 
   // Mark parent RFQ as approved
   const { error: statusError } = await supabase.from("rfqs").update({ status: "approved" }).eq("id", rfqId);
-  if (statusError) console.error("[rfqs/split] status update failed", statusError);
+  if (statusError) logError("[rfqs/split] status update failed", statusError);
 
   return NextResponse.json({ outgoing: outgoingRows });
 }

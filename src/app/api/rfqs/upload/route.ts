@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
 import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
@@ -115,7 +116,7 @@ export async function POST(request: NextRequest) {
       upsert: false,
     });
     if (storageError) {
-      console.error("[rfqs/upload] storage upload failed", storageError);
+      logError("[rfqs/upload] storage upload failed", storageError);
       return NextResponse.json({ error: `File upload failed: ${storageError.message}` }, { status: 500 });
     }
 
@@ -166,18 +167,18 @@ export async function POST(request: NextRequest) {
 
       const { error: itemsError } = await supabase.from("rfq_items").insert(rows);
       if (itemsError) {
-        console.error("[rfqs/upload] rfq_items insert failed", itemsError);
+        logError("[rfqs/upload] rfq_items insert failed", itemsError);
         return NextResponse.json({ error: `Could not save extracted items: ${itemsError.message}` }, { status: 500 });
       }
     }
 
     // 6 — Mark RFQ as processed
     const { error: statusError } = await supabase.from("rfqs").update({ status: "processed" }).eq("id", rfq.id);
-    if (statusError) console.error("[rfqs/upload] status update failed", statusError);
+    if (statusError) logError("[rfqs/upload] status update failed", statusError);
 
     return NextResponse.json({ rfqId: rfq.id, rfqCode, itemCount: items.length });
   } catch (err: unknown) {
-    console.error("Upload error:", err);
+    logError("Upload error:", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Internal error" },
       { status: 500 }

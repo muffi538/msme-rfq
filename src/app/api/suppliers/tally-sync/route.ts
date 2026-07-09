@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
 import { XMLParser } from "fast-xml-parser";
 
@@ -143,7 +144,7 @@ export async function POST(request: NextRequest) {
         { onConflict: "user_id,name" }
       );
     if (error) {
-      console.error("[tally-sync] supplier upsert failed", { name: s.name, error });
+      logError("[tally-sync] supplier upsert failed", { name: s.name, error });
       skipped++;
     } else imported++;
   }
