@@ -61,8 +61,13 @@ ALTER TABLE rfqs       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rfq_items  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE suppliers  ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users see own rfqs" ON rfqs;
 CREATE POLICY "Users see own rfqs"      ON rfqs       FOR ALL USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users see own items" ON rfq_items;
 CREATE POLICY "Users see own items"     ON rfq_items  FOR ALL USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users see own suppliers" ON suppliers;
 CREATE POLICY "Users see own suppliers" ON suppliers  FOR ALL USING (auth.uid() = user_id);
 
 -- =============================================
@@ -73,10 +78,12 @@ INSERT INTO storage.buckets (id, name, public)
 VALUES ('rfq-files', 'rfq-files', false)
 ON CONFLICT DO NOTHING;
 
+DROP POLICY IF EXISTS "Users upload own files" ON storage.objects;
 CREATE POLICY "Users upload own files"
 ON storage.objects FOR INSERT
 WITH CHECK (bucket_id = 'rfq-files' AND auth.uid()::text = (storage.foldername(name))[1]);
 
+DROP POLICY IF EXISTS "Users read own files" ON storage.objects;
 CREATE POLICY "Users read own files"
 ON storage.objects FOR SELECT
 USING (bucket_id = 'rfq-files' AND auth.uid()::text = (storage.foldername(name))[1]);

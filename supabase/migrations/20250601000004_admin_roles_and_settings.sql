@@ -1,6 +1,5 @@
 -- =============================================
--- RFQ Flow — Admin Role Migration
--- Run this in: Supabase Dashboard → SQL Editor
+-- RFQ Flow — Admin Role + user_settings
 -- =============================================
 
 -- 1. Profiles table — marks who is an admin
@@ -30,6 +29,7 @@ CREATE TRIGGER on_auth_user_created
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 
 -- Everyone can read their own profile; admins can read all
+DROP POLICY IF EXISTS "Users read own profile" ON profiles;
 CREATE POLICY "Users read own profile"
   ON profiles FOR SELECT
   USING (auth.uid() = id);
@@ -84,19 +84,7 @@ CREATE POLICY "Users see own outgoing rfq items"
 
 
 -- =============================================
--- 3. Mark YOUR account as admin
---    Replace the email below with YOUR login email
--- =============================================
-
-INSERT INTO public.profiles (id, is_admin)
-SELECT id, true
-FROM auth.users
-WHERE email = 'YOUR_EMAIL_HERE'   -- ← change this to your email
-ON CONFLICT (id) DO UPDATE SET is_admin = true;
-
-
--- =============================================
--- 4. User settings table (key-value store per user)
+-- 3. User settings table (key-value store per user)
 -- =============================================
 
 CREATE TABLE IF NOT EXISTS user_settings (
@@ -111,6 +99,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
 
 ALTER TABLE user_settings ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users manage own settings" ON user_settings;
 CREATE POLICY "Users manage own settings"
   ON user_settings FOR ALL
   USING (auth.uid() = user_id OR public.is_admin());
@@ -118,10 +107,12 @@ CREATE POLICY "Users manage own settings"
 -- Also add notes column to suppliers if it doesn't exist yet
 ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS notes TEXT;
 
-
 -- =============================================
--- RESULT:
--- • Regular users  → see only their own data (unchanged)
--- • You (admin)    → see ALL users' data when logged in
--- • No user can ever see another user's data
+-- NOTE: marking a specific account as admin is an environment-specific data
+-- change, not schema — it does not belong in a versioned migration (it
+-- would either no-op or need editing per environment). Run manually once:
+--
+--   INSERT INTO public.profiles (id, is_admin)
+--   SELECT id, true FROM auth.users WHERE email = 'you@example.com'
+--   ON CONFLICT (id) DO UPDATE SET is_admin = true;
 -- =============================================

@@ -19,5 +19,6 @@ CREATE INDEX IF NOT EXISTS buyer_reply_logs_user_email_idx
 
 ALTER TABLE buyer_reply_logs ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users see own buyer reply logs" ON buyer_reply_logs;
 CREATE POLICY "Users see own buyer reply logs"
   ON buyer_reply_logs FOR ALL USING (auth.uid() = user_id);
