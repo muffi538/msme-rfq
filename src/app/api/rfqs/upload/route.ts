@@ -4,6 +4,7 @@ import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { normalizeAndCategorize } from "@/lib/ai/normalize";
 import { generateRfqCode } from "@/lib/rfq";
+import { checkRateLimit } from "@/lib/rateLimit";
 
 async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Promise<string> {
   const base64 = buffer.toString("base64");
@@ -26,17 +27,21 @@ async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Promise<s
             ],
       }],
     }),
+    signal: AbortSignal.timeout(45000),
   });
   const json = await res.json();
   return json.choices?.[0]?.message?.content ?? "";
 }
 
-function detectFileType(filename: string, mime: string): "pdf" | "excel" | "image" | "text" {
+const MAX_UPLOAD_BYTES = 15 * 1024 * 1024; // 15MB — comfortably under OpenAI's file-upload limits
+
+function detectFileType(filename: string, mime: string): "pdf" | "excel" | "image" | "text" | null {
   const lower = filename.toLowerCase();
-  if (mime.includes("pdf") || lower.endsWith(".pdf"))                         return "pdf";
-  if (mime.includes("image"))                                                  return "image";
+  if (mime.includes("pdf") || lower.endsWith(".pdf"))                          return "pdf";
+  if (mime.includes("image") || /\.(jpe?g|png|webp|gif)$/.test(lower))         return "image";
   if (lower.endsWith(".txt") || lower.endsWith(".csv") || mime.includes("text/plain") || mime.includes("text/csv")) return "text";
-  return "excel";
+  if (lower.endsWith(".xlsx") || lower.endsWith(".xls") || mime.includes("spreadsheet") || mime.includes("excel")) return "excel";
+  return null; // unrecognized — reject rather than guessing
 }
 
 export async function POST(request: NextRequest) {
@@ -44,6 +49,12 @@ export async function POST(request: NextRequest) {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+    // Each upload triggers OpenAI calls (real cost) — cap how often it can run.
+    const allowed = await checkRateLimit(supabase, user.id, "rfq-upload", 600, 20);
+    if (!allowed) {
+      return NextResponse.json({ error: "Too many uploads. Please wait a few minutes and try again." }, { status: 429 });
+    }
 
     const formData  = await request.formData();
     const file      = formData.get("file") as File | null;
@@ -54,9 +65,26 @@ export async function POST(request: NextRequest) {
 
     if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });
 
-    const bytes    = await file.arrayBuffer();
-    const buffer   = Buffer.from(bytes);
+    if (file.size > MAX_UPLOAD_BYTES) {
+      return NextResponse.json(
+        { error: `File is too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum is ${MAX_UPLOAD_BYTES / 1024 / 1024}MB.` },
+        { status: 413 }
+      );
+    }
+    if (file.size === 0) {
+      return NextResponse.json({ error: "File is empty." }, { status: 400 });
+    }
+
     const fileType = detectFileType(file.name, file.type);
+    if (!fileType) {
+      return NextResponse.json(
+        { error: `Unsupported file type "${file.name}". Please upload a PDF, Excel (.xlsx/.xls), image, or text/CSV file.` },
+        { status: 415 }
+      );
+    }
+
+    const bytes  = await file.arrayBuffer();
+    const buffer = Buffer.from(bytes);
 
     // 1 — Parse the file into raw text
     let rawText = "";

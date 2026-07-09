@@ -1,6 +1,17 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { sendEmail } from "@/lib/email/gmail";
+import { timingSafeEqual } from "crypto";
+
+function safeCompare(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  // timingSafeEqual throws on mismatched lengths, so guard first — this
+  // still avoids leaking *which byte* differs, which is what actually
+  // matters for a secret comparison.
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
 
 /**
  * Daily morning digest — runs at 09:00 IST (03:30 UTC) via Vercel cron.
@@ -16,8 +27,9 @@ export const maxDuration = 60;
 export async function GET(request: NextRequest) {
   // Auth: Vercel cron sends a Bearer token equal to CRON_SECRET.
   // Allow manual /api/cron/digest hits too if the secret matches.
-  const authHeader = request.headers.get("authorization");
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  const authHeader = request.headers.get("authorization") ?? "";
+  const expected = `Bearer ${process.env.CRON_SECRET ?? ""}`;
+  if (!process.env.CRON_SECRET || !safeCompare(authHeader, expected)) {
     return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
   }
 

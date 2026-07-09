@@ -1,5 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { z } from "zod";
+
+// Only these keys are settable via this endpoint — everything else (like
+// gmail_refresh_token, rfq_labels) is written by its own dedicated route
+// and must never be overwritable through a generic settings POST.
+const settingsSchema = z.object({
+  message_template:     z.string().max(5000).optional(),
+  buyer_reply_template: z.string().max(5000).optional(),
+  company_name:         z.string().max(200).optional(),
+}).strict();
 
 export async function GET() {
   const supabase = await createClient();
@@ -21,9 +31,19 @@ export async function POST(request: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
-  const body = await request.json() as Record<string, string>;
+  let body: Record<string, string>;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
 
-  for (const [key, value] of Object.entries(body)) {
+  const parsed = settingsSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: `Invalid settings: ${parsed.error.issues.map((i) => i.message).join(", ")}` }, { status: 400 });
+  }
+
+  for (const [key, value] of Object.entries(parsed.data)) {
     const { error } = await supabase
       .from("user_settings")
       .upsert({ user_id: user.id, key, value }, { onConflict: "user_id,key" });
