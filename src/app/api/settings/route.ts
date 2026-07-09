@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { z } from "zod";
+import { logError } from "@/lib/logError";
 
 // Only these keys are settable via this endpoint — everything else (like
 // gmail_refresh_token, rfq_labels) is written by its own dedicated route
@@ -48,7 +49,7 @@ export async function POST(request: NextRequest) {
       .from("user_settings")
       .upsert({ user_id: user.id, key, value }, { onConflict: "user_id,key" });
     if (error) {
-      console.error("[settings] upsert failed", { key, error });
+      logError("[settings] upsert failed", { key, error });
       return NextResponse.json({ error: `Could not save "${key}": ${error.message}` }, { status: 500 });
     }
   }

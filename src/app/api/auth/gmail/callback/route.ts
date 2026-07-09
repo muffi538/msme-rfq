@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { logError } from "@/lib/logError";
 import { NextResponse, type NextRequest } from "next/server";
 
 // Redirect with a machine-readable error code, plus a short human-readable
@@ -61,7 +62,7 @@ export async function GET(request: NextRequest) {
       : !tokens.refresh_token
       ? "no refresh_token in response"
       : "no access_token in response";
-    console.error("[gmail-oauth] token exchange failed", detail);
+    logError("[gmail-oauth] token exchange failed", detail);
     return fail(origin, "token_failed", detail);
   }
 
@@ -75,7 +76,7 @@ export async function GET(request: NextRequest) {
 
   if (!profileRes.ok || !profile.email) {
     const detail = `status=${profileRes.status} ${profile.error?.message ?? JSON.stringify(profile)}`;
-    console.error("[gmail-oauth] profile fetch failed", detail);
+    logError("[gmail-oauth] profile fetch failed", detail);
     return fail(origin, "profile_failed", detail);
   }
 
@@ -91,7 +92,7 @@ export async function GET(request: NextRequest) {
   console.log("[gmail-oauth] database save", { ok: !saveError, error: saveError?.message });
 
   if (saveError) {
-    console.error("[gmail-oauth] failed to save Gmail credentials", saveError);
+    logError("[gmail-oauth] failed to save Gmail credentials", saveError);
     return fail(origin, "save_failed", `${saveError.code ?? ""} ${saveError.message}`);
   }
 

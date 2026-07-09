@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { sendEmail } from "@/lib/email/gmail";
 import { timingSafeEqual } from "crypto";
+import { logError } from "@/lib/logError";
 
 function safeCompare(a: string, b: string): boolean {
   const bufA = Buffer.from(a);
@@ -122,6 +123,7 @@ export async function GET(request: NextRequest) {
       sent++;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      logError(`[cron/digest] failed for user ${row.user_id}`, err);
       errors.push(`${row.user_id}: ${msg}`);
     }
   }

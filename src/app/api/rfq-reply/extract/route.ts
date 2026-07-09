@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { checkRateLimit } from "@/lib/rateLimit";
+import { logError } from "@/lib/logError";
 
 export const maxDuration = 60;
 
@@ -176,6 +177,7 @@ export async function POST(request: NextRequest) {
     const quote = await parseQuote(rawText, companyName, buyerReplyTemplate);
     return NextResponse.json(quote);
   } catch (err: unknown) {
+    logError("[rfq-reply/extract] parseQuote failed", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "AI processing failed" },
       { status: 500 }

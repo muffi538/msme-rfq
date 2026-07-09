@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
 import { normalizeAndCategorize } from "@/lib/ai/normalize";
 import { parsePdf } from "@/lib/parsers/pdf";
@@ -63,6 +64,7 @@ export async function POST(
   try {
     items = await normalizeAndCategorize(rawText);
   } catch (err: unknown) {
+    logError("[rfqs/process] normalizeAndCategorize failed", err);
     await supabase.from("rfqs").update({ status: "pending" }).eq("id", id);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "AI processing failed" },
@@ -73,7 +75,7 @@ export async function POST(
   if (items.length > 0) {
     const { error: deleteError } = await supabase.from("rfq_items").delete().eq("rfq_id", id);
     if (deleteError) {
-      console.error("[rfqs/process] rfq_items delete failed", deleteError);
+      logError("[rfqs/process] rfq_items delete failed", deleteError);
       await supabase.from("rfqs").update({ status: "pending" }).eq("id", id);
       return NextResponse.json({ error: `Could not clear old items: ${deleteError.message}` }, { status: 500 });
     }
@@ -97,13 +99,13 @@ export async function POST(
       }))
     );
     if (itemsError) {
-      console.error("[rfqs/process] rfq_items insert failed", itemsError);
+      logError("[rfqs/process] rfq_items insert failed", itemsError);
       await supabase.from("rfqs").update({ status: "pending" }).eq("id", id);
       return NextResponse.json({ error: `Could not save extracted items: ${itemsError.message}` }, { status: 500 });
     }
   }
 
   const { error: statusError } = await supabase.from("rfqs").update({ status: "processed" }).eq("id", id);
-  if (statusError) console.error("[rfqs/process] status update failed", statusError);
+  if (statusError) logError("[rfqs/process] status update failed", statusError);
   return NextResponse.json({ itemCount: items.length });
 }

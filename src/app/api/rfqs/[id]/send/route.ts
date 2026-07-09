@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
 
 export async function POST(
@@ -33,7 +34,7 @@ export async function POST(
     .eq("id", outgoingId);
 
   if (outgoingError) {
-    console.error("[rfqs/send] outgoing_rfqs status update failed", outgoingError);
+    logError("[rfqs/send] outgoing_rfqs status update failed", outgoingError);
     return NextResponse.json({ error: `Could not mark as sent: ${outgoingError.message}` }, { status: 500 });
   }
 
@@ -47,7 +48,7 @@ export async function POST(
     .eq("id", rfqId)
     .eq("user_id", user.id);
 
-  if (parentError) console.error("[rfqs/send] parent rfq status update failed", parentError);
+  if (parentError) logError("[rfqs/send] parent rfq status update failed", parentError);
 
   return NextResponse.json({ ok: true, channel, parentMarkedSent: !parentError });
 }

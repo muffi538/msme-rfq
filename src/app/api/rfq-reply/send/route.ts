@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { sendEmail } from "@/lib/email/gmail";
+import { logError } from "@/lib/logError";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -40,7 +41,7 @@ export async function POST(request: NextRequest) {
     await sendEmail({ to, subject, body, fromName: companyName, refreshToken: gmailToken });
 
     const sentAt = new Date().toISOString();
-    const { error: logError } = await supabase.from("buyer_reply_logs").insert({
+    const { error: insertLogError } = await supabase.from("buyer_reply_logs").insert({
       user_id:       user.id,
       buyer_email:   to.trim(),
       supplier_name: supplierName ?? null,
@@ -49,10 +50,11 @@ export async function POST(request: NextRequest) {
       email_body:    body,
       sent_at:       sentAt,
     });
-    if (logError) console.warn("buyer_reply_logs insert:", logError.message);
+    if (insertLogError) logError("buyer_reply_logs insert failed", insertLogError);
 
     return NextResponse.json({ ok: true, sentAt });
   } catch (err: unknown) {
+    logError("[rfq-reply/send] send failed", err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to send email" },
       { status: 500 }
