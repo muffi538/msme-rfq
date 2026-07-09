@@ -30,5 +30,8 @@ CREATE TABLE IF NOT EXISTS outgoing_rfq_items (
 ALTER TABLE outgoing_rfqs      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE outgoing_rfq_items ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users see own outgoing rfqs" ON outgoing_rfqs;
 CREATE POLICY "Users see own outgoing rfqs"       ON outgoing_rfqs      FOR ALL USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users see own outgoing rfq items" ON outgoing_rfq_items;
 CREATE POLICY "Users see own outgoing rfq items"  ON outgoing_rfq_items FOR ALL USING (auth.uid() = user_id);

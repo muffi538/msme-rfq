@@ -2,7 +2,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
  * Lightweight per-user rate limiter backed by a single atomic Postgres
- * function (see supabase/migration_hardening.sql) — no Redis needed at
+ * function (see supabase/migrations/20250601000005_hardening_indexes_and_rate_limits.sql)
+ * — no Redis needed at
  * single-customer scale. Fails open (allows the request) if the limiter
  * itself errors, so a DB hiccup never blocks a legitimate user.
  */
