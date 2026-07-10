@@ -138,6 +138,7 @@ function LabelSelector({
 export default function InboxPage() {
   const router = useRouter();
   const [fetching,     setFetching]     = useState(false);
+  const [fetchProgress, setFetchProgress] = useState<{ processed: number; total: number } | null>(null);
   const [creatingSample, setCreatingSample] = useState(false);
   const [fetchResults, setFetchResults] = useState<FetchResult[] | null>(null);
   const [fetchError,   setFetchError]   = useState("");
@@ -287,22 +288,48 @@ export default function InboxPage() {
     }
   }
 
-  /* ── Fetch emails ─────────────────────────────────────── */
+  /* ── Fetch emails ─────────────────────────────────────────
+     Kicks off a background job and polls for completion instead of
+     holding the request open — the button click returns almost
+     instantly and the rest of the app stays fully usable while Gmail
+     is being scanned. ──────────────────────────────────────── */
+  async function pollJob(jobId: string, onProgress: (p: { processed: number; total: number } | null) => void) {
+    const POLL_INTERVAL_MS = 1500;
+    const MAX_POLLS = 80; // ~2 minutes ceiling, comfortably above maxDuration=60 on the job itself
+
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      const res = await fetch(`/api/jobs/${jobId}`);
+      if (!res.ok) throw new Error("Lost track of the fetch job. Please try again.");
+      const { job } = await res.json();
+
+      onProgress(job.progress ?? null);
+
+      if (job.status === "done") return job.result;
+      if (job.status === "failed") throw new Error(job.error ?? "Fetch job failed");
+    }
+    throw new Error("This is taking longer than expected. Check back in a bit — it may still finish in the background.");
+  }
+
   async function handleFetch() {
     setFetching(true);
     setFetchError("");
     setFetchResults(null);
+    setFetchProgress(null);
     try {
       const res  = await fetch("/api/email/fetch", { method: "POST" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Fetch failed");
-      setFetchResults(json.results ?? []);
-      if (json.created > 0) {
-        toast.success(`${json.created} new email${json.created > 1 ? "s" : ""} fetched!`);
-      } else if (json.insertFailed > 0) {
-        toast.error(`Found ${json.fetched} unread email(s) but couldn't save ${json.insertFailed} of them: ${json.lastInsertError ?? "unknown error"}`, { duration: 15000 });
-      } else if (json.deduped > 0) {
-        toast.info(`Found ${json.fetched} unread email(s), but they were already imported previously.`);
+
+      const result = await pollJob(json.jobId, setFetchProgress);
+
+      setFetchResults(result.results ?? []);
+      if (result.created > 0) {
+        toast.success(`${result.created} new email${result.created > 1 ? "s" : ""} fetched!`);
+      } else if (result.insertFailed > 0) {
+        toast.error(`Found ${result.fetched} unread email(s) but couldn't save ${result.insertFailed} of them: ${result.lastInsertError ?? "unknown error"}`, { duration: 15000 });
+      } else if (result.deduped > 0) {
+        toast.info(`Found ${result.fetched} unread email(s), but they were already imported previously.`);
       } else {
         toast.info("No new emails found.");
       }
@@ -313,6 +340,7 @@ export default function InboxPage() {
       toast.error(msg);
     } finally {
       setFetching(false);
+      setFetchProgress(null);
     }
   }
 
@@ -489,7 +517,11 @@ export default function InboxPage() {
             <Button onClick={handleFetch} disabled={fetching}
               className="w-full h-11 bg-[#1847F5] hover:bg-[#0f35d4] text-white font-semibold gap-2 rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.35)]">
               {fetching
-                ? <><Loader2 className="w-4 h-4 animate-spin" />Connecting to Gmail…</>
+                ? <><Loader2 className="w-4 h-4 animate-spin" />
+                    {fetchProgress && fetchProgress.total > 0
+                      ? `Processing ${fetchProgress.processed} of ${fetchProgress.total}…`
+                      : "Scanning Gmail…"}
+                  </>
                 : <><Mail className="w-4 h-4" />Fetch New Emails</>}
             </Button>
           )}
