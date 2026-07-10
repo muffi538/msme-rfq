@@ -8,8 +8,21 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Loader2, Database, Upload, CheckCircle, ArrowRight, Wifi } from "lucide-react";
+import { parseSupplierExcel, type ParsedSupplier } from "@/lib/parsers/supplierExcel";
 
 type Mode = "connect" | "paste";
+
+function isExcelFile(file: File): boolean {
+  const lower = file.name.toLowerCase();
+  return lower.endsWith(".xlsx") || lower.endsWith(".xls")
+    || file.type.includes("spreadsheet") || file.type.includes("excel");
+}
+
+function isXmlFile(file: File): boolean {
+  const lower = file.name.toLowerCase();
+  return lower.endsWith(".xml") || lower.endsWith(".txt")
+    || file.type.includes("xml") || file.type.includes("text/plain");
+}
 
 export default function TallyImportPage() {
   const router  = useRouter();
@@ -17,6 +30,8 @@ export default function TallyImportPage() {
   const [host, setHost]       = useState("");
   const [port, setPort]       = useState("9000");
   const [xmlData, setXmlData] = useState("");
+  const [excelSuppliers, setExcelSuppliers] = useState<ParsedSupplier[] | null>(null);
+  const [parsing, setParsing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult]   = useState<{ imported: number; skipped: number; total: number } | null>(null);
   const [error, setError]     = useState("");
@@ -29,6 +44,8 @@ export default function TallyImportPage() {
     try {
       const body = mode === "connect"
         ? { host, port: Number(port) }
+        : excelSuppliers
+        ? { suppliers: excelSuppliers }
         : { xmlData };
 
       const res  = await fetch("/api/suppliers/tally-sync", {
@@ -49,13 +66,41 @@ export default function TallyImportPage() {
     }
   }
 
-  function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => setXmlData(ev.target?.result as string ?? "");
-    reader.readAsText(file);
     setMode("paste");
+    setError("");
+    setResult(null);
+    setExcelSuppliers(null);
+    setXmlData("");
+
+    if (isExcelFile(file)) {
+      setParsing(true);
+      try {
+        const parsed = await parseSupplierExcel(file);
+        setExcelSuppliers(parsed);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : "Unsupported file format");
+      } finally {
+        setParsing(false);
+      }
+      return;
+    }
+
+    if (isXmlFile(file)) {
+      const reader = new FileReader();
+      reader.onload = (ev) => setXmlData(ev.target?.result as string ?? "");
+      reader.readAsText(file);
+      return;
+    }
+
+    setError("Unsupported file format");
+  }
+
+  function handleXmlPaste(value: string) {
+    setXmlData(value);
+    setExcelSuppliers(null);
   }
 
   return (
@@ -139,9 +184,9 @@ export default function TallyImportPage() {
         {mode === "paste" && (
           <div className="bg-white rounded-2xl border border-gray-100 p-6 space-y-4">
             <div>
-              <h3 className="font-semibold text-gray-900 mb-1">Upload Tally XML Export</h3>
+              <h3 className="font-semibold text-gray-900 mb-1">Upload Tally XML or Excel Supplier List</h3>
               <p className="text-sm text-gray-500">
-                Export ledgers from Tally as XML and upload the file here.
+                Export ledgers from Tally as XML, or upload an Excel (.xlsx/.xls) supplier list directly.
               </p>
             </div>
             <div className="bg-amber-50 rounded-xl p-4 text-sm text-amber-700 space-y-1">
@@ -155,22 +200,47 @@ export default function TallyImportPage() {
             </div>
             <div className="space-y-3">
               <div>
-                <Label>Upload XML file</Label>
+                <Label>Upload XML or Excel file</Label>
                 <input
                   type="file"
-                  accept=".xml,.txt"
+                  accept=".xml,.txt,.xlsx,.xls"
                   onChange={handleFileUpload}
                   className="mt-1.5 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
                 />
               </div>
-              <div className="text-center text-gray-400 text-xs">— or paste XML directly —</div>
-              <textarea
-                value={xmlData}
-                onChange={(e) => setXmlData(e.target.value)}
-                rows={8}
-                placeholder="Paste Tally XML export here..."
-                className="w-full text-xs font-mono border border-gray-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none text-gray-700"
-              />
+
+              {parsing && (
+                <div className="flex items-center gap-2 text-sm text-gray-500">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Reading Excel file…
+                </div>
+              )}
+
+              {excelSuppliers && (
+                <div className="bg-green-50 rounded-xl p-4 text-sm">
+                  <p className="font-medium text-green-800 flex items-center gap-1.5">
+                    <CheckCircle className="w-4 h-4" /> {excelSuppliers.length} supplier{excelSuppliers.length === 1 ? "" : "s"} detected
+                  </p>
+                  <p className="text-green-700 text-xs mt-2 mb-1">Preview (first 10):</p>
+                  <ul className="text-green-700 text-xs space-y-0.5 font-mono">
+                    {excelSuppliers.slice(0, 10).map((s, i) => (
+                      <li key={i}>• {s.name}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {!excelSuppliers && (
+                <>
+                  <div className="text-center text-gray-400 text-xs">— or paste XML directly —</div>
+                  <textarea
+                    value={xmlData}
+                    onChange={(e) => handleXmlPaste(e.target.value)}
+                    rows={8}
+                    placeholder="Paste Tally XML export here..."
+                    className="w-full text-xs font-mono border border-gray-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none text-gray-700"
+                  />
+                </>
+              )}
             </div>
           </div>
         )}
@@ -201,7 +271,7 @@ export default function TallyImportPage() {
         {/* Import button */}
         <Button
           onClick={handleImport}
-          disabled={loading || (mode === "connect" ? !host : !xmlData)}
+          disabled={loading || parsing || (mode === "connect" ? !host : !xmlData && !excelSuppliers)}
           className="w-full h-12 bg-green-600 hover:bg-green-700 text-white font-semibold text-base gap-2"
         >
           {loading
