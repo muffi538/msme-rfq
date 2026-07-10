@@ -9,7 +9,7 @@ export type ParsedSupplier = {
   address: string;
 };
 
-const NAME_HEADERS    = ["supplier", "supplier name", "party name", "ledger name", "name", "vendor", "vendor name"];
+const NAME_HEADERS    = ["supplier", "supplier name", "party name", "ledger name", "name", "vendor", "vendor name", "particulars", "party"];
 const CONTACT_HEADERS = ["contact", "contact person", "contact name"];
 const EMAIL_HEADERS   = ["email", "email id", "e-mail", "email address"];
 const PHONE_HEADERS   = ["phone", "mobile", "mobile number", "contact number", "whatsapp", "whatsapp number", "phone number"];
@@ -48,10 +48,24 @@ export async function parseSupplierExcel(file: File): Promise<ParsedSupplier[]> 
   const rows: unknown[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
   if (rows.length === 0) throw new Error("No suppliers detected");
 
-  const headerRow = rows[0];
-  const nameCol = findColumn(headerRow, NAME_HEADERS);
-  if (nameCol === -1) throw new Error("No supplier column found");
+  // Tally exports often prefix the real table with a company-info block
+  // (name, address, TRN, statement period, ...), so the header row isn't
+  // necessarily row 0 — scan for the first row that has a recognizable
+  // name column.
+  const HEADER_SCAN_LIMIT = 50;
+  let headerRowIndex = -1;
+  let nameCol = -1;
+  for (let i = 0; i < Math.min(rows.length, HEADER_SCAN_LIMIT); i++) {
+    const col = findColumn(rows[i], NAME_HEADERS);
+    if (col !== -1) {
+      headerRowIndex = i;
+      nameCol = col;
+      break;
+    }
+  }
+  if (headerRowIndex === -1) throw new Error("No supplier column found");
 
+  const headerRow = rows[headerRowIndex];
   const contactCol = findColumn(headerRow, CONTACT_HEADERS);
   const emailCol   = findColumn(headerRow, EMAIL_HEADERS);
   const phoneCol   = findColumn(headerRow, PHONE_HEADERS);
@@ -63,7 +77,7 @@ export async function parseSupplierExcel(file: File): Promise<ParsedSupplier[]> 
   const seen = new Set<string>();
   const suppliers: ParsedSupplier[] = [];
 
-  for (let i = 1; i < rows.length; i++) {
+  for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row || row.every((c) => c === "" || c == null)) continue; // empty row
 
