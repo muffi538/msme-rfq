@@ -52,28 +52,25 @@ export async function POST(
   const { data: items } = await supabase
     .from("rfq_items")
     .select("id, name, qty, unit, spec, category")
-    .eq("rfq_id", rfqId)
-    .eq("user_id", user.id);
+    .eq("rfq_id", rfqId);
 
   if (!rfq || !items) return NextResponse.json({ error: "RFQ not found" }, { status: 404 });
 
-  // Load message template from settings
+  // Load message template from shared company settings
   const { data: settingRows } = await supabase
-    .from("user_settings")
+    .from("company_settings")
     .select("key, value")
-    .eq("user_id", user.id)
     .eq("key", "message_template");
   const messageTemplate = settingRows?.[0]?.value ?? DEFAULT_TEMPLATE;
 
-  // Load all user suppliers
+  // Load all company suppliers
   const { data: suppliers } = await supabase
     .from("suppliers")
     .select("id, name, whatsapp_number, email, categories")
-    .eq("user_id", user.id)
     .eq("active", true);
 
   // Delete existing outgoing RFQs for this parent (re-split)
-  const { error: clearError } = await supabase.from("outgoing_rfqs").delete().eq("rfq_id", rfqId).eq("user_id", user.id);
+  const { error: clearError } = await supabase.from("outgoing_rfqs").delete().eq("rfq_id", rfqId);
   if (clearError) {
     logError("[rfqs/split] clearing old outgoing rfqs failed", clearError);
     return NextResponse.json({ error: `Could not clear previous split: ${clearError.message}` }, { status: 500 });

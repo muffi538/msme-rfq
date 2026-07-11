@@ -140,7 +140,7 @@ async function runEmailFetchJob(supabase: SupabaseClient, userId: string, jobId:
         fileType = "text";
       }
 
-      const rfqCode = await generateRfqCode(supabase, userId);
+      const rfqCode = await generateRfqCode(supabase);
       const { data: rfq, error: insertError } = await supabase
         .from("rfqs")
         .insert({

@@ -369,13 +369,21 @@ export default function RfqDetailClient({
 
   // --- Update item category ---
   async function updateCategory(itemId: string, category: string) {
+    const previous = items.find((i) => i.id === itemId)?.category;
     setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, category } : i));
-    await fetch(`/api/rfqs/${rfq.id}/item`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ itemId, category }),
-    });
-    toast.success(`Category updated to "${category.replace(/_/g, " ")}"`);
+    try {
+      const res = await fetch(`/api/rfqs/${rfq.id}/item`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId, category }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      toast.success(`Category updated to "${category.replace(/_/g, " ")}"`);
+    } catch {
+      // Revert the optimistic update — it never actually saved.
+      setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, category: previous ?? i.category } : i));
+      toast.error("Couldn't save category — please try again");
+    }
   }
 
   // --- Generate supplier split ---

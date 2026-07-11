@@ -9,7 +9,6 @@ export async function GET() {
   const { data: rfqs } = await supabase
     .from("rfqs")
     .select("id, rfq_code, buyer_name, buyer_email, file_name, created_at")
-    .eq("user_id", user.id)
     .in("status", ["pending", "needs_processing"])
     .order("created_at", { ascending: false, nullsFirst: false });
 

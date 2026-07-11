@@ -28,6 +28,7 @@ type Supplier = {
   whatsapp_number: string | null;
   whatsapp_group_link: string | null;
   categories: string[];
+  updated_at: string;
 };
 
 const emptyForm = { name: "", contact_person: "", email: "", whatsapp_number: "", whatsapp_group_link: "", categories: [] as string[] };
@@ -41,6 +42,9 @@ export default function SuppliersPage() {
   // Form state — null = closed, "add" = adding, supplier id = editing
   const [formMode, setFormMode]     = useState<null | "add" | string>(null);
   const [form, setForm]             = useState(emptyForm);
+  // Snapshot of the row's updated_at when the edit form was opened — used to
+  // detect if someone else saved a change to this supplier in the meantime.
+  const [editingUpdatedAt, setEditingUpdatedAt] = useState<string | null>(null);
 
   // Delete confirm
   const [deleteId, setDeleteId]     = useState<string | null>(null);
@@ -72,15 +76,14 @@ export default function SuppliersPage() {
 
   useEffect(() => { fetchSuppliers(); fetchCustomCategories(); }, []);
 
+  // Custom categories are a shared company-wide taxonomy, not a personal
+  // preference — stored in company_settings so every user sees the same list.
   async function fetchCustomCategories() {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
     const { data } = await supabase
-      .from("user_settings")
+      .from("company_settings")
       .select("value")
-      .eq("user_id", user.id)
       .eq("key", "custom_categories")
-      .single();
+      .maybeSingle();
     if (data?.value) {
       try { setCustomCategories(JSON.parse(data.value)); } catch { /* ignore */ }
     }
@@ -89,9 +92,9 @@ export default function SuppliersPage() {
   async function saveCustomCategories(next: string[]) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    const { error } = await supabase.from("user_settings").upsert(
-      { user_id: user.id, key: "custom_categories", value: JSON.stringify(next) },
-      { onConflict: "user_id,key" }
+    const { error } = await supabase.from("company_settings").upsert(
+      { key: "custom_categories", value: JSON.stringify(next), updated_by: user.id },
+      { onConflict: "key" }
     );
     if (error) {
       console.error("[suppliers] custom category save failed", error);
@@ -132,15 +135,10 @@ export default function SuppliersPage() {
 
   async function fetchSuppliers() {
     setLoading(true);
-    // Explicit user_id filter — defense-in-depth so each tenant only ever
-    // sees their own suppliers, even if RLS is misconfigured.
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { setSuppliers([]); setLoading(false); return; }
-    const { data } = await supabase
-      .from("suppliers")
-      .select("*")
-      .eq("user_id", user.id)
-      .order("name");
+    // Shared across every signed-in user at the company — always re-fetched
+    // fresh (no client cache), so edits/deletes from other users show up as
+    // soon as this page loads or refetches.
+    const { data } = await supabase.from("suppliers").select("*").order("name");
     setSuppliers(data ?? []);
     setLoading(false);
   }
@@ -159,12 +157,14 @@ export default function SuppliersPage() {
       whatsapp_group_link: s.whatsapp_group_link ?? "",
       categories:          s.categories ?? [],
     });
+    setEditingUpdatedAt(s.updated_at ?? null);
     setFormMode(s.id);
   }
 
   function closeForm() {
     setFormMode(null);
     setForm(emptyForm);
+    setEditingUpdatedAt(null);
   }
 
   function toggleCategory(cat: string) {
@@ -181,30 +181,79 @@ export default function SuppliersPage() {
     setSaving(true);
     const { data: { user } } = await supabase.auth.getUser();
 
-    const { error } = formMode === "add"
-      ? await supabase.from("suppliers").insert({
-          user_id:              user!.id,
-          name:                 form.name,
-          contact_person:       form.contact_person || null,
-          email:                form.email || null,
-          whatsapp_number:      form.whatsapp_number || null,
-          whatsapp_group_link:  form.whatsapp_group_link || null,
-          categories:           form.categories,
-        })
-      : await supabase.from("suppliers").update({
-          name:                 form.name,
-          contact_person:       form.contact_person || null,
-          email:                form.email || null,
-          whatsapp_number:      form.whatsapp_number || null,
-          whatsapp_group_link:  form.whatsapp_group_link || null,
-          categories:           form.categories,
-        }).eq("id", formMode!);
+    if (formMode === "add") {
+      const { error } = await supabase.from("suppliers").insert({
+        user_id:              user!.id,
+        name:                 form.name,
+        contact_person:       form.contact_person || null,
+        email:                form.email || null,
+        whatsapp_number:      form.whatsapp_number || null,
+        whatsapp_group_link:  form.whatsapp_group_link || null,
+        categories:           form.categories,
+      });
+      setSaving(false);
+      if (error) {
+        console.error("[suppliers] save failed", error);
+        const msg = error.code === "23505"
+          ? `A supplier named "${form.name}" already exists.`
+          : `Couldn't save supplier: ${error.message}`;
+        toast.error(msg);
+        return;
+      }
+      closeForm();
+      fetchSuppliers();
+      return;
+    }
+
+    // Editing — optimistic concurrency check: only apply the update if
+    // nobody else has saved a change to this row since we opened the form.
+    const payload = {
+      name:                 form.name,
+      contact_person:       form.contact_person || null,
+      email:                form.email || null,
+      whatsapp_number:      form.whatsapp_number || null,
+      whatsapp_group_link:  form.whatsapp_group_link || null,
+      categories:           form.categories,
+    };
+
+    let query = supabase.from("suppliers").update(payload).eq("id", formMode!);
+    if (editingUpdatedAt) query = query.eq("updated_at", editingUpdatedAt);
+    const { data: updatedRows, error } = await query.select();
 
     setSaving(false);
 
     if (error) {
       console.error("[suppliers] save failed", error);
       toast.error(`Couldn't save supplier: ${error.message}`);
+      return;
+    }
+
+    if (editingUpdatedAt && (updatedRows?.length ?? 0) === 0) {
+      // Nothing matched — someone else saved a change to this supplier
+      // while we had the form open.
+      const { data: latest } = await supabase.from("suppliers").select("*").eq("id", formMode!).maybeSingle();
+      if (!latest) {
+        toast.error("This supplier was deleted by someone else.");
+        closeForm();
+        fetchSuppliers();
+        return;
+      }
+      const overwrite = confirm(
+        `"${latest.name}" was just changed by someone else while you were editing it.\n\n` +
+        `Click OK to save your version anyway (overwriting their change), or Cancel to discard your edits and load the latest version.`
+      );
+      if (overwrite) {
+        const { error: forceError } = await supabase.from("suppliers").update(payload).eq("id", formMode!);
+        if (forceError) {
+          toast.error(`Couldn't save supplier: ${forceError.message}`);
+          return;
+        }
+        toast.success("Saved — your version replaced the newer change.");
+      } else {
+        toast("Discarded your edits — showing the latest version.");
+      }
+      closeForm();
+      fetchSuppliers();
       return;
     }
 

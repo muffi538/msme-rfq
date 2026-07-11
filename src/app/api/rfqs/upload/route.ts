@@ -121,7 +121,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 3 — Insert RFQ row
-    const rfqCode = await generateRfqCode(supabase, user.id);
+    const rfqCode = await generateRfqCode(supabase);
     const { data: rfq, error: rfqError } = await supabase
       .from("rfqs")
       .insert({

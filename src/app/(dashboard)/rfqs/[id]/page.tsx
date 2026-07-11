@@ -11,7 +11,7 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
 
   // RFQ, items, and outgoing splits don't depend on each other — fetch in parallel.
   const [{ data: rfq }, { data: items }, { data: outgoing }] = await Promise.all([
-    supabase.from("rfqs").select("*").eq("id", id).eq("user_id", user.id).single(),
+    supabase.from("rfqs").select("*").eq("id", id).single(),
     supabase.from("rfq_items").select("*").eq("rfq_id", id).order("line_number"),
     supabase
       .from("outgoing_rfqs")
@@ -33,7 +33,6 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
       ? supabase
           .from("buyer_reply_logs")
           .select("id, buyer_email, supplier_name, quote_summary, email_subject, email_body, sent_at")
-          .eq("user_id", user.id)
           .ilike("buyer_email", rfq.buyer_email.trim())
           .order("sent_at", { ascending: false })
           .limit(1)

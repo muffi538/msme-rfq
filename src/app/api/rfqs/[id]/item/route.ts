@@ -12,8 +12,7 @@ export async function PATCH(request: NextRequest) {
   const { error } = await supabase
     .from("rfq_items")
     .update({ category, category_source: "manual", flagged: false })
-    .eq("id", itemId)
-    .eq("user_id", user.id);
+    .eq("id", itemId);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });

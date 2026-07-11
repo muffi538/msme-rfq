@@ -172,7 +172,7 @@ export async function POST(request: NextRequest) {
           active:           true,
           notes,
         },
-        { onConflict: "user_id,name" }
+        { onConflict: "name" }
       );
     if (error) {
       logError("[tally-sync] supplier upsert failed", { name: s.name, error });

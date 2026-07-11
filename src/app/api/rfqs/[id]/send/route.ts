@@ -18,7 +18,6 @@ export async function POST(
     .from("outgoing_rfqs")
     .select("*, suppliers(name, whatsapp_number, email)")
     .eq("id", outgoingId)
-    .eq("user_id", user.id)
     .single();
 
   if (!outgoing) return NextResponse.json({ error: "Outgoing RFQ not found" }, { status: 404 });
@@ -45,8 +44,7 @@ export async function POST(
   const { error: parentError } = await supabase
     .from("rfqs")
     .update({ status: "sent" })
-    .eq("id", rfqId)
-    .eq("user_id", user.id);
+    .eq("id", rfqId);
 
   if (parentError) logError("[rfqs/send] parent rfq status update failed", parentError);
 
