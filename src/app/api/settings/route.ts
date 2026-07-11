@@ -4,8 +4,10 @@ import { z } from "zod";
 import { logError } from "@/lib/logError";
 
 // Only these keys are settable via this endpoint — everything else (like
-// gmail_refresh_token, rfq_labels) is written by its own dedicated route
-// and must never be overwritable through a generic settings POST.
+// gmail_refresh_token, rfq_labels) is personal, written by its own dedicated
+// route, and must never be overwritable through a generic settings POST.
+// These three ARE company-wide (shown to every user, used in outgoing
+// messages/emails), so they live in company_settings, not user_settings.
 const settingsSchema = z.object({
   message_template:     z.string().max(5000).optional(),
   buyer_reply_template: z.string().max(5000).optional(),
@@ -18,9 +20,9 @@ export async function GET() {
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
   const { data } = await supabase
-    .from("user_settings")
+    .from("company_settings")
     .select("key, value")
-    .eq("user_id", user.id);
+    .in("key", ["message_template", "buyer_reply_template", "company_name"]);
 
   const settings: Record<string, string> = {};
   for (const row of data ?? []) settings[row.key] = row.value;
@@ -46,8 +48,8 @@ export async function POST(request: NextRequest) {
 
   for (const [key, value] of Object.entries(parsed.data)) {
     const { error } = await supabase
-      .from("user_settings")
-      .upsert({ user_id: user.id, key, value }, { onConflict: "user_id,key" });
+      .from("company_settings")
+      .upsert({ key, value, updated_by: user.id }, { onConflict: "key" });
     if (error) {
       logError("[settings] upsert failed", { key, error });
       return NextResponse.json({ error: `Could not save "${key}": ${error.message}` }, { status: 500 });

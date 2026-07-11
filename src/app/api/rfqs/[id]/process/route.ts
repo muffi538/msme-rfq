@@ -25,7 +25,6 @@ export async function POST(
     .from("rfqs")
     .select("id, raw_text, file_type, file_name")
     .eq("id", id)
-    .eq("user_id", user.id)
     .single();
 
   if (!rfq) return NextResponse.json({ error: "RFQ not found" }, { status: 404 });

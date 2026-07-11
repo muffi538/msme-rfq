@@ -36,11 +36,10 @@ export default async function DashboardPage() {
       .eq("key", "gmail_refresh_token")
       .order("created_at", { ascending: false })
       .limit(1),
-    supabase.from("suppliers").select("*", { count: "exact", head: true }).eq("user_id", user.id),
+    supabase.from("suppliers").select("*", { count: "exact", head: true }),
     supabase
       .from("rfqs")
       .select("*", { count: "exact", head: true })
-      .eq("user_id", user.id)
       .in("status", ["processed", "approved", "sent"]),
     // Recent RFQs widget — also excludes pending/needs_processing so unprocessed
     // emails don't leak out of the inbox into the main dashboard view
