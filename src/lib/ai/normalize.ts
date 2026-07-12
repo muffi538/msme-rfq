@@ -114,6 +114,7 @@ export type MergedItem = CategorisedItem & {
   confidence:        number;   // overall extraction confidence, distinct from category_confidence
   warnings:          string[];
   merged_from_count: number;
+  source_files:      string[]; // which uploaded/attached file(s) this item was found in
 };
 
 const MAX_COMBINED_CHARS = 16000; // ~4k tokens of input text across all files, bounded for cost/latency
@@ -151,6 +152,7 @@ function dedupeItems(items: MergedItem[]): MergedItem[] {
     if (qtys.length > 1) warnings.push(`Quantity varies across source files (${qtys.join(" vs ")}) — used ${kept.qty}. Please verify.`);
     if (specs.length > 1) warnings.push(`Spec varies across source files — used "${kept.spec}". Please verify against the other source(s).`);
     kept.warnings = warnings;
+    kept.source_files = [...new Set(group.flatMap((i) => i.source_files))];
 
     result.push(kept);
   }
@@ -184,11 +186,11 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
           role: "user",
           content: `Return JSON:
 {"rfq_number": "..." or null, "supplier": "..." or null, "date": "..." or null,
- "items": [{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"part":null,"delivery":null,"cat":"POWER_TOOLS","conf":0.9},...]}
+ "items": [{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"part":null,"delivery":null,"cat":"POWER_TOOLS","conf":0.9,"file":"exact FILE name this item came from"},...]}
 
 Categories: POWER_TOOLS, HAND_TOOLS, FURNITURE_FITTINGS, SAFETY_ITEMS, FASTENERS, SANITARY_PLUMBING, PAINTS, VALVES_FITTINGS, PACKAGING_MATERIALS, ELECTRICAL, HVAC, GENERAL_HARDWARE
 
-Field meanings: "supplier" = whoever authored/sent this RFQ document (their company name, if stated). "part" = part number / SKU / model code, if printed. "delivery" = any delivery location, date, or lead-time text tied to that item or the whole order. "conf" = your confidence (0-1) in the overall accuracy of that item's extracted fields, not just its category.
+Field meanings: "supplier" = whoever authored/sent this RFQ document (their company name, if stated). "part" = part number / SKU / model code, if printed. "delivery" = any delivery location, date, or lead-time text tied to that item or the whole order. "conf" = your confidence (0-1) in the overall accuracy of that item's extracted fields, not just its category. "file" = copy the exact name from the "--- FILE: ... ---" heading this item was found under.
 
 Rules: skip headers/totals/page numbers. If the same item is described in more than one FILE section, still list it once per FILE section — a later merge step deduplicates. Normalize Hindi to English. SS=Stainless Steel, GI=Galvanized Iron, MS=Mild Steel. qty=null if missing.
 
@@ -222,6 +224,19 @@ ${labeled}`,
     source_date:       parsed.date       ? String(parsed.date)       : null,
   };
 
+  // The model is asked to echo the exact FILE label back, but LLMs
+  // paraphrase — resolve to a known filename by substring match either
+  // direction rather than trusting an exact string match.
+  const knownFiles = files.map((f) => f.fileName);
+  function resolveSourceFile(raw: unknown): string[] {
+    if (!raw) return [];
+    const s = String(raw).trim().toLowerCase();
+    if (!s) return [];
+    const match = knownFiles.find((f) => f.toLowerCase() === s)
+      ?? knownFiles.find((f) => f.toLowerCase().includes(s) || s.includes(f.toLowerCase()));
+    return match ? [match] : [];
+  }
+
   const raw = parsed.items ?? [];
   const items: MergedItem[] = (raw as Record<string, unknown>[]).map((item, i) => {
     const conf = Number(item.conf ?? 0.8);
@@ -245,6 +260,7 @@ ${labeled}`,
       category_source:     "llm" as const,
       category_confidence: Number(item.conf ?? 0.8),
       confidence:          conf,
+      source_files:        resolveSourceFile(item.file),
       warnings,
       merged_from_count:   1,
     };
