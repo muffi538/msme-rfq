@@ -6,7 +6,7 @@ import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { Button } from "@/components/ui/button";
 import {
   Mail, Loader2, CheckCircle, AlertCircle, Sparkles,
-  ArrowRight, Clock, Send, Tag, X, ChevronDown,
+  ArrowRight, Clock, Send, Tag, X, ChevronDown, Trash2, AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
 import Link from "next/link";
@@ -158,6 +158,8 @@ export default function InboxPage() {
   const [processProgress, setProcessProgress] = useState<Record<string, { stage: string; processed: number; total: number } | null>>({});
   const [justDone,     setJustDone]     = useState<Record<string, boolean>>({});
   const [labels,       setLabels]       = useState<Record<string, RfqLabel>>({});
+  const [deleteTarget, setDeleteTarget] = useState<PendingRfq | null>(null);
+  const [deletingEmail, setDeletingEmail] = useState(false);
   // ── Persist filter + view-mode in sessionStorage so navigating away and
   // coming back keeps the user on the tab they left on (no jarring reset).
   const [activeFilter, setActiveFilter] = useState<FilterTab>(() => {
@@ -398,6 +400,28 @@ export default function InboxPage() {
     }
   }
 
+  /* ── Delete email — removes the message from Gmail (moved to Trash)
+     and the RFQ card together. If the Gmail side fails, nothing is
+     removed so the card stays put and the user can retry. ── */
+  async function confirmDeleteEmail() {
+    if (!deleteTarget) return;
+    const rfqId = deleteTarget.id;
+    setDeletingEmail(true);
+    try {
+      const res  = await fetch(`/api/rfqs/${rfqId}/delete-email`, { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Could not delete this email");
+
+      setPending((p) => p.filter((r) => r.id !== rfqId));
+      setDeleteTarget(null);
+      toast.success("Email deleted successfully.");
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Could not delete this email");
+    } finally {
+      setDeletingEmail(false);
+    }
+  }
+
   /* ── Derived stats ────────────────────────────────────── */
   const stats = {
     needAI:    pending.length,
@@ -452,6 +476,41 @@ export default function InboxPage() {
 
   return (
     <>
+      {/* Delete email confirmation modal */}
+      {deleteTarget && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-card border border-border rounded-2xl shadow-xl p-6 max-w-sm w-full space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-red-100 dark:bg-red-950/40 rounded-full flex items-center justify-center flex-shrink-0">
+                <AlertTriangle className="w-5 h-5 text-red-600" />
+              </div>
+              <div>
+                <p className="font-semibold text-card-foreground">Are you sure you want to delete this email?</p>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  <strong>{deleteTarget.rfq_code}</strong> from {deleteTarget.buyer_name ?? deleteTarget.buyer_email ?? "this sender"} will be moved to Trash in Gmail and removed here.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <Button
+                onClick={confirmDeleteEmail}
+                disabled={deletingEmail}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white"
+              >
+                {deletingEmail ? "Deleting..." : "Delete"}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deletingEmail}
+                className="flex-1"
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
       <DashboardHeader title="Email Inbox" />
       <main className="flex-1 p-6 max-w-4xl mx-auto w-full space-y-5">
 
@@ -681,16 +740,27 @@ export default function InboxPage() {
                         <CheckCircle className="w-4 h-4" /> Done
                       </div>
                     ) : (
-                      <Button
-                        size="sm"
-                        onClick={() => handleProcess(rfq.id)}
-                        disabled={processing[rfq.id] || labels[rfq.id] === "spam"}
-                        className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.3)]"
-                      >
-                        {processing[rfq.id]
-                          ? <><Loader2 className="w-3 h-3 animate-spin" />{processStageLabel(processProgress[rfq.id])}</>
-                          : <><Sparkles className="w-3 h-3" />Process it<ArrowRight className="w-3 h-3" /></>}
-                      </Button>
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setDeleteTarget(rfq)}
+                          disabled={processing[rfq.id]}
+                          title="Delete email"
+                          className="w-8 h-8 flex items-center justify-center rounded-full text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                        <Button
+                          size="sm"
+                          onClick={() => handleProcess(rfq.id)}
+                          disabled={processing[rfq.id] || labels[rfq.id] === "spam"}
+                          className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.3)]"
+                        >
+                          {processing[rfq.id]
+                            ? <><Loader2 className="w-3 h-3 animate-spin" />{processStageLabel(processProgress[rfq.id])}</>
+                            : <><Sparkles className="w-3 h-3" />Process it<ArrowRight className="w-3 h-3" /></>}
+                        </Button>
+                      </>
                     )}
                   </div>
                 </div>

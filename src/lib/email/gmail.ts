@@ -155,6 +155,15 @@ export async function markAsRead(messageId: string, refreshToken: string): Promi
   });
 }
 
+// Moves to Gmail's Trash (recoverable there for Gmail's normal retention
+// window) rather than a permanent DELETE — safer default for a one-click
+// dashboard action, and all the Gmail API permission scopes this app
+// already requests support it without any extra consent.
+export async function trashMessage(messageId: string, refreshToken: string): Promise<void> {
+  const token = await getAccessToken(refreshToken);
+  await gmailPost(`/messages/${messageId}/trash`, token, {});
+}
+
 export async function fetchUnreadEmails(limit = 20, refreshToken: string): Promise<FetchedEmail[]> {
   const token = await getAccessToken(refreshToken);
 
