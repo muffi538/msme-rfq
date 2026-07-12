@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
+import { pollJob } from "@/lib/pollJob";
 
 /* ── Types ─────────────────────────────────────────────── */
 type FetchResult = { rfqCode: string; subject: string; from: string; hasAttachment: boolean };
@@ -293,24 +294,6 @@ export default function InboxPage() {
      holding the request open — the button click returns almost
      instantly and the rest of the app stays fully usable while Gmail
      is being scanned. ──────────────────────────────────────── */
-  async function pollJob(jobId: string, onProgress: (p: { processed: number; total: number } | null) => void) {
-    const POLL_INTERVAL_MS = 1500;
-    const MAX_POLLS = 80; // ~2 minutes ceiling, comfortably above maxDuration=60 on the job itself
-
-    for (let i = 0; i < MAX_POLLS; i++) {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-      const res = await fetch(`/api/jobs/${jobId}`);
-      if (!res.ok) throw new Error("Lost track of the fetch job. Please try again.");
-      const { job } = await res.json();
-
-      onProgress(job.progress ?? null);
-
-      if (job.status === "done") return job.result;
-      if (job.status === "failed") throw new Error(job.error ?? "Fetch job failed");
-    }
-    throw new Error("This is taking longer than expected. Check back in a bit — it may still finish in the background.");
-  }
-
   async function handleFetch() {
     setFetching(true);
     setFetchError("");
@@ -321,7 +304,10 @@ export default function InboxPage() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Fetch failed");
 
-      const result = await pollJob(json.jobId, setFetchProgress);
+      const result = await pollJob<
+        { processed: number; total: number },
+        { results?: FetchResult[]; created: number; fetched: number; deduped: number; insertFailed: number; lastInsertError?: string }
+      >(json.jobId, setFetchProgress);
 
       setFetchResults(result.results ?? []);
       if (result.created > 0) {

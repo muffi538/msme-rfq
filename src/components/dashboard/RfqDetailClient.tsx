@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import {
   Loader2, Split, Send, CheckCircle, AlertTriangle,
   MessageCircle, Mail, Package, Pencil, Copy, ExternalLink, Users,
-  ChevronDown, ChevronUp, ChevronRight,
+  ChevronDown, ChevronUp, ChevronRight, ImageOff, Download, FileSpreadsheet, FileText,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -21,6 +21,7 @@ import {
   computeWorkflowSteps,
   isWorkflowComplete,
 } from "@/lib/rfq-lifecycle";
+import { exportItemsToExcel, exportItemsToCsv, exportItemsToPdf } from "@/lib/exportRfqItems";
 
 const PRESET_CATEGORIES = [
   "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
@@ -62,6 +63,8 @@ type Item = {
   qty: number | null; unit: string | null; brand: string | null;
   spec: string | null; category: string; category_confidence: number;
   flagged: boolean;
+  part_number?: string | null; delivery_details?: string | null;
+  confidence?: number | null; warnings?: string[] | null; merged_from_count?: number | null;
 };
 
 type OutgoingRfq = {
@@ -72,10 +75,16 @@ type OutgoingRfq = {
 
 type OutgoingItem = { outgoing_rfq_id: string; item_id: string };
 
+type ItemImage = {
+  id: string; item_id: string | null; file_url: string; source_file_name: string | null;
+  match_confidence: number | null; signedUrl: string | null;
+};
+
 type Rfq = {
   id: string; rfq_code: string; buyer_name: string | null;
   buyer_email: string | null; status: string; priority: string;
   file_name: string | null; created_at: string;
+  source_rfq_number?: string | null; source_date?: string | null; warnings?: string[] | null;
 };
 
 // ── Category selector with "Other / type your own" support ──
@@ -342,7 +351,7 @@ function SupplierSplitCard({
 
 export default function RfqDetailClient({
   rfq, items: initialItems, outgoing: initialOutgoing, outgoingItems,
-  outgoingStats, buyerLog,
+  outgoingStats, buyerLog, itemImages,
 }: {
   rfq: Rfq;
   items: Item[];
@@ -350,6 +359,7 @@ export default function RfqDetailClient({
   outgoingItems: OutgoingItem[];
   outgoingStats: OutgoingStats;
   buyerLog: BuyerReplyLog | null;
+  itemImages: ItemImage[];
 }) {
   const [items, setItems]         = useState<Item[]>(initialItems);
   const [outgoing, setOutgoing]   = useState<OutgoingRfq[]>(initialOutgoing);
@@ -626,6 +636,18 @@ export default function RfqDetailClient({
           <p className="text-xs text-gray-400 mb-1">Date</p>
           <p className="text-sm text-gray-600">{new Date(rfq.created_at).toLocaleDateString("en-IN")}</p>
         </div>
+        {rfq.source_rfq_number && (
+          <div>
+            <p className="text-xs text-gray-400 mb-1">Source RFQ #</p>
+            <p className="text-sm text-gray-600">{rfq.source_rfq_number}</p>
+          </div>
+        )}
+        {rfq.source_date && (
+          <div>
+            <p className="text-xs text-gray-400 mb-1">Source Date</p>
+            <p className="text-sm text-gray-600">{rfq.source_date}</p>
+          </div>
+        )}
         </div>
       </div>
 
@@ -639,17 +661,40 @@ export default function RfqDetailClient({
 
         {/* ── TAB 1: Items ── */}
         <TabsContent value="items">
+          {rfq.warnings && rfq.warnings.length > 0 && (
+            <div className="mb-4 bg-yellow-50 text-yellow-800 text-xs px-4 py-3 rounded-xl space-y-1">
+              {rfq.warnings.map((w, i) => (
+                <div key={i} className="flex gap-1.5"><AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /> {w}</div>
+              ))}
+            </div>
+          )}
           <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-50 flex items-center justify-between">
+            <div className="px-6 py-4 border-b border-gray-50 flex items-center justify-between gap-3">
               <p className="text-sm text-gray-500">Review and correct categories before splitting</p>
-              <Button
-                onClick={handleSplit}
-                disabled={splitting || items.length === 0}
-                className="bg-blue-600 hover:bg-blue-700 text-white gap-2"
-              >
-                {splitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Split className="w-4 h-4" />}
-                {outgoing.length > 0 ? "Re-split by Supplier" : "Split by Supplier"}
-              </Button>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden">
+                  <button type="button" onClick={() => exportItemsToExcel(rfq, items)} disabled={items.length === 0}
+                    title="Export Excel" className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 disabled:opacity-40 transition-colors">
+                    <FileSpreadsheet className="w-4 h-4" />
+                  </button>
+                  <button type="button" onClick={() => exportItemsToCsv(rfq, items)} disabled={items.length === 0}
+                    title="Export CSV" className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 border-l border-gray-200 disabled:opacity-40 transition-colors">
+                    <Download className="w-4 h-4" />
+                  </button>
+                  <button type="button" onClick={() => exportItemsToPdf(rfq, items)} disabled={items.length === 0}
+                    title="Export PDF" className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 border-l border-gray-200 disabled:opacity-40 transition-colors">
+                    <FileText className="w-4 h-4" />
+                  </button>
+                </div>
+                <Button
+                  onClick={handleSplit}
+                  disabled={splitting || items.length === 0}
+                  className="bg-blue-600 hover:bg-blue-700 text-white gap-2"
+                >
+                  {splitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Split className="w-4 h-4" />}
+                  {outgoing.length > 0 ? "Re-split by Supplier" : "Split by Supplier"}
+                </Button>
+              </div>
             </div>
             {splitError && (
               <div className="mx-6 mt-4 bg-red-50 text-red-600 text-sm px-4 py-2 rounded-lg flex gap-2">
@@ -661,6 +706,8 @@ export default function RfqDetailClient({
                 <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50">
                   <th className="px-4 py-3 w-8">#</th>
                   <th className="px-4 py-3">Item name</th>
+                  <th className="px-4 py-3">Images</th>
+                  <th className="px-4 py-3">Part / SKU</th>
                   <th className="px-4 py-3">Qty</th>
                   <th className="px-4 py-3">Spec</th>
                   <th className="px-4 py-3">Category</th>
@@ -668,13 +715,51 @@ export default function RfqDetailClient({
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {items.map((item) => (
+                {items.map((item) => {
+                  const images = itemImages.filter((img) => img.item_id === item.id);
+                  const overallConfidence = item.confidence ?? item.category_confidence ?? 0;
+                  return (
                   <tr key={item.id} className={cn("hover:bg-gray-50", item.flagged && "bg-yellow-50/40")}>
                     <td className="px-4 py-2.5 text-gray-400 text-xs">{item.line_number}</td>
                     <td className="px-4 py-2.5">
-                      <p className="font-medium text-gray-800">{item.name}</p>
-                      {item.brand && <p className="text-xs text-gray-400">{item.brand}</p>}
+                      <div className="flex items-start gap-1.5">
+                        <div>
+                          <p className="font-medium text-gray-800">{item.name}</p>
+                          {item.brand && <p className="text-xs text-gray-400">{item.brand}</p>}
+                          {(item.merged_from_count ?? 1) > 1 && (
+                            <p className="text-[10px] text-blue-500 mt-0.5">merged from {item.merged_from_count} source files</p>
+                          )}
+                        </div>
+                        {item.warnings && item.warnings.length > 0 && (
+                          <span title={item.warnings.join(" ")}>
+                            <AlertTriangle className="w-3.5 h-3.5 text-yellow-500 flex-shrink-0 mt-0.5" />
+                          </span>
+                        )}
+                      </div>
                     </td>
+                    <td className="px-4 py-2.5">
+                      {images.length > 0 ? (
+                        <div className="flex -space-x-2">
+                          {images.slice(0, 3).map((img) => (
+                            img.signedUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img key={img.id} src={img.signedUrl} alt={img.source_file_name ?? "item photo"}
+                                className="w-8 h-8 rounded-lg object-cover border-2 border-white shadow-sm" />
+                            ) : (
+                              <div key={img.id} className="w-8 h-8 rounded-lg bg-gray-100 border-2 border-white flex items-center justify-center">
+                                <ImageOff className="w-3 h-3 text-gray-300" />
+                              </div>
+                            )
+                          ))}
+                          {images.length > 3 && (
+                            <div className="w-8 h-8 rounded-lg bg-gray-100 border-2 border-white flex items-center justify-center text-[10px] text-gray-500 font-medium">
+                              +{images.length - 3}
+                            </div>
+                          )}
+                        </div>
+                      ) : <span className="text-gray-300 text-xs">—</span>}
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-500 text-xs">{item.part_number ?? "—"}</td>
                     <td className="px-4 py-2.5 text-gray-600">
                       {item.qty != null ? `${item.qty} ${item.unit ?? ""}` : "—"}
                     </td>
@@ -686,19 +771,43 @@ export default function RfqDetailClient({
                       <div className="flex items-center gap-2">
                         <div className="w-16 h-1.5 bg-gray-100 rounded-full overflow-hidden">
                           <div
-                            className={cn("h-full rounded-full", (item.category_confidence ?? 0) >= 0.7 ? "bg-green-400" : "bg-yellow-400")}
-                            style={{ width: `${(item.category_confidence ?? 0) * 100}%` }}
+                            className={cn("h-full rounded-full", overallConfidence >= 0.7 ? "bg-green-400" : "bg-yellow-400")}
+                            style={{ width: `${overallConfidence * 100}%` }}
                           />
                         </div>
-                        <span className="text-xs text-gray-400">{Math.round((item.category_confidence ?? 0) * 100)}%</span>
+                        <span className="text-xs text-gray-400">{Math.round(overallConfidence * 100)}%</span>
                         {item.flagged && <AlertTriangle className="w-3 h-3 text-yellow-500" />}
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
+
+          {/* Images that couldn't be confidently matched to a line item */}
+          {itemImages.some((img) => !img.item_id) && (
+            <div className="mt-4 bg-white rounded-2xl border border-gray-100 p-5">
+              <p className="text-sm font-medium text-gray-700 mb-3">Unassigned Images</p>
+              <div className="flex flex-wrap gap-3">
+                {itemImages.filter((img) => !img.item_id).map((img) => (
+                  <div key={img.id} className="w-20 text-center">
+                    {img.signedUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={img.signedUrl} alt={img.source_file_name ?? "unassigned"}
+                        className="w-20 h-20 rounded-lg object-cover border border-gray-100" />
+                    ) : (
+                      <div className="w-20 h-20 rounded-lg bg-gray-100 flex items-center justify-center">
+                        <ImageOff className="w-5 h-5 text-gray-300" />
+                      </div>
+                    )}
+                    <p className="text-[10px] text-gray-400 truncate mt-1">{img.source_file_name ?? "image"}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </TabsContent>
 
         {/* ── TAB 2: Supplier Split ── */}

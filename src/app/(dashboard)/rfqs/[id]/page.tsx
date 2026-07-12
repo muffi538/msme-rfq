@@ -9,8 +9,8 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  // RFQ, items, and outgoing splits don't depend on each other — fetch in parallel.
-  const [{ data: rfq }, { data: items }, { data: outgoing }] = await Promise.all([
+  // RFQ, items, outgoing splits, and images don't depend on each other — fetch in parallel.
+  const [{ data: rfq }, { data: items }, { data: outgoing }, { data: images }] = await Promise.all([
     supabase.from("rfqs").select("*").eq("id", id).single(),
     supabase.from("rfq_items").select("*").eq("rfq_id", id).order("line_number"),
     supabase
@@ -18,9 +18,20 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
       .select("*, suppliers(name, whatsapp_number, whatsapp_group_link, email)")
       .eq("rfq_id", id)
       .order("category"),
+    supabase.from("rfq_item_images").select("*").eq("rfq_id", id).order("created_at"),
   ]);
 
   if (!rfq) notFound();
+
+  // The rfq-files storage bucket is private — turn each stored path into a
+  // short-lived signed URL for display. Best-effort: a signing failure just
+  // means that one thumbnail doesn't render, not a page error.
+  const itemImages = await Promise.all(
+    (images ?? []).map(async (img) => {
+      const { data: signed } = await supabase.storage.from("rfq-files").createSignedUrl(img.file_url, 3600);
+      return { ...img, signedUrl: signed?.signedUrl ?? null };
+    })
+  );
 
   // outgoingItems depends on outgoing's ids; buyerLog depends on rfq.buyer_email —
   // neither depends on the other, so run them together.
@@ -56,6 +67,7 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
         outgoingItems={outgoingItems ?? []}
         outgoingStats={outgoingStats}
         buyerLog={buyerLog}
+        itemImages={itemImages}
       />
     </>
   );

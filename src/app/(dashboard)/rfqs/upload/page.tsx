@@ -4,15 +4,26 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
-import { Upload, FileText, ImageIcon, Table2, Loader2, ClipboardPaste, X, CheckCircle2 } from "lucide-react";
+import { Upload, FileText, ImageIcon, Table2, FileType2, Loader2, ClipboardPaste, X, CheckCircle2, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { pollJob } from "@/lib/pollJob";
 
-const ACCEPTED = ".pdf,.xlsx,.xls,.csv,.txt,.jpg,.jpeg,.png,.webp";
+const ACCEPTED = ".pdf,.xlsx,.xls,.csv,.docx,.txt,.jpg,.jpeg,.png,.webp";
+const MAX_FILES = 10;
 
 type UploadState = "idle" | "uploading" | "error";
+type Stage = "uploading" | "ocr" | "parsing" | "matching" | "complete";
+
+const STAGES: { key: Stage; label: string }[] = [
+  { key: "uploading", label: "Uploading" },
+  { key: "ocr",        label: "OCR" },
+  { key: "parsing",    label: "Parsing" },
+  { key: "matching",   label: "Matching" },
+  { key: "complete",   label: "Complete" },
+];
 
 type FileEntry = {
   file: File;
@@ -20,18 +31,20 @@ type FileEntry = {
   id: string;
 };
 
-type FileResult = {
-  id: string;
+type JobResult = {
   rfqId: string;
+  rfqCode: string;
   itemCount: number;
-  fileName: string;
-  status: "pending" | "processing" | "done" | "error";
-  error?: string;
+  fileCount: number;
+  failedFiles: string[];
+  warnings: string[];
 };
 
 function fileIcon(file: File, size = "w-8 h-8") {
-  if (file.type.includes("pdf"))   return <FileText className={`${size} text-red-400`} />;
-  if (file.type.includes("image")) return <ImageIcon className={`${size} text-blue-400`} />;
+  const name = file.name.toLowerCase();
+  if (file.type.includes("pdf"))                        return <FileText  className={`${size} text-red-400`} />;
+  if (file.type.includes("image"))                       return <ImageIcon className={`${size} text-blue-400`} />;
+  if (name.endsWith(".docx"))                             return <FileType2 className={`${size} text-indigo-400`} />;
   return <Table2 className={`${size} text-green-400`} />;
 }
 
@@ -46,7 +59,12 @@ export default function UploadPage() {
   const [priority,    setPriority]    = useState<"normal" | "urgent">("normal");
   const [state,       setState]       = useState<UploadState>("idle");
   const [error,       setError]       = useState("");
-  const [results,     setResults]     = useState<FileResult[]>([]);
+
+  // Job progress — one merged RFQ built from every selected file at once.
+  const [stage,          setStage]          = useState<Stage | null>(null);
+  const [stageProcessed, setStageProcessed] = useState(0);
+  const [stageFile,      setStageFile]      = useState<string | null>(null);
+  const [jobResult,      setJobResult]      = useState<JobResult | null>(null);
 
   function makeEntry(f: File): FileEntry {
     const preview = f.type.startsWith("image/") ? URL.createObjectURL(f) : null;
@@ -56,10 +74,16 @@ export default function UploadPage() {
   function addFiles(incoming: File[]) {
     setError("");
     setState("idle");
+    setJobResult(null);
     setEntries((prev) => {
       const existing = new Set(prev.map((e) => e.file.name));
       const fresh = incoming.filter((f) => !existing.has(f.name));
-      return [...prev, ...fresh.map(makeEntry)];
+      const combined = [...prev, ...fresh.map(makeEntry)];
+      if (combined.length > MAX_FILES) {
+        toast.error(`Maximum ${MAX_FILES} files per RFQ — only the first ${MAX_FILES} were kept.`);
+        return combined.slice(0, MAX_FILES);
+      }
+      return combined;
     });
   }
 
@@ -76,7 +100,8 @@ export default function UploadPage() {
     setEntries([]);
     setState("idle");
     setError("");
-    setResults([]);
+    setStage(null);
+    setJobResult(null);
     if (inputRef.current) inputRef.current.value = "";
   }
 
@@ -139,63 +164,51 @@ export default function UploadPage() {
 
     setState("uploading");
     setError("");
+    setStage(null);
+    setStageProcessed(0);
+    setStageFile(null);
+    setJobResult(null);
 
-    const initial: FileResult[] = entries.map((e) => ({
-      id: e.id,
-      rfqId: "",
-      itemCount: 0,
-      fileName: e.file.name,
-      status: "pending",
-    }));
-    setResults(initial);
+    const form = new FormData();
+    for (const entry of entries) form.append("file", entry.file);
+    form.append("buyerName",  buyerName);
+    form.append("buyerEmail", buyerEmail.trim());
+    form.append("priority",   priority);
 
-    let lastRfqId = "";
-    let anyError = false;
+    try {
+      const res  = await fetch("/api/rfqs/upload", { method: "POST", body: form });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Upload failed");
 
-    for (const entry of entries) {
-      setResults((prev) => prev.map((r) => r.id === entry.id ? { ...r, status: "processing" } : r));
+      const result = await pollJob<
+        { stage: Stage; processed: number; total: number; currentFile?: string },
+        JobResult
+      >(json.jobId, (p) => {
+        if (!p) return;
+        setStage(p.stage);
+        setStageProcessed(p.processed);
+        setStageFile(p.currentFile ?? null);
+      });
 
-      const form = new FormData();
-      form.append("file", entry.file);
-      form.append("buyerName",  buyerName);
-      form.append("buyerEmail", buyerEmail.trim());
-      form.append("priority",   priority);
+      setJobResult(result);
+      setState("idle");
 
-      try {
-        const res  = await fetch("/api/rfqs/upload", { method: "POST", body: form });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error ?? "Upload failed");
-
-        lastRfqId = json.rfqId;
-        setResults((prev) => prev.map((r) =>
-          r.id === entry.id ? { ...r, status: "done", rfqId: json.rfqId, itemCount: json.itemCount } : r
-        ));
-      } catch (err: unknown) {
-        anyError = true;
-        const msg = err instanceof Error ? err.message : "Upload failed";
-        setResults((prev) => prev.map((r) =>
-          r.id === entry.id ? { ...r, status: "error", error: msg } : r
-        ));
+      if (result.failedFiles.length > 0) {
+        toast.warning(`${result.failedFiles.length} file(s) couldn't be read and were skipped: ${result.failedFiles.join(", ")}`, { duration: 10000 });
       }
-    }
-
-    if (!anyError && lastRfqId) {
-      const count = entries.length;
-      toast.success(count === 1 ? "RFQ processed! Opening…" : `${count} RFQs processed!`);
-      if (count === 1) {
-        setTimeout(() => router.push(`/rfqs/${lastRfqId}`), 600);
-      } else {
-        setTimeout(() => router.push("/rfqs"), 1000);
-      }
-    } else if (anyError) {
+      toast.success(`RFQ ${result.rfqCode} processed — ${result.itemCount} item${result.itemCount === 1 ? "" : "s"} from ${result.fileCount} file${result.fileCount === 1 ? "" : "s"}!`);
+      setTimeout(() => router.push(`/rfqs/${result.rfqId}`), 800);
+    } catch (err: unknown) {
       setState("error");
-      toast.error("Some files failed to upload.");
+      const msg = err instanceof Error ? err.message : "Upload failed";
+      setError(msg);
+      toast.error(msg);
     }
   }
 
   const busy      = state === "uploading";
   const hasFiles  = entries.length > 0;
-  const allDone   = results.length > 0 && results.every((r) => r.status === "done");
+  const stageIdx  = stage ? STAGES.findIndex((s) => s.key === stage) : -1;
 
   const [lightbox, setLightbox] = useState<string | null>(null);
 
@@ -249,7 +262,9 @@ export default function UploadPage() {
               {hasFiles ? (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-gray-700">{entries.length} file{entries.length > 1 ? "s" : ""} selected</span>
+                    <span className="text-sm font-medium text-gray-700">
+                      {entries.length} file{entries.length > 1 ? "s" : ""} selected — will be merged into one RFQ
+                    </span>
                     {!busy && (
                       <button type="button" onClick={(e) => { e.stopPropagation(); clearAll(); }}
                         className="text-xs text-gray-400 hover:text-red-500 transition-colors">
@@ -259,18 +274,20 @@ export default function UploadPage() {
                   </div>
 
                   <div className="grid grid-cols-1 gap-2">
-                    {entries.map((entry) => {
-                      const result = results.find((r) => r.id === entry.id);
+                    {entries.map((entry, i) => {
+                      const failed = jobResult?.failedFiles.includes(entry.file.name);
+                      const doneUploading = busy && stageIdx >= 0 && (stage !== "uploading" && stage !== "ocr" ? true : i < stageProcessed);
+                      const isCurrent = busy && (stage === "uploading" || stage === "ocr") && entry.file.name === stageFile;
                       return (
                         <div
                           key={entry.id}
                           onClick={(e) => e.stopPropagation()}
                           className={cn(
                             "flex items-center gap-3 rounded-xl border px-3 py-2.5 transition-colors",
-                            result?.status === "done"       && "bg-green-50 border-green-200",
-                            result?.status === "processing" && "bg-blue-50 border-blue-200",
-                            result?.status === "error"      && "bg-red-50 border-red-200",
-                            !result                         && "bg-gray-50 border-gray-100"
+                            jobResult && !failed  && "bg-green-50 border-green-200",
+                            failed                && "bg-red-50 border-red-200",
+                            !jobResult && isCurrent && "bg-blue-50 border-blue-200",
+                            !jobResult && !isCurrent && "bg-gray-50 border-gray-100"
                           )}
                         >
                           {entry.preview ? (
@@ -288,21 +305,16 @@ export default function UploadPage() {
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-medium text-gray-800 truncate">{entry.file.name}</p>
                             <p className="text-xs text-gray-400">{(entry.file.size / 1024).toFixed(0)} KB</p>
-                            {result?.status === "done" && (
-                              <p className="text-xs text-green-600 font-medium mt-0.5">{result.itemCount} items extracted ✓</p>
-                            )}
-                            {result?.status === "error" && (
-                              <p className="text-xs text-red-500 mt-0.5">{result.error}</p>
-                            )}
+                            {failed && <p className="text-xs text-red-500 mt-0.5">Couldn&apos;t be read — skipped</p>}
                           </div>
 
-                          {result?.status === "processing" && (
-                            <Loader2 className="w-4 h-4 animate-spin text-blue-500 flex-shrink-0" />
+                          {isCurrent && <Loader2 className="w-4 h-4 animate-spin text-blue-500 flex-shrink-0" />}
+                          {jobResult && !failed && <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />}
+                          {jobResult && failed && <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />}
+                          {!doneUploading && !isCurrent && busy && (
+                            <span className="text-[10px] text-gray-400 flex-shrink-0">queued</span>
                           )}
-                          {result?.status === "done" && (
-                            <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />
-                          )}
-                          {!result && !busy && (
+                          {!busy && !jobResult && (
                             <button
                               type="button"
                               onClick={() => removeEntry(entry.id)}
@@ -316,7 +328,7 @@ export default function UploadPage() {
                     })}
                   </div>
 
-                  {!busy && (
+                  {!busy && !jobResult && entries.length < MAX_FILES && (
                     <button
                       type="button"
                       onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}
@@ -330,8 +342,8 @@ export default function UploadPage() {
                 <>
                   <Upload className="w-10 h-10 text-gray-300" />
                   <p className="mt-3 font-semibold text-gray-700">Drop your RFQ files here</p>
-                  <p className="text-sm text-gray-400 mt-1">PDF, Excel (.xlsx/.xls/.csv), Image (JPG/PNG), or Text (.txt)</p>
-                  <p className="text-xs text-gray-400 mt-1">You can select multiple files at once</p>
+                  <p className="text-sm text-gray-400 mt-1">PDF, Excel, CSV, Word (.docx), Image (JPG/PNG/WEBP), or Text</p>
+                  <p className="text-xs text-gray-400 mt-1">Select multiple, mixed-format files — they&apos;ll merge into one RFQ</p>
                   <p className="mt-3 text-xs text-blue-600 font-medium">click to browse</p>
                 </>
               )}
@@ -351,8 +363,40 @@ export default function UploadPage() {
               />
             </div>
 
+            {/* Processing stage tracker */}
+            {(busy || jobResult) && (
+              <div className="bg-white rounded-2xl border border-gray-100 p-5">
+                <div className="flex items-center justify-between">
+                  {STAGES.map((s, i) => {
+                    const active = jobResult ? true : i <= stageIdx;
+                    const current = !jobResult && i === stageIdx;
+                    return (
+                      <div key={s.key} className="flex items-center flex-1 last:flex-none">
+                        <div className="flex flex-col items-center gap-1.5">
+                          <div className={cn(
+                            "w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold transition-colors",
+                            active ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-400",
+                            current && "animate-pulse"
+                          )}>
+                            {active && !current ? <CheckCircle2 className="w-4 h-4" /> : i + 1}
+                          </div>
+                          <span className={cn("text-[11px] font-medium", active ? "text-gray-700" : "text-gray-400")}>{s.label}</span>
+                        </div>
+                        {i < STAGES.length - 1 && (
+                          <div className={cn("h-0.5 flex-1 mx-1.5 rounded transition-colors", i < stageIdx || jobResult ? "bg-blue-600" : "bg-gray-100")} />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {busy && stageFile && (
+                  <p className="text-xs text-gray-400 mt-3 text-center">Processing &ldquo;{stageFile}&rdquo;…</p>
+                )}
+              </div>
+            )}
+
             {/* Paste from clipboard button */}
-            {!busy && (
+            {!busy && !jobResult && (
               <button
                 type="button"
                 onClick={handleClipboardButton}
@@ -419,23 +463,34 @@ export default function UploadPage() {
               </div>
             )}
 
-            {allDone && entries.length > 1 && (
-              <div className="flex items-center gap-2 bg-green-50 text-green-700 text-sm px-4 py-3 rounded-lg font-medium">
-                <CheckCircle2 className="w-4 h-4" />
-                All {entries.length} RFQs processed! Redirecting to your RFQ list…
+            {jobResult && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 bg-green-50 text-green-700 text-sm px-4 py-3 rounded-lg font-medium">
+                  <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                  RFQ {jobResult.rfqCode} processed — {jobResult.itemCount} item{jobResult.itemCount === 1 ? "" : "s"} from {jobResult.fileCount} file{jobResult.fileCount === 1 ? "" : "s"}. Redirecting…
+                </div>
+                {jobResult.warnings.length > 0 && (
+                  <div className="bg-yellow-50 text-yellow-800 text-xs px-4 py-3 rounded-lg space-y-1">
+                    {jobResult.warnings.map((w, i) => (
+                      <div key={i} className="flex gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /> {w}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
             <Button
               type="submit"
-              disabled={!hasFiles || !buyerName.trim() || busy}
+              disabled={!hasFiles || !buyerName.trim() || busy || !!jobResult}
               className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-base"
             >
               {busy ? (
                 <><Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  Processing {results.filter((r) => r.status === "done").length} / {entries.length}…</>
+                  {STAGES[stageIdx]?.label ?? "Processing"}…</>
               ) : entries.length > 1
-                ? `Upload & Process ${entries.length} RFQs`
+                ? `Upload & Merge ${entries.length} Files into One RFQ`
                 : "Upload & Process RFQ"}
             </Button>
 
