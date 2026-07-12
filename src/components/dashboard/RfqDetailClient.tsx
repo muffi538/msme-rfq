@@ -65,6 +65,7 @@ type Item = {
   flagged: boolean;
   part_number?: string | null; delivery_details?: string | null;
   confidence?: number | null; warnings?: string[] | null; merged_from_count?: number | null;
+  source_files?: string[] | null;
 };
 
 type OutgoingRfq = {
@@ -726,7 +727,11 @@ export default function RfqDetailClient({
                         <div>
                           <p className="font-medium text-gray-800">{item.name}</p>
                           {item.brand && <p className="text-xs text-gray-400">{item.brand}</p>}
-                          {(item.merged_from_count ?? 1) > 1 && (
+                          {item.source_files && item.source_files.length > 0 ? (
+                            <p className="text-[10px] text-blue-500 mt-0.5 truncate max-w-[220px]" title={item.source_files.join(", ")}>
+                              from {item.source_files.join(", ")}
+                            </p>
+                          ) : (item.merged_from_count ?? 1) > 1 && (
                             <p className="text-[10px] text-blue-500 mt-0.5">merged from {item.merged_from_count} source files</p>
                           )}
                         </div>

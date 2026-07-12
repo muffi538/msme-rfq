@@ -18,6 +18,15 @@ import { pollJob } from "@/lib/pollJob";
 type FetchResult = { rfqCode: string; subject: string; from: string; hasAttachment: boolean };
 type PendingRfq  = { id: string; rfq_code: string; buyer_name: string | null; buyer_email: string | null; file_name: string | null; created_at: string };
 type DoneRfq     = { id: string; rfq_code: string; buyer_name: string | null; status: string; created_at: string };
+
+function processStageLabel(p: { stage: string; processed: number; total: number } | null | undefined): string {
+  if (!p) return "Processing…";
+  if (p.stage === "found")    return `Found ${p.total} attachment${p.total === 1 ? "" : "s"}…`;
+  if (p.stage === "matching") return "Matching images…";
+  if (p.stage === "complete") return "Done";
+  if (p.processed >= p.total) return "Merging items…";
+  return `Attachment ${p.processed + 1} of ${p.total}…`;
+}
 type RfqLabel    = "important" | "waiting_reply" | "in_progress" | "spam";
 type FilterTab   = "all" | RfqLabel;
 type ViewMode    = "all" | "new" | "process" | "done";
@@ -146,6 +155,7 @@ export default function InboxPage() {
   const [pending,      setPending]      = useState<PendingRfq[]>([]);
   const [done,         setDone]         = useState<DoneRfq[]>([]);
   const [processing,   setProcessing]   = useState<Record<string, boolean>>({});
+  const [processProgress, setProcessProgress] = useState<Record<string, { stage: string; processed: number; total: number } | null>>({});
   const [justDone,     setJustDone]     = useState<Record<string, boolean>>({});
   const [labels,       setLabels]       = useState<Record<string, RfqLabel>>({});
   // ── Persist filter + view-mode in sessionStorage so navigating away and
@@ -347,13 +357,21 @@ export default function InboxPage() {
     }
   }
 
-  /* ── Run AI ───────────────────────────────────────────── */
+  /* ── Run AI — processes every attachment on the email, not just the
+     first one, and merges them into one RFQ. Job-based so the button can
+     show real "attachment i of N" progress instead of a blind spinner. ── */
   async function handleProcess(rfqId: string) {
     setProcessing((p) => ({ ...p, [rfqId]: true }));
+    setProcessProgress((p) => ({ ...p, [rfqId]: null }));
     try {
       const res  = await fetch(`/api/rfqs/${rfqId}/process`, { method: "POST" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Processing failed");
+
+      const result = await pollJob<
+        { stage: string; processed: number; total: number; currentFile?: string },
+        { itemCount: number; foundCount: number; processedCount: number; failedFiles: string[]; warnings: string[] }
+      >(json.jobId, (p) => setProcessProgress((prev) => ({ ...prev, [rfqId]: p })));
 
       setJustDone((p) => ({ ...p, [rfqId]: true }));
       setProcessing((p) => ({ ...p, [rfqId]: false }));
@@ -366,7 +384,13 @@ export default function InboxPage() {
           created_at: moved.created_at,
         }, ...prev]);
       }
-      toast.success(`${json.itemCount} items extracted! Opening RFQ…`);
+
+      if (result.failedFiles.length > 0) {
+        toast.warning(`${result.failedFiles.length} attachment(s) couldn't be read: ${result.failedFiles.join(", ")}`, { duration: 10000 });
+      }
+      toast.success(
+        `Files Processed: ${result.processedCount}/${result.foundCount} — Items Extracted: ${result.itemCount} — Failed Files: ${result.failedFiles.length}. Opening RFQ…`
+      );
       setTimeout(() => router.push(`/rfqs/${rfqId}`), 800);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Processing failed");
@@ -664,7 +688,7 @@ export default function InboxPage() {
                         className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.3)]"
                       >
                         {processing[rfq.id]
-                          ? <><Loader2 className="w-3 h-3 animate-spin" />Processing…</>
+                          ? <><Loader2 className="w-3 h-3 animate-spin" />{processStageLabel(processProgress[rfq.id])}</>
                           : <><Sparkles className="w-3 h-3" />Process it<ArrowRight className="w-3 h-3" /></>}
                       </Button>
                     )}

@@ -2,59 +2,13 @@ import { NextResponse, after } from "next/server";
 import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
 import { fetchUnreadEmails, markAsRead } from "@/lib/email/gmail";
-import { parsePdf } from "@/lib/parsers/pdf";
-import { parseExcel } from "@/lib/parsers/excel";
+import { detectFileType } from "@/lib/parsers/parseFile";
 import { generateRfqCode } from "@/lib/rfq";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { createJob, updateJob } from "@/lib/jobs";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const maxDuration = 60;
-
-function detectType(mime: string, filename: string): "pdf" | "excel" | "image" | "text" | null {
-  if (mime.includes("pdf") || filename.endsWith(".pdf"))                       return "pdf";
-  if (mime.includes("spreadsheet") || mime.includes("excel") ||
-      /\.(xlsx|xls|csv|tsv)$/i.test(filename))                                 return "excel";
-  if (mime.includes("image"))                                                   return "image";
-  if (mime.includes("text/plain") || /\.(txt)$/i.test(filename))               return "text";
-  return null;
-}
-
-// Use OpenAI to extract text from a PDF when pdf-parse fails
-async function extractPdfWithOpenAI(buffer: Buffer): Promise<string> {
-  const base64 = buffer.toString("base64");
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o",
-      max_tokens: 3000,
-      messages: [{
-        role: "user",
-        content: [
-          {
-            type: "file",
-            file: {
-              filename: "rfq.pdf",
-              file_data: `data:application/pdf;base64,${base64}`,
-            },
-          },
-          {
-            type: "text",
-            text: "Extract all text from this RFQ PDF document. Return only the raw text — preserve all item names, quantities, units, and specifications exactly as written.",
-          },
-        ],
-      }],
-    }),
-    signal: AbortSignal.timeout(30000),
-  });
-  const json = await res.json() as { choices?: { message: { content: string } }[]; error?: { message: string } };
-  if (json.error) throw new Error(`OpenAI: ${json.error.message}`);
-  return json.choices?.[0]?.message?.content ?? "";
-}
 
 // The actual work — runs after the response has already gone back to the
 // client (see after() in POST below), so it never blocks the UI. Every step
@@ -97,47 +51,26 @@ async function runEmailFetchJob(supabase: SupabaseClient, userId: string, jobId:
         continue;
       }
 
-      let rawText     = "";
+      // Detect every supported attachment — NOT just the first one. Actual
+      // parsing (OCR/PDF/etc, the slow + costly part) is deliberately
+      // deferred to the "Process it" step, same as before this fix; here we
+      // only need to know which attachments exist and store their bytes.
+      const supported = email.attachments
+        .map((att) => ({ att, type: detectFileType(att.filename, att.mimeType) }))
+        .filter((a): a is { att: typeof email.attachments[number]; type: NonNullable<typeof a.type> } => a.type !== null);
+
+      let rawText  = "";
       let fileType: string | null = null;
-      let fileName    = `msgid:${email.messageId}`;
-      let hasAttachment = false;
+      const fileName = supported.length > 0
+        ? `msgid:${email.messageId}|${supported[0].att.filename}`
+        : `msgid:${email.messageId}`;
 
-      for (const att of email.attachments) {
-        const t = detectType(att.mimeType, att.filename);
-        if (!t) continue;
-        hasAttachment = true;
-        fileType = t;
-        fileName = `msgid:${email.messageId}|${att.filename}`;
-
-        if (t === "pdf") {
-          // Step 1: try pdf-parse (fast, free)
-          try { rawText = await parsePdf(att.buffer); } catch { /* ignore */ }
-
-          // Step 2: if pdf-parse returned nothing, use OpenAI to read the PDF
-          if (!rawText.trim()) {
-            try { rawText = await extractPdfWithOpenAI(att.buffer); } catch { /* ignore */ }
-          }
-
-          // Step 3: absolute fallback — store base64 so process route can retry
-          if (!rawText.trim()) {
-            rawText = `base64pdf:${att.buffer.toString("base64")}`;
-          }
-          break;
-        }
-
-        if (t === "excel") { rawText = parseExcel(att.buffer); break; }
-        if (t === "text")  { rawText = att.buffer.toString("utf-8"); break; }
-        if (t === "image") {
-          rawText = `base64img:${att.mimeType}:${att.buffer.toString("base64")}`;
-          break;
-        }
-        break;
-      }
-
-      // Fallback: use email body if no attachment text
-      if ((!rawText.trim() || rawText.startsWith("base64")) && email.bodyText.trim()) {
+      if (supported.length === 0 && email.bodyText.trim()) {
+        // No supported attachment — fall back to the email body itself.
         rawText  = email.bodyText;
         fileType = "text";
+      } else if (supported.length > 0) {
+        fileType = supported.length === 1 ? supported[0].type : "mixed";
       }
 
       const rfqCode = await generateRfqCode(supabase);
@@ -164,11 +97,33 @@ async function runEmailFetchJob(supabase: SupabaseClient, userId: string, jobId:
         logError("[email-fetch] rfq insert failed", { messageId: email.messageId, error: insertError });
         continue;
       }
+
+      // Store every supported attachment's raw bytes now (cheap); parsing
+      // happens later when the user clicks "Process it".
+      if (supported.length > 0) {
+        const fileRows = [];
+        for (const { att, type } of supported) {
+          const path = `${userId}/${Date.now()}-${att.filename}`;
+          const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, att.buffer, { upsert: false });
+          fileRows.push({
+            rfq_id:    rfq.id,
+            user_id:   userId,
+            file_name: att.filename,
+            file_url:  storageError ? null : path,
+            file_type: type,
+            raw_text:  null,
+            status:    "pending",
+          });
+        }
+        const { error: filesError } = await supabase.from("rfq_files").insert(fileRows);
+        if (filesError) logError("[email-fetch] rfq_files insert failed", { messageId: email.messageId, error: filesError });
+      }
+
       // Only mark read now that it's safely saved — if this fails, we still
       // want the message to be picked up again on the next fetch.
       try { await markAsRead(email.messageId, refreshToken); } catch { /* best-effort */ }
 
-      results.push({ rfqCode, subject: email.subject, from: email.from, hasAttachment });
+      results.push({ rfqCode, subject: email.subject, from: email.from, hasAttachment: supported.length > 0 });
       created++;
     }
 
