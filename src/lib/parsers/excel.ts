@@ -1,7 +1,8 @@
 import * as XLSX from "xlsx";
 
-export function parseExcel(buffer: Buffer): string {
-  const workbook = XLSX.read(buffer, { type: "buffer" });
+// Shared by parseExcel and the CSV parser — every sheet, every row, flattened
+// to tab-separated text lines for the LLM extraction step.
+export function flattenWorkbookToText(workbook: XLSX.WorkBook): string {
   const lines: string[] = [];
 
   for (const sheetName of workbook.SheetNames) {
@@ -15,4 +16,9 @@ export function parseExcel(buffer: Buffer): string {
   }
 
   return lines.join("\n");
+}
+
+export function parseExcel(buffer: Buffer): string {
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  return flattenWorkbookToText(workbook);
 }
