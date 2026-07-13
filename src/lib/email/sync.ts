@@ -27,6 +27,16 @@ const EMPTY: Omit<SyncResult, "usedFallback"> = {
   created: 0, fetched: 0, deduped: 0, insertFailed: 0, lastInsertError: null, results: [],
 };
 
+// A single regular sync (cron tick or "Fetch Now") never imports more than
+// this many emails, so "Processing X of N" always shows a small N and the
+// UI never grinds through a long queue in one request. Anything beyond the
+// cap is left queued for the next sync — see syncGmailForUser below for how
+// the historyId checkpoint is deliberately withheld in that case so nothing
+// past the cap is ever silently skipped. Deliberate large imports
+// (onboarding's Last 25/50/100, "Fetch More History") are unaffected — this
+// cap only applies to the regular incremental/fallback sync path.
+const SYNC_BATCH_CAP = 5;
+
 // .limit(1) instead of .single() — a duplicate row for this user_id+key
 // would make .single() error out and look like "not connected".
 export async function getGmailRefreshToken(supabase: SupabaseClient, userId: string): Promise<string | null> {
@@ -86,87 +96,111 @@ async function filterUnseenMessageIds(supabase: SupabaseClient, userId: string, 
 
 // Emails are independent of each other — importing one has no bearing on
 // importing the next — so this runs several at a time instead of one at a
-// time. 4 in flight matches the concurrency already used for per-RFQ
-// processing elsewhere in the app; it's what turns "20 new emails" from a
-// slow one-by-one grind into a batch that finishes in roughly total/4 the
-// time. generateRfqCode's rare cross-request duplicate-number race under
-// concurrency is an accepted, cosmetic-only tradeoff (see its docstring).
-const EMAIL_IMPORT_CONCURRENCY = 4;
+// time. 5 in flight = the entire per-sync batch cap (SYNC_BATCH_CAP) runs
+// fully in parallel, no queueing within a sync. generateRfqCode's rare
+// cross-request duplicate-number race under concurrency is an accepted,
+// cosmetic-only tradeoff (see its docstring).
+const EMAIL_IMPORT_CONCURRENCY = 5;
 
 type EmailOutcome =
   | { kind: "created"; entry: SyncResult["results"][number] }
   | { kind: "deduped" }
   | { kind: "failed"; error: string };
 
+// Every step that can transiently fail (rfq_code generation, the insert
+// itself) is retried; and the whole function is wrapped in a catch-all so
+// that ANY unexpected failure here — retried out or not — resolves to a
+// "failed" outcome instead of throwing out of the worker. mapWithConcurrency
+// runs these concurrently via Promise.all, so one worker throwing would
+// reject the whole batch and abort every other email still in flight,
+// including ones that would have succeeded — exactly what must not happen.
 async function importOneEmail(supabase: SupabaseClient, userId: string, session: GmailSession, email: FetchedEmail): Promise<EmailOutcome> {
-  const supported = email.attachments
-    .map((att) => ({ att, type: detectFileType(att.filename, att.mimeType) }))
-    .filter((a): a is { att: typeof email.attachments[number]; type: NonNullable<typeof a.type> } => a.type !== null);
+  try {
+    const supported = email.attachments
+      .map((att) => ({ att, type: detectFileType(att.filename, att.mimeType) }))
+      .filter((a): a is { att: typeof email.attachments[number]; type: NonNullable<typeof a.type> } => a.type !== null);
 
-  let rawText  = "";
-  let fileType: string | null = null;
-  const fileName = supported.length > 0 ? supported[0].att.filename : "(email body)";
+    let rawText  = "";
+    let fileType: string | null = null;
+    const fileName = supported.length > 0 ? supported[0].att.filename : "(email body)";
 
-  if (supported.length === 0 && email.bodyText.trim()) {
-    rawText  = email.bodyText;
-    fileType = "text";
-  } else if (supported.length > 0) {
-    fileType = supported.length === 1 ? supported[0].type : "mixed";
+    if (supported.length === 0 && email.bodyText.trim()) {
+      rawText  = email.bodyText;
+      fileType = "text";
+    } else if (supported.length > 0) {
+      fileType = supported.length === 1 ? supported[0].type : "mixed";
+    }
+
+    const rfqCode = await withRetry(
+      () => generateRfqCode(supabase, userId),
+      { retries: 2, label: `generate rfq code for "${email.subject}"` }
+    );
+
+    const { data: rfq, error: insertError } = await withRetry(
+      async () => {
+        const res = await supabase
+          .from("rfqs")
+          .insert({
+            user_id:          userId,
+            rfq_code:         rfqCode,
+            buyer_name:       email.from,
+            buyer_email:      email.fromEmail,
+            file_name:        fileName,
+            file_type:        fileType,
+            raw_text:         rawText,
+            status:           "pending",
+            priority:         /urgent|asap|priority/i.test(email.subject) ? "urgent" : "normal",
+            created_at:       email.date.toISOString(),
+            gmail_message_id: email.messageId,
+            gmail_thread_id:  email.threadId,
+          })
+          .select("id")
+          .single();
+        // A unique-violation dedup race isn't a transient failure — don't
+        // retry it, just hand it back for the caller below to interpret.
+        if (res.error && (res.error as { code?: string }).code !== UNIQUE_VIOLATION) throw res.error;
+        return res;
+      },
+      { retries: 2, label: `insert rfq for "${email.subject}"` }
+    );
+
+    if (insertError || !rfq) {
+      // Another sync (cron overlapping a manual fetch) beat us to it — not a
+      // real failure, just a dedup race the unique index caught.
+      if ((insertError as { code?: string } | null)?.code === UNIQUE_VIOLATION) return { kind: "deduped" };
+      logError("[gmail-sync] rfq insert failed", { messageId: email.messageId, error: insertError });
+      return { kind: "failed", error: insertError?.message ?? "insert returned no row" };
+    }
+
+    if (supported.length > 0) {
+      const uploadedRows = await mapWithConcurrency(supported, 3, async ({ att, type }) => {
+        const path = `${userId}/${Date.now()}-${att.filename}`;
+        try {
+          await withRetry(
+            async () => {
+              const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, att.buffer, { upsert: false });
+              if (storageError) throw storageError;
+            },
+            { retries: 2, label: `upload "${att.filename}"` }
+          );
+          return { rfq_id: rfq.id, user_id: userId, file_name: att.filename, file_url: path, file_type: type, raw_text: null, status: "pending" };
+        } catch (err) {
+          logError("[gmail-sync] attachment upload failed", { messageId: email.messageId, filename: att.filename, error: err });
+          return { rfq_id: rfq.id, user_id: userId, file_name: att.filename, file_url: null, file_type: type, raw_text: null, status: "pending" };
+        }
+      });
+
+      const { error: filesError } = await supabase.from("rfq_files").insert(uploadedRows);
+      if (filesError) logError("[gmail-sync] rfq_files insert failed", { messageId: email.messageId, error: filesError });
+    }
+
+    try { await session.markAsRead(email.messageId); } catch { /* best-effort */ }
+
+    return { kind: "created", entry: { rfqCode, subject: email.subject, from: email.from, hasAttachment: supported.length > 0 } };
+  } catch (err) {
+    logError("[gmail-sync] importOneEmail failed unexpectedly", { messageId: email.messageId, error: err });
+    return { kind: "failed", error: err instanceof Error ? err.message : "unknown error" };
   }
-
-  const rfqCode = await generateRfqCode(supabase, userId);
-  const { data: rfq, error: insertError } = await supabase
-    .from("rfqs")
-    .insert({
-      user_id:          userId,
-      rfq_code:         rfqCode,
-      buyer_name:       email.from,
-      buyer_email:      email.fromEmail,
-      file_name:        fileName,
-      file_type:        fileType,
-      raw_text:         rawText,
-      status:           "pending",
-      priority:         /urgent|asap|priority/i.test(email.subject) ? "urgent" : "normal",
-      created_at:       email.date.toISOString(),
-      gmail_message_id: email.messageId,
-      gmail_thread_id:  email.threadId,
-    })
-    .select("id")
-    .single();
-
-  if (insertError || !rfq) {
-    // Another sync (cron overlapping a manual fetch) beat us to it — not a
-    // real failure, just a dedup race the unique index caught.
-    if ((insertError as { code?: string } | null)?.code === UNIQUE_VIOLATION) return { kind: "deduped" };
-    logError("[gmail-sync] rfq insert failed", { messageId: email.messageId, error: insertError });
-    return { kind: "failed", error: insertError?.message ?? "insert returned no row" };
-  }
-
-  if (supported.length > 0) {
-    const uploadedRows = await mapWithConcurrency(supported, 3, async ({ att, type }) => {
-      const path = `${userId}/${Date.now()}-${att.filename}`;
-      try {
-        await withRetry(
-          async () => {
-            const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, att.buffer, { upsert: false });
-            if (storageError) throw storageError;
-          },
-          { retries: 2, label: `upload "${att.filename}"` }
-        );
-        return { rfq_id: rfq.id, user_id: userId, file_name: att.filename, file_url: path, file_type: type, raw_text: null, status: "pending" };
-      } catch (err) {
-        logError("[gmail-sync] attachment upload failed", { messageId: email.messageId, filename: att.filename, error: err });
-        return { rfq_id: rfq.id, user_id: userId, file_name: att.filename, file_url: null, file_type: type, raw_text: null, status: "pending" };
-      }
-    });
-
-    const { error: filesError } = await supabase.from("rfq_files").insert(uploadedRows);
-    if (filesError) logError("[gmail-sync] rfq_files insert failed", { messageId: email.messageId, error: filesError });
-  }
-
-  try { await session.markAsRead(email.messageId); } catch { /* best-effort */ }
-
-  return { kind: "created", entry: { rfqCode, subject: email.subject, from: email.from, hasAttachment: supported.length > 0 } };
 }
 
 // Inserts already-filtered candidates. The batch pre-filter upstream
@@ -252,11 +286,32 @@ export async function syncGmailForUser(
     try {
       const hist = await session.listHistorySince(lastHistoryId);
       if (!hist.expired) {
-        messageIds = hist.messageIds;
-        await saveSettings(supabase, userId, [
-          { key: "gmail_last_history_id", value: hist.historyId },
-          { key: "gmail_last_synced_at", value: new Date().toISOString() },
-        ]);
+        // Filter to not-yet-imported ids *before* capping to the batch
+        // size — history.list keeps returning the exact same full set on
+        // every call as long as the checkpoint isn't advanced (see below),
+        // so naively slicing the first 5 of the raw list would re-select
+        // the same already-imported 5 forever instead of ever reaching the
+        // rest of the queue. Filtering first makes each call advance to
+        // the next unseen batch.
+        const { unseen } = await filterUnseenMessageIds(supabase, userId, hist.messageIds);
+        const moreQueued = unseen.length > SYNC_BATCH_CAP;
+        messageIds = unseen.slice(0, SYNC_BATCH_CAP);
+        if (moreQueued) {
+          // More new mail exists than this sync will import — do NOT
+          // advance the checkpoint to hist.historyId, or everything past
+          // the first 5 would be silently skipped forever (the next sync
+          // would only ever look *after* that point). Leaving the
+          // checkpoint where it is means the next sync re-lists from the
+          // same startHistoryId and re-derives "what's left" via the
+          // unseen-filter above.
+          await saveSettings(supabase, userId, [{ key: "gmail_last_synced_at", value: new Date().toISOString() }]);
+        } else {
+          // Caught up — safe to advance all the way to the latest historyId.
+          await saveSettings(supabase, userId, [
+            { key: "gmail_last_history_id", value: hist.historyId },
+            { key: "gmail_last_synced_at", value: new Date().toISOString() },
+          ]);
+        }
         checkpointed = true;
       }
     } catch (err) {
@@ -272,12 +327,31 @@ export async function syncGmailForUser(
     // backfill. Anyone who wants more history has the onboarding picker or
     // "Fetch More History" for that; this fallback exists purely so a
     // manual "Fetch Now" click still does *something* useful quickly, so it
-    // stays small on purpose. Re-anchors to the current historyId
-    // afterward so every sync after this one goes back to the cheap
-    // incremental "only new mail" path.
+    // stays small on purpose.
     usedFallback = true;
-    messageIds = await session.listMessageIds("is:unread in:inbox", { maxResults: 5 });
-    await checkpoint(supabase, userId, session, true);
+    // Ask for one more than the cap purely to detect whether more unread
+    // mail is waiting beyond this batch — only the first SYNC_BATCH_CAP are
+    // actually imported.
+    const rawIds = await session.listMessageIds("is:unread in:inbox", { maxResults: SYNC_BATCH_CAP + 1 });
+    const moreQueued = rawIds.length > SYNC_BATCH_CAP;
+    messageIds = rawIds.slice(0, SYNC_BATCH_CAP);
+    if (moreQueued) {
+      // Still catching up on unread backlog — don't establish a historyId
+      // checkpoint yet, or the rest of the backlog would never be visited.
+      // Each import marks its message read, so the very same "is:unread"
+      // query naturally excludes it next time — no separate queue/offset
+      // needs tracking, the mailbox's own unread flag *is* the queue.
+      // gmail_onboarded is still set so the cron doesn't wait on the
+      // onboarding picker while this catch-up is in progress.
+      await saveSettings(supabase, userId, [
+        { key: "gmail_onboarded", value: "true" },
+        { key: "gmail_last_synced_at", value: new Date().toISOString() },
+      ]);
+    } else {
+      // Caught up — re-anchor to the current historyId so every sync after
+      // this one goes back to the cheap incremental "only new mail" path.
+      await checkpoint(supabase, userId, session, true);
+    }
   }
 
   // If there's genuinely nothing new, this returns instantly — no full
