@@ -180,6 +180,16 @@ class OpenAiError extends Error {
 // on, since a genuinely oversized RFQ will likely truncate again.
 class InvalidAiJsonError extends Error {}
 
+// The only error type this module ever lets escape to a caller that shows
+// messages to end users. `message` (the Error's own message, via `super`)
+// is always safe, generic, non-technical copy — the full technical detail
+// (which can include a raw OpenAI response body, HTTP status, etc., and is
+// never meant for a customer to see) goes only to `detail`, which callers
+// must route through logError, never through user-facing UI.
+export class AiExtractionError extends Error {
+  constructor(message: string, public detail: string) { super(message); }
+}
+
 type RawExtractionResponse = { rfq_number?: unknown; supplier?: unknown; date?: unknown; items?: unknown[] };
 
 // Scans a JSON array's inner content and returns the source text of every
@@ -285,7 +295,10 @@ ${labeled}`,
         },
       ],
     }),
-    signal: AbortSignal.timeout(35000),
+    // Tightened from 35s to keep a 3-attempt budget (see retries: 2 below)
+    // safely inside JOB_DEADLINE_MS in the process route — gpt-4o-mini
+    // typically returns well under this for the input sizes used here.
+    signal: AbortSignal.timeout(20000),
   });
 
   if (!res.ok) {
@@ -360,17 +373,16 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
   const { data: parsed, truncated } = await withRetry(
     () => callAndParseOnce(labeled),
     {
-      // Worst case here (all attempts time out) is retries+1 * 35s ≈ 70s —
-      // this single call already eats a large share of the process route's
+      // Worst case here (every attempt times out) is 3 * 20s = 60s — this
+      // single call already eats a large share of the process route's
       // overall time budget (see JOB_DEADLINE_MS there), so it can't afford
-      // its own generous retry budget on top of that. Was 60s/2 retries
-      // (worst case ~180s) until an audit found that, combined with the
-      // caller's OWN retry wrapper around this whole function, could
-      // compound past the route's maxDuration and get the serverless
-      // function killed mid-flight — leaving the job stuck "processing"
-      // forever with no terminal status ever written. The caller no longer
-      // double-wraps this; this budget alone must stay safe.
-      retries: 1,
+      // an unbounded retry budget on top of that. The caller does NOT
+      // double-wrap this in another retry — an earlier version did, and
+      // that compounding could exceed the route's maxDuration and get the
+      // serverless function killed mid-flight, leaving the job stuck
+      // "processing" forever with no terminal status ever written. This
+      // budget alone must stay safe.
+      retries: 2,
       label: "RFQ item extraction",
       // Retry OpenAI's own transient failures (429/5xx), genuine network
       // errors (timeouts, connection resets), and invalid/malformed JSON
@@ -380,7 +392,23 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
       isRetryable: (err) => !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
     }
   ).catch((err) => {
-    if (err instanceof OpenAiError) throw new Error(`OpenAI error: ${err.message}`);
+    // Never let a raw OpenAI error body or internal exception detail reach
+    // an end user — only AiExtractionError's generic `message` is safe for
+    // that; everything technical goes to `detail`, which callers must log,
+    // not display.
+    if (err instanceof OpenAiError) {
+      logError("[normalize] OpenAI API error", { status: err.status, body: err.message.slice(0, 2000) });
+      throw new AiExtractionError(
+        "The AI service is temporarily unavailable. Please try again in a few minutes.",
+        `OpenAI error (status ${err.status}): ${err.message}`
+      );
+    }
+    if (err instanceof InvalidAiJsonError) {
+      throw new AiExtractionError(
+        "We couldn't reliably read this document — please try again, or upload the file manually.",
+        err.message
+      );
+    }
     throw err;
   });
 

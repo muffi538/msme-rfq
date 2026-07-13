@@ -2,7 +2,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
 import { detectFileType, parseOneFile, type FileType, type ParsedFile } from "@/lib/parsers/parseFile";
-import { normalizeAndCategorizeMulti, type MultiFileInput } from "@/lib/ai/normalize";
+import { normalizeAndCategorizeMulti, AiExtractionError, type MultiFileInput } from "@/lib/ai/normalize";
 import { matchImageToItem } from "@/lib/ai/matchImages";
 import { generateRfqCode } from "@/lib/rfq";
 import { checkRateLimit } from "@/lib/rateLimit";
@@ -209,6 +209,11 @@ async function runUploadJob(
       result: { rfqId: rfq.id, rfqCode, itemCount: items.length, fileCount: usable.length, failedFiles: failed.map((f) => f.name), warnings: rfqWarnings },
     });
   } catch (err: unknown) {
+    if (err instanceof AiExtractionError) {
+      logError("[rfqs/upload] job failed (AI extraction)", err.detail);
+      await updateJob(supabase, jobId, { status: "failed", error: err.message });
+      return;
+    }
     logError("[rfqs/upload] job failed", err);
     const msg = err instanceof Error ? err.message : "Internal error";
     await updateJob(supabase, jobId, { status: "failed", error: msg });

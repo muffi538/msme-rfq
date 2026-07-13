@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logError } from "@/lib/logError";
 
-export type JobStatus = "pending" | "running" | "done" | "failed";
+export type JobStatus = "pending" | "running" | "done" | "failed" | "cancelled";
 
 export type Job = {
   id: string;

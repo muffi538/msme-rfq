@@ -4,7 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { parsePdf } from "@/lib/parsers/pdf";
 import { parseOneFile, type FileType } from "@/lib/parsers/parseFile";
 import { extractTextViaOpenAI } from "@/lib/ai/extractText";
-import { normalizeAndCategorizeMulti, type MultiFileInput } from "@/lib/ai/normalize";
+import { normalizeAndCategorizeMulti, AiExtractionError, type MultiFileInput } from "@/lib/ai/normalize";
 import { matchImageToItem } from "@/lib/ai/matchImages";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { createJob, updateJob, findActiveJobForRfq } from "@/lib/jobs";
@@ -467,6 +467,15 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
     }
     })(), jobDeadline, "RFQ processing");
   } catch (err: unknown) {
+    // AiExtractionError already carries a message safe to show the user —
+    // its `detail` (which can include a raw OpenAI response body) goes only
+    // to the log, never to `fail()`, which writes straight to a user-facing
+    // column.
+    if (err instanceof AiExtractionError) {
+      logError("[rfqs/process] job failed (AI extraction)", err.detail);
+      await fail(err.message);
+      return;
+    }
     logError("[rfqs/process] job failed", err);
     await fail(err instanceof Error ? err.message : "Internal error");
   }

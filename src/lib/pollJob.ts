@@ -31,6 +31,7 @@ export async function pollJob<TProgress = unknown, TResult = unknown>(
 
     if (job.status === "done") return job.result as TResult;
     if (job.status === "failed") throw new Error(job.error ?? "Job failed");
+    if (job.status === "cancelled") throw new Error(job.error ?? "Processing was cancelled.");
   }
   throw new Error("This is taking longer than expected. Check back in a bit — it may still finish in the background.");
 }
