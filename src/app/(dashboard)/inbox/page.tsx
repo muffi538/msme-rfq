@@ -164,6 +164,20 @@ export default function InboxPage() {
   const [batchRunning,  setBatchRunning]  = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ processed: number; total: number } | null>(null);
   const batchCancelRef = useRef(false);
+  const [bulkDeleteOpen,  setBulkDeleteOpen]  = useState(false);
+  const [bulkDeleting,    setBulkDeleting]    = useState(false);
+  const [bulkLabelOpen,   setBulkLabelOpen]   = useState(false);
+  const bulkLabelMenuRef = useRef<HTMLDivElement>(null);
+  const lastClickedIndexRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!bulkLabelOpen) return;
+    function handle(e: MouseEvent) {
+      if (bulkLabelMenuRef.current && !bulkLabelMenuRef.current.contains(e.target as Node)) setBulkLabelOpen(false);
+    }
+    document.addEventListener("mousedown", handle);
+    return () => document.removeEventListener("mousedown", handle);
+  }, [bulkLabelOpen]);
   // ── Persist filter + view-mode in sessionStorage so navigating away and
   // coming back keeps the user on the tab they left on (no jarring reset).
   const [activeFilter, setActiveFilter] = useState<FilterTab>(() => {
@@ -303,6 +317,34 @@ export default function InboxPage() {
       toast.error(`Couldn't save label: ${error.message}`);
       setLabels(labels); // revert the optimistic update
     }
+  }
+
+  // Bulk label — applies to every selected RFQ in ONE write (labels are
+  // stored as a single JSON blob), instead of one upsert per RFQ.
+  async function bulkSetLabel(ids: string[], label: RfqLabel | null) {
+    const next = { ...labels };
+    for (const id of ids) {
+      if (label === null) delete next[id];
+      else next[id] = label;
+    }
+    setLabels(next);
+    setBulkLabelOpen(false);
+
+    const supabase = createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const { error } = await supabase.from("user_settings").upsert(
+      { user_id: user.id, key: "rfq_labels", value: JSON.stringify(next) },
+      { onConflict: "user_id,key" }
+    );
+    if (error) {
+      console.error("[inbox] bulk label save failed", error);
+      toast.error(`Couldn't save label: ${error.message}`);
+      setLabels(labels);
+      return;
+    }
+    toast.success(`Labelled ${ids.length} RFQ${ids.length > 1 ? "s" : ""}.`);
+    setBatchSelected(new Set());
   }
 
   /* ── Fetch emails ─────────────────────────────────────────
@@ -510,6 +552,42 @@ export default function InboxPage() {
       toast.error(err instanceof Error ? err.message : "Could not remove this RFQ");
     } finally {
       setDeletingEmail(false);
+    }
+  }
+
+  /* ── Bulk delete — same dashboard-only hide as the single delete above,
+     just as one batch request instead of N. Undo isn't offered here (a
+     10-item undo would need its own multi-step UI); Settings → Restore
+     Hidden Emails always covers it. ── */
+  async function confirmBulkDelete() {
+    const ids = [...batchSelected];
+    if (ids.length === 0) return;
+    setBulkDeleting(true);
+    try {
+      const res  = await fetch("/api/rfqs/bulk-hide", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Bulk delete failed");
+
+      const succeeded: string[] = json.succeeded ?? [];
+      const failed: string[] = json.failed ?? [];
+      const succeededSet = new Set(succeeded);
+      setPending((p) => p.filter((r) => !succeededSet.has(r.id)));
+      setBatchSelected(new Set());
+      setBulkDeleteOpen(false);
+
+      if (failed.length > 0) {
+        toast.warning(`${succeeded.length} deleted, ${failed.length} failed.`, { duration: 10000 });
+      } else {
+        toast.success(`${succeeded.length} RFQ${succeeded.length > 1 ? "s" : ""} removed from dashboard — original emails are untouched in Gmail.`);
+      }
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Bulk delete failed");
+    } finally {
+      setBulkDeleting(false);
     }
   }
 
@@ -813,12 +891,37 @@ export default function InboxPage() {
             </div>
 
             <div className="divide-y divide-border">
-              {visiblePending.map((rfq) => (
+              {visiblePending.map((rfq, idx) => (
                 <div
                   key={rfq.id}
+                  onClick={(e) => {
+                    // Shift/Ctrl+click anywhere on the row selects a range or
+                    // toggles this one row; a plain click does nothing here —
+                    // the checkbox handles that so other row controls (label,
+                    // process, delete) keep working normally.
+                    if (!e.shiftKey && !(e.ctrlKey || e.metaKey)) return;
+                    e.preventDefault();
+                    if (e.shiftKey && lastClickedIndexRef.current !== null) {
+                      const [start, end] = [lastClickedIndexRef.current, idx].sort((a, b) => a - b);
+                      const rangeIds = visiblePending.slice(start, end + 1).map((r) => r.id);
+                      setBatchSelected((prev) => {
+                        const next = new Set(prev);
+                        rangeIds.forEach((id) => next.add(id));
+                        return next;
+                      });
+                    } else {
+                      setBatchSelected((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(rfq.id)) next.delete(rfq.id); else next.add(rfq.id);
+                        return next;
+                      });
+                    }
+                    lastClickedIndexRef.current = idx;
+                  }}
                   className={cn(
                     "flex items-center gap-3 px-5 py-4 transition-colors",
-                    justDone[rfq.id] ? "bg-green-50 dark:bg-green-950/20" : "hover:bg-muted/40",
+                    batchSelected.has(rfq.id) ? "bg-blue-50/60 dark:bg-blue-950/20 ring-1 ring-inset ring-blue-200 dark:ring-blue-900" :
+                      justDone[rfq.id] ? "bg-green-50 dark:bg-green-950/20" : "hover:bg-muted/40",
                     labels[rfq.id] === "spam" && "opacity-60"
                   )}
                 >
@@ -827,12 +930,14 @@ export default function InboxPage() {
                     className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
                     checked={batchSelected.has(rfq.id)}
                     disabled={batchRunning || processing[rfq.id]}
+                    onClick={(e) => e.stopPropagation()}
                     onChange={(e) => {
                       setBatchSelected((prev) => {
                         const next = new Set(prev);
                         if (e.target.checked) next.add(rfq.id); else next.delete(rfq.id);
                         return next;
                       });
+                      lastClickedIndexRef.current = idx;
                     }}
                   />
                   {/* Content */}
@@ -1016,16 +1121,89 @@ export default function InboxPage() {
               </span>
               <Button
                 size="sm"
+                onClick={() => setBulkDeleteOpen(true)}
+                className="bg-red-600 hover:bg-red-700 text-white gap-1.5 h-8 text-xs rounded-full"
+              >
+                <Trash2 className="w-3 h-3" /> Delete Selected ({batchSelected.size})
+              </Button>
+              <Button
+                size="sm"
                 onClick={handleBatchProcess}
                 className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full"
               >
                 <Sparkles className="w-3 h-3" /> Process Selected ({batchSelected.size})
               </Button>
+              <div className="relative" ref={bulkLabelMenuRef}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setBulkLabelOpen((v) => !v)}
+                  className="gap-1.5 h-8 text-xs"
+                >
+                  <Tag className="w-3 h-3" /> Label Selected
+                </Button>
+                {bulkLabelOpen && (
+                  <div className="absolute bottom-full mb-1.5 left-1/2 -translate-x-1/2 bg-card border border-border rounded-xl shadow-xl p-1.5 w-44 z-50">
+                    {LABELS.map((lbl) => (
+                      <button
+                        key={lbl.value}
+                        onClick={() => bulkSetLabel([...batchSelected], lbl.value)}
+                        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-left text-card-foreground hover:bg-muted/60 transition-colors"
+                      >
+                        <span className="text-base">{lbl.emoji}</span> {lbl.label}
+                      </button>
+                    ))}
+                    <div className="border-t border-border my-1" />
+                    <button
+                      onClick={() => bulkSetLabel([...batchSelected], null)}
+                      className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:bg-muted/60 hover:text-red-500 transition-colors"
+                    >
+                      <X className="w-3.5 h-3.5" /> Remove label
+                    </button>
+                  </div>
+                )}
+              </div>
               <Button size="sm" variant="outline" onClick={() => setBatchSelected(new Set())} className="h-8 text-xs">
                 Clear Selection
               </Button>
             </>
           )}
+        </div>
+      )}
+
+      {/* Bulk delete confirmation modal */}
+      {bulkDeleteOpen && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-card border border-border rounded-2xl shadow-xl p-6 max-w-sm w-full space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-red-100 dark:bg-red-950/40 rounded-full flex items-center justify-center flex-shrink-0">
+                <AlertTriangle className="w-5 h-5 text-red-600" />
+              </div>
+              <div>
+                <p className="font-semibold text-card-foreground">Delete {batchSelected.size} RFQ{batchSelected.size > 1 ? "s" : ""} from the dashboard?</p>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  This will only remove them from ProcureAI. The original emails will remain safely in your Gmail inbox.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <Button
+                onClick={confirmBulkDelete}
+                disabled={bulkDeleting}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white"
+              >
+                {bulkDeleting ? "Deleting..." : "Delete Selected"}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setBulkDeleteOpen(false)}
+                disabled={bulkDeleting}
+                className="flex-1"
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
         </div>
       )}
     </>
