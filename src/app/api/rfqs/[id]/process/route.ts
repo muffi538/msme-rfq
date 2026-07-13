@@ -191,6 +191,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
             }
 
             try {
+              console.log(`[rfqs/process] rfq=${rfqId} file="${row.file_name}" type=${type} START DOWNLOAD`);
               const buffer = await withRetry(
                 () => raceWithDeadline(
                   (async () => {
@@ -204,10 +205,10 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
                 { retries: 1, label: `download "${row.file_name}"` }
               );
 
-              console.log(`[rfqs/process] rfq=${rfqId} file="${row.file_name}" download took ${Date.now() - fileStartedAt}ms`);
+              console.log(`[rfqs/process] rfq=${rfqId} file="${row.file_name}" bytes=${buffer.length} DOWNLOAD COMPLETE in ${Date.now() - fileStartedAt}ms`);
               const parseStartedAt = Date.now();
               const parsed = await parseOneFile(row.file_name, type, buffer, "");
-              console.log(`[rfqs/process] rfq=${rfqId} file="${row.file_name}" parse${parsed.usedOcr ? "+ocr" : ""} took ${Date.now() - parseStartedAt}ms`);
+              console.log(`[rfqs/process] rfq=${rfqId} file="${row.file_name}" parse${parsed.usedOcr ? "+ocr" : ""} took ${Date.now() - parseStartedAt}ms error=${parsed.error ?? "none"}`);
 
               await withRetry(
                 async () => {
@@ -331,6 +332,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       await report("extract_items", 0, 1);
       const extractStartedAt = Date.now();
       const multiInput: MultiFileInput[] = usable.map((a) => ({ fileName: a.name, text: a.text }));
+      console.log(`[rfqs/process] rfq=${rfqId} START AI files=${multiInput.length}`);
       // normalizeAndCategorizeMulti already retries its own OpenAI call
       // internally (see its own worst-case budget comment) — do NOT wrap it
       // in another withRetry here. An earlier version of this route did,
@@ -340,6 +342,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       // "processing" forever with no terminal status ever written. The
       // deadline race below is the real backstop now, not nested retries.
       const { meta, items, truncated } = await raceWithDeadline(normalizeAndCategorizeMulti(multiInput), jobDeadline, "AI item extraction");
+      console.log(`[rfqs/process] rfq=${rfqId} AI COMPLETE items=${items.length}`);
       logStageTiming(rfqId, "extract_items", extractStartedAt);
       await report("extract_items", 1, 1);
       // Categories arrive already assigned in the same response above — this
@@ -389,6 +392,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
 
         let savedCount = 0;
         const saveStartedAt = Date.now();
+        console.log(`[rfqs/process] rfq=${rfqId} START SAVE items=${rows.length}`);
         try {
           const chunkResults = await mapWithConcurrency(
             chunks,
@@ -404,6 +408,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
             (result) => { savedCount += result.length; report("save", savedCount, rows.length); }
           );
           insertedItems = chunkResults.flat();
+          console.log(`[rfqs/process] rfq=${rfqId} SAVE COMPLETE items=${insertedItems.length}`);
           logStageTiming(rfqId, "save", saveStartedAt);
         } catch (err) {
           logError("[rfqs/process] rfq_items insert failed", err);

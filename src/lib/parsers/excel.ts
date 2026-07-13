@@ -18,6 +18,13 @@ export function flattenWorkbookToText(workbook: XLSX.WorkBook): string {
   return lines.join("\n");
 }
 
+// Deliberately synchronous (matches XLSX.read's own synchronous API) — a
+// Promise-based timeout wrapper here would be cosmetic, not real: a
+// genuinely blocking synchronous call can't be preempted by a timer, since
+// nothing else (including the timer callback) can run until this function
+// returns control to the event loop either way. In practice XLSX.read is
+// fast even for large sheets; parseOneFile's own try/catch still catches
+// any throw from a malformed workbook.
 export function parseExcel(buffer: Buffer): string {
   const workbook = XLSX.read(buffer, { type: "buffer" });
   return flattenWorkbookToText(workbook);
