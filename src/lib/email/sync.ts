@@ -241,11 +241,15 @@ export async function syncGmailForUser(
 
   if (!checkpointed) {
     // Bootstrap (first-ever manual sync) or recovery (historyId
-    // expired/errored): bounded scan of unread mail, then re-anchor to the
-    // current historyId so every sync after this one goes back to the
-    // cheap incremental path.
+    // expired/errored): a small, fast scan of unread mail — not a big
+    // backfill. Anyone who wants more history has the onboarding picker or
+    // "Fetch More History" for that; this fallback exists purely so a
+    // manual "Fetch Now" click still does *something* useful quickly, so it
+    // stays small on purpose. Re-anchors to the current historyId
+    // afterward so every sync after this one goes back to the cheap
+    // incremental "only new mail" path.
     usedFallback = true;
-    messageIds = await session.listMessageIds("is:unread in:inbox", { maxResults: 20 });
+    messageIds = await session.listMessageIds("is:unread in:inbox", { maxResults: 5 });
     await checkpoint(supabase, userId, session, true);
   }
 

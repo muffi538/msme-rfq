@@ -38,8 +38,8 @@ export async function POST() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
-  // Each fetch can trigger up to 20 Gmail API calls plus OpenAI fallback
-  // calls — cap how often it can be triggered.
+  // Each fetch can trigger a handful of Gmail API calls — cap how often it
+  // can be triggered.
   const allowed = await checkRateLimit(supabase, user.id, "email-fetch", 300, 10);
   if (!allowed) {
     return NextResponse.json({ error: "Too many fetch requests. Please wait a few minutes and try again." }, { status: 429 });
