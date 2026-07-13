@@ -214,8 +214,36 @@ export default function InboxPage() {
 
   const [gmailEmail,   setGmailEmail]   = useState<string | null>(null);
   const [gmailLoading, setGmailLoading] = useState(true);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const lastSyncedAtRef = useRef<string | null>(null);
 
   useEffect(() => { loadAll(); loadLabels(); loadGmailStatus(); }, []);
+
+  /* ── Auto-sync status — the actual "poll every 2 minutes" work happens
+     server-side via Vercel cron (/api/cron/gmail-sync), independent of
+     whether this tab is even open. This just polls a cheap status endpoint
+     so the UI reflects it and quietly refreshes the list when a background
+     sync has landed new mail — no manual refresh needed. ── */
+  async function pollSyncStatus() {
+    try {
+      const res = await fetch("/api/email/sync-status");
+      if (!res.ok) return;
+      const data: { lastSyncedAt: string | null; connected: boolean } = await res.json();
+      if (data.lastSyncedAt !== lastSyncedAtRef.current) {
+        const isFirstLoad = lastSyncedAtRef.current === null;
+        lastSyncedAtRef.current = data.lastSyncedAt;
+        setLastSyncedAt(data.lastSyncedAt);
+        if (!isFirstLoad) loadPending();
+      }
+    } catch { /* best-effort — next poll will retry */ }
+  }
+
+  useEffect(() => {
+    if (!gmailEmail) return;
+    const interval = setInterval(pollSyncStatus, 20000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gmailEmail]);
 
   /* ── Surface the result of the Gmail OAuth redirect ────── */
   useEffect(() => {
@@ -252,6 +280,7 @@ export default function InboxPage() {
     params.delete("detail");
     const query = params.toString();
     router.replace(query ? `/inbox?${query}` : "/inbox");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
   /* ── Gmail status ────────────────────────────────────── */
@@ -271,8 +300,10 @@ export default function InboxPage() {
       .order("created_at", { ascending: false })
       .limit(1);
     if (error) console.error("[gmail-status] lookup failed", error);
-    setGmailEmail(data?.[0]?.value || null);
+    const email = data?.[0]?.value || null;
+    setGmailEmail(email);
     setGmailLoading(false);
+    if (email) pollSyncStatus();
   }
 
   /* ── Data loading ─────────────────────────────────────── */
@@ -306,7 +337,7 @@ export default function InboxPage() {
       .from("rfqs")
       .select("id, rfq_code, buyer_name, status, created_at")
       .in("status", ["processed", "approved", "sent"])
-      .like("file_name", "msgid:%")
+      .not("gmail_message_id", "is", null)
       .order("created_at", { ascending: false })
       .limit(30);
     // Defensive: re-sort client-side too — newest first
@@ -410,6 +441,7 @@ export default function InboxPage() {
         toast.info("No new emails found.");
       }
       await loadAll();
+      pollSyncStatus();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Something went wrong";
       setFetchError(msg);
@@ -790,6 +822,18 @@ export default function InboxPage() {
             )}
           </div>
 
+          {gmailEmail && !gmailLoading && (
+            <div className="flex items-center gap-2 mb-4 text-xs">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-50 text-green-700 border border-green-200 font-medium">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                Auto-sync ON · every 2 min
+              </span>
+              <span className="text-muted-foreground">
+                Last synced: {lastSyncedAt ? fmt(lastSyncedAt) : "Never yet"}
+              </span>
+            </div>
+          )}
+
           {/* Not connected — show connect button */}
           {!gmailLoading && !gmailEmail && (
             <a
@@ -810,7 +854,7 @@ export default function InboxPage() {
                       ? `Processing ${fetchProgress.processed} of ${fetchProgress.total}…`
                       : "Scanning Gmail…"}
                   </>
-                : <><Mail className="w-4 h-4" />Fetch New Emails</>}
+                : <><Mail className="w-4 h-4" />Fetch Now</>}
             </Button>
           )}
 
@@ -1149,7 +1193,7 @@ export default function InboxPage() {
               {viewMode === "new" ? "Nothing new in the last 24 hours" : "No older backlog — you're caught up!"}
             </p>
             <p className="text-sm mt-1 opacity-70">
-              {viewMode === "new" ? "Click \"Fetch New Emails\" to pull the latest." : "All older RFQs have been processed."}
+              {viewMode === "new" ? "New mail arrives automatically — or click \"Fetch Now\"." : "All older RFQs have been processed."}
             </p>
           </div>
         )}
@@ -1161,7 +1205,7 @@ export default function InboxPage() {
             <p className="font-medium">No emails yet</p>
             <p className="text-sm mt-1 opacity-70">
               {gmailEmail
-                ? <>Click &quot;Fetch New Emails&quot; to pull your Gmail inbox</>
+                ? <>New mail is imported automatically every 2 minutes — or click &quot;Fetch Now&quot;</>
                 : <>Connect Gmail above to start pulling RFQs automatically</>}
             </p>
 
