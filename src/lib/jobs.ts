@@ -11,6 +11,7 @@ export type Job = {
   progress: Record<string, unknown> | null;
   result: Record<string, unknown> | null;
   error: string | null;
+  rfq_id: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -18,16 +19,39 @@ export type Job = {
 export async function createJob(
   supabase: SupabaseClient,
   userId: string,
-  type: string
+  type: string,
+  rfqId?: string
 ): Promise<{ job: Job | null; error: string | null }> {
   const { data, error } = await supabase
     .from("jobs")
-    .insert({ user_id: userId, type, status: "pending" })
+    .insert({ user_id: userId, type, status: "pending", rfq_id: rfqId ?? null })
     .select()
     .single();
 
   if (error) return { job: null, error: error.message };
   return { job: data as Job, error: null };
+}
+
+// Idempotency check: is there already a not-yet-finished job for this RFQ?
+// Used to avoid kicking off a second, duplicate processing run for the
+// same RFQ (e.g. a double-click, or two browser tabs both hitting
+// "Process it" on the same row).
+export async function findActiveJobForRfq(
+  supabase: SupabaseClient,
+  userId: string,
+  rfqId: string
+): Promise<Job | null> {
+  const { data } = await supabase
+    .from("jobs")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("rfq_id", rfqId)
+    .in("status", ["pending", "running"])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return (data as Job | null) ?? null;
 }
 
 export async function updateJob(

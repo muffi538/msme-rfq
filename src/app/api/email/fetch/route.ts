@@ -6,6 +6,8 @@ import { detectFileType } from "@/lib/parsers/parseFile";
 import { generateRfqCode } from "@/lib/rfq";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { createJob, updateJob } from "@/lib/jobs";
+import { withRetry } from "@/lib/retry";
+import { mapWithConcurrency } from "@/lib/concurrency";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const maxDuration = 60;
@@ -102,19 +104,30 @@ async function runEmailFetchJob(supabase: SupabaseClient, userId: string, jobId:
       // happens later when the user clicks "Process it".
       if (supported.length > 0) {
         const fileRows = [];
-        for (const { att, type } of supported) {
+        const uploadedRows = await mapWithConcurrency(supported, 3, async ({ att, type }) => {
           const path = `${userId}/${Date.now()}-${att.filename}`;
-          const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, att.buffer, { upsert: false });
-          fileRows.push({
-            rfq_id:    rfq.id,
-            user_id:   userId,
-            file_name: att.filename,
-            file_url:  storageError ? null : path,
-            file_type: type,
-            raw_text:  null,
-            status:    "pending",
-          });
-        }
+          try {
+            await withRetry(
+              async () => {
+                const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, att.buffer, { upsert: false });
+                if (storageError) throw storageError;
+              },
+              { retries: 2, label: `upload "${att.filename}"` }
+            );
+            return {
+              rfq_id: rfq.id, user_id: userId, file_name: att.filename,
+              file_url: path, file_type: type, raw_text: null, status: "pending",
+            };
+          } catch (err) {
+            logError("[email-fetch] attachment upload failed", { messageId: email.messageId, filename: att.filename, error: err });
+            return {
+              rfq_id: rfq.id, user_id: userId, file_name: att.filename,
+              file_url: null, file_type: type, raw_text: null, status: "pending",
+            };
+          }
+        });
+        fileRows.push(...uploadedRows);
+
         const { error: filesError } = await supabase.from("rfq_files").insert(fileRows);
         if (filesError) logError("[email-fetch] rfq_files insert failed", { messageId: email.messageId, error: filesError });
       }

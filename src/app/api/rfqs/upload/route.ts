@@ -7,12 +7,15 @@ import { matchImageToItem } from "@/lib/ai/matchImages";
 import { generateRfqCode } from "@/lib/rfq";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { createJob, updateJob } from "@/lib/jobs";
+import { withRetry } from "@/lib/retry";
+import { mapWithConcurrency } from "@/lib/concurrency";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const maxDuration = 120;
 
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024; // 15MB per file — comfortably under OpenAI's file-upload limits
 const MAX_FILES = 10;
+const FILE_CONCURRENCY = 3; // bounded — avoids firing dozens of simultaneous OpenAI OCR calls for a big batch
 
 type ProgressStage = "uploading" | "ocr" | "parsing" | "matching" | "complete";
 
@@ -32,25 +35,41 @@ async function runUploadJob(
     // Stage 1: store every file's raw bytes first — independent of parse
     // success, so a file that later fails to parse is still kept.
     await report("uploading", 0);
-    const stored: { name: string; path: string | null }[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      await report("uploading", i, f.name);
-      const path = `${userId}/${Date.now()}-${f.name}`;
-      const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, f.buffer, { upsert: false });
-      stored.push({ name: f.name, path: storageError ? null : path });
-    }
+    const uploadResults = await mapWithConcurrency(
+      files,
+      FILE_CONCURRENCY,
+      async (f) => {
+        const path = `${userId}/${Date.now()}-${f.name}`;
+        try {
+          await withRetry(
+            async () => {
+              const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, f.buffer, { upsert: false });
+              if (storageError) throw storageError;
+            },
+            { retries: 2, label: `upload "${f.name}"` }
+          );
+          return { name: f.name, path };
+        } catch {
+          return { name: f.name, path: null };
+        }
+      },
+      (_result, _f, i) => report("uploading", i + 1, files[i].name)
+    );
+    const stored = uploadResults;
 
     // Stage 2: extract text — OCR for images (PDFs that need an OCR
-    // fallback are relabelled once that path actually triggers).
-    const parsed: ParsedFile[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      await report(f.type === "image" ? "ocr" : "parsing", i, f.name);
-      const result = await parseOneFile(f.name, f.type, f.buffer, f.mime);
-      if (result.usedOcr) await report("ocr", i, f.name);
-      parsed.push(result);
-    }
+    // fallback are relabelled once that path actually triggers). Bounded
+    // concurrency so a big batch doesn't fire dozens of OpenAI calls at once.
+    let parsedCount = 0;
+    const parsed: ParsedFile[] = await mapWithConcurrency(
+      files,
+      FILE_CONCURRENCY,
+      (f) => parseOneFile(f.name, f.type, f.buffer, f.mime),
+      (result, f) => {
+        parsedCount++;
+        report(result.usedOcr ? "ocr" : "parsing", parsedCount, f.name);
+      }
+    );
 
     const usable = parsed.filter((f) => !f.error && f.text.trim());
     const failed = parsed.filter((f) => f.error);
@@ -139,13 +158,20 @@ async function runUploadJob(
         flagged:             item.category_confidence < 0.7 || item.confidence < 0.6,
       }));
 
-      const { data: inserted, error: itemsError } = await supabase.from("rfq_items").insert(rows).select("id, name, brand, spec");
-      if (itemsError) {
-        logError("[rfqs/upload] rfq_items insert failed", itemsError);
-        await updateJob(supabase, jobId, { status: "failed", error: `Could not save extracted items: ${itemsError.message}` });
+      try {
+        insertedItems = await withRetry(
+          async () => {
+            const { data, error: itemsError } = await supabase.from("rfq_items").insert(rows).select("id, name, brand, spec");
+            if (itemsError) throw itemsError;
+            return data ?? [];
+          },
+          { retries: 2, label: "rfq_items insert" }
+        );
+      } catch (err) {
+        logError("[rfqs/upload] rfq_items insert failed", err);
+        await updateJob(supabase, jobId, { status: "failed", error: `Could not save extracted items: ${err instanceof Error ? err.message : "unknown error"}` });
         return;
       }
-      insertedItems = inserted ?? [];
     }
 
     // Match standalone image files to line items ("preserve image associations")

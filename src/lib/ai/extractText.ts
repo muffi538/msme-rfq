@@ -1,5 +1,10 @@
-// Relocated unchanged from the upload route so both the PDF-parse fallback
-// and image OCR (single- and multi-file upload) can share one implementation.
+// Relocated from the upload route so both the PDF-parse fallback and image
+// OCR (single- and multi-file upload, plus the process route) can share one
+// implementation. Originally never checked res.ok — an OpenAI error
+// response (429/5xx/4xx) silently produced empty text instead of throwing,
+// which made it look like "this file has no text" instead of "OCR failed,"
+// and meant any retry wrapper around this call had nothing to actually
+// catch. Now throws on failure so callers can tell the difference and retry.
 export async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Promise<string> {
   const base64 = buffer.toString("base64");
   const isPdf  = mimeType.includes("pdf");
@@ -23,6 +28,12 @@ export async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Pr
     }),
     signal: AbortSignal.timeout(45000),
   });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`OpenAI vision error (${res.status}): ${errText}`);
+  }
   const json = await res.json();
-  return json.choices?.[0]?.message?.content ?? "";
+  const content = json.choices?.[0]?.message?.content;
+  if (!content) throw new Error("OpenAI returned no text content");
+  return content;
 }
