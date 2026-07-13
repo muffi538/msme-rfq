@@ -3,6 +3,7 @@ import { parseExcel } from "@/lib/parsers/excel";
 import { parseCsv } from "@/lib/parsers/csv";
 import { parseDocx } from "@/lib/parsers/docx";
 import { extractTextViaOpenAI } from "@/lib/ai/extractText";
+import { withRetry } from "@/lib/retry";
 
 // Shared by the multi-file RFQ upload flow and the Gmail attachment
 // pipeline — one place that knows how to recognize and parse every
@@ -42,15 +43,21 @@ export async function parseOneFile(name: string, type: FileType, buffer: Buffer,
         try {
           return { ...base, text: await parsePdf(buffer) };
         } catch {
-          // Malformed/scanned PDF — fall back to OpenAI, which handles any PDF via base64
-          return { ...base, text: await extractTextViaOpenAI(buffer, "application/pdf"), usedOcr: true };
+          // Malformed/scanned PDF — fall back to OpenAI, which handles any PDF
+          // via base64. Vision/OCR calls are network-dependent and prone to
+          // transient timeouts/429s, so retry a couple of times before giving up.
+          const text = await withRetry(() => extractTextViaOpenAI(buffer, "application/pdf"), { retries: 2, label: `PDF OCR for "${name}"` });
+          return { ...base, text, usedOcr: true };
         }
       }
       case "excel": return { ...base, text: parseExcel(buffer) };
       case "csv":   return { ...base, text: parseCsv(buffer) };
       case "docx":  return { ...base, text: await parseDocx(buffer) };
       case "text":  return { ...base, text: buffer.toString("utf-8") };
-      case "image": return { ...base, text: await extractTextViaOpenAI(buffer, mime || "image/jpeg"), usedOcr: true };
+      case "image": {
+        const text = await withRetry(() => extractTextViaOpenAI(buffer, mime || "image/jpeg"), { retries: 2, label: `image OCR for "${name}"` });
+        return { ...base, text, usedOcr: true };
+      }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Failed to parse this file";

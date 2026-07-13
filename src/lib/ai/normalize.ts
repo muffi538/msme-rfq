@@ -1,3 +1,5 @@
+import { withRetry } from "@/lib/retry";
+
 export type RawItem = {
   line_number: number;
   raw_text: string;
@@ -160,31 +162,39 @@ function dedupeItems(items: MergedItem[]): MergedItem[] {
   return result.sort((a, b) => a.line_number - b.line_number);
 }
 
+// OpenAI's own transient failures (429 rate limit, 5xx) are worth retrying;
+// a 4xx like a bad API key or malformed request will fail identically on
+// every retry, so don't waste time/attempts on those.
+class OpenAiError extends Error {
+  constructor(message: string, public status: number) { super(message); }
+}
+
 export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[] }> {
   const labeled = files
     .map((f) => `--- FILE: ${f.fileName} ---\n${f.text}`)
     .join("\n\n")
     .slice(0, MAX_COMBINED_CHARS);
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      max_tokens: 4000,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: "You are a procurement assistant. Multiple source files (possibly duplicating each other) describe ONE request for quotation. Extract RFQ-level metadata plus every line item and return ONLY valid JSON.",
-        },
-        {
-          role: "user",
-          content: `Return JSON:
+  const res = await withRetry(
+    () => fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        max_tokens: 4000,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: "You are a procurement assistant. Multiple source files (possibly duplicating each other) describe ONE request for quotation. Extract RFQ-level metadata plus every line item and return ONLY valid JSON.",
+          },
+          {
+            role: "user",
+            content: `Return JSON:
 {"rfq_number": "..." or null, "supplier": "..." or null, "date": "..." or null,
  "items": [{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"part":null,"delivery":null,"cat":"POWER_TOOLS","conf":0.9,"file":"exact FILE name this item came from"},...]}
 
@@ -196,16 +206,31 @@ Rules: skip headers/totals/page numbers. If the same item is described in more t
 
 SOURCE FILES:
 ${labeled}`,
-        },
-      ],
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(60000),
+    }).then(async (r) => {
+      if (!r.ok) {
+        if (r.status === 429 || r.status >= 500) throw new OpenAiError(await r.text(), r.status);
+        // Non-retryable — surface immediately instead of burning retries.
+        throw Object.assign(new Error(`OpenAI error: ${await r.text()}`), { nonRetryable: true });
+      }
+      return r;
     }),
-    signal: AbortSignal.timeout(60000),
+    {
+      retries: 2,
+      label: "RFQ item extraction",
+      // Retry OpenAI's own transient failures (429/5xx) and genuine network
+      // errors (timeouts, connection resets) — everything except the
+      // explicitly-tagged non-retryable 4xx case, which fails the same way
+      // every time.
+      isRetryable: (err) => !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
+    }
+  ).catch((err) => {
+    if (err instanceof OpenAiError) throw new Error(`OpenAI error: ${err.message}`);
+    throw err;
   });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenAI error: ${err}`);
-  }
 
   const json = await res.json() as { choices?: { message: { content: string } }[] };
   const content = json.choices?.[0]?.message?.content;

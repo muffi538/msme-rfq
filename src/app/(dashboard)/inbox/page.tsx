@@ -13,10 +13,15 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 import { pollJob } from "@/lib/pollJob";
+import { mapWithConcurrency } from "@/lib/concurrency";
 
 /* ── Types ─────────────────────────────────────────────── */
 type FetchResult = { rfqCode: string; subject: string; from: string; hasAttachment: boolean };
-type PendingRfq  = { id: string; rfq_code: string; buyer_name: string | null; buyer_email: string | null; file_name: string | null; created_at: string };
+type PendingRfq  = {
+  id: string; rfq_code: string; buyer_name: string | null; buyer_email: string | null;
+  file_name: string | null; created_at: string;
+  status?: string; process_error?: string | null;
+};
 type DoneRfq     = { id: string; rfq_code: string; buyer_name: string | null; status: string; created_at: string };
 
 function processStageLabel(p: { stage: string; processed: number; total: number } | null | undefined): string {
@@ -164,11 +169,26 @@ export default function InboxPage() {
   const [batchRunning,  setBatchRunning]  = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ processed: number; total: number } | null>(null);
   const batchCancelRef = useRef(false);
+  const [batchFailed,   setBatchFailed]   = useState<{ id: string; rfqCode: string; error: string }[]>([]);
   const [bulkDeleteOpen,  setBulkDeleteOpen]  = useState(false);
   const [bulkDeleting,    setBulkDeleting]    = useState(false);
   const [bulkLabelOpen,   setBulkLabelOpen]   = useState(false);
   const bulkLabelMenuRef = useRef<HTMLDivElement>(null);
   const lastClickedIndexRef = useRef<number | null>(null);
+  // Synchronous guard (unlike React state, updates instantly with no render
+  // delay) against loadPending() firing a duplicate resume-poll for the
+  // same RFQ if it's called again before the first resume's setProcessing
+  // has actually committed.
+  const resumingRef = useRef<Set<string>>(new Set());
+  // Cancels any in-flight job polling when this page unmounts, so
+  // navigating away doesn't leave polling loops running (and eventually
+  // calling setState) against a component that's no longer mounted. The
+  // background job itself is unaffected — this only stops client polling.
+  const unmountControllerRef = useRef<AbortController>(new AbortController());
+  useEffect(() => {
+    const controller = unmountControllerRef.current;
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     if (!bulkLabelOpen) return;
@@ -264,8 +284,20 @@ export default function InboxPage() {
     const data = await res.json();
     // Newest first — guard against null/invalid timestamps
     const ts = (r: PendingRfq) => (r.created_at ? new Date(r.created_at).getTime() : 0) || 0;
-    const sorted = [...(data.rfqs ?? [])].sort((a, b) => ts(b) - ts(a));
+    const sorted: PendingRfq[] = [...(data.rfqs ?? [])].sort((a, b) => ts(b) - ts(a));
     setPending(sorted);
+
+    // Persist progress after a refresh — anything still marked "processing"
+    // (this user navigated away or reloaded mid-run) resumes polling. The
+    // server-side idempotency guard makes this safe to call again: if this
+    // user still owns an in-flight job, it re-attaches to it; if it's
+    // someone else's run, the server refuses instead of double-processing.
+    for (const r of sorted) {
+      if (r.status === "processing" && !processing[r.id] && !resumingRef.current.has(r.id)) {
+        resumingRef.current.add(r.id);
+        processOneRfq(r.id).finally(() => resumingRef.current.delete(r.id));
+      }
+    }
   }
 
   async function loadDone() {
@@ -365,7 +397,7 @@ export default function InboxPage() {
       const result = await pollJob<
         { processed: number; total: number },
         { results?: FetchResult[]; created: number; fetched: number; deduped: number; insertFailed: number; lastInsertError?: string }
-      >(json.jobId, setFetchProgress);
+      >(json.jobId, setFetchProgress, unmountControllerRef.current.signal);
 
       setFetchResults(result.results ?? []);
       if (result.created > 0) {
@@ -426,7 +458,7 @@ export default function InboxPage() {
       const result = await pollJob<
         { stage: string; processed: number; total: number; currentFile?: string },
         { itemCount: number; foundCount: number; processedCount: number; failedFiles: string[]; warnings: string[] }
-      >(json.jobId, (p) => setProcessProgress((prev) => ({ ...prev, [rfqId]: p })));
+      >(json.jobId, (p) => setProcessProgress((prev) => ({ ...prev, [rfqId]: p })), unmountControllerRef.current.signal);
 
       setJustDone((p) => ({ ...p, [rfqId]: true }));
       const moved = pending.find((r) => r.id === rfqId);
@@ -462,35 +494,47 @@ export default function InboxPage() {
     setTimeout(() => router.push(`/rfqs/${rfqId}`), 800);
   }
 
-  /* ── Batch processing — sequential (each RFQ still calls the same
-     background job as a single "Process it"; running them in parallel
-     would just contend for the same OpenAI rate limit budget with worse
-     progress reporting). Continues past individual failures, reports a
-     summary, and can be cancelled between items. ── */
-  async function handleBatchProcess() {
-    const ids = [...batchSelected];
+  /* ── Batch processing — bounded parallelism. Each RFQ already runs as
+     its own independent background job (separate serverless invocation
+     with its own time budget), so processing several concurrently is safe
+     and much faster than one-at-a-time; the concurrency cap keeps it from
+     overwhelming OpenAI's own rate limits (which the retry logic in the
+     job itself also now absorbs). Continues past individual failures,
+     reports a live summary, and can be cancelled — items not yet started
+     are skipped, whatever's already in flight finishes normally. ── */
+  const BATCH_CONCURRENCY = 4;
+
+  async function handleBatchProcess(idsOverride?: string[]) {
+    const ids = idsOverride ?? [...batchSelected];
     if (ids.length === 0) return;
     setBatchRunning(true);
     batchCancelRef.current = false;
     setBatchProgress({ processed: 0, total: ids.length });
+    setBatchFailed([]);
 
     const succeeded: string[] = [];
     const failed: { id: string; rfqCode: string; error: string }[] = [];
+    let completed = 0;
 
-    for (let i = 0; i < ids.length; i++) {
-      if (batchCancelRef.current) break;
-      const rfqId = ids[i];
-      const rfqCode = pending.find((r) => r.id === rfqId)?.rfq_code ?? rfqId;
-      setBatchProgress({ processed: i, total: ids.length });
-
-      const outcome = await processOneRfq(rfqId);
-      if (outcome.ok) succeeded.push(rfqId);
-      else failed.push({ id: rfqId, rfqCode, error: outcome.error });
-      setBatchProgress({ processed: i + 1, total: ids.length });
-    }
+    await mapWithConcurrency(
+      ids,
+      BATCH_CONCURRENCY,
+      async (rfqId) => {
+        if (batchCancelRef.current) return; // skip — cancelled before this one started
+        const rfqCode = pending.find((r) => r.id === rfqId)?.rfq_code ?? rfqId;
+        const outcome = await processOneRfq(rfqId);
+        if (outcome.ok) succeeded.push(rfqId);
+        else failed.push({ id: rfqId, rfqCode, error: outcome.error });
+      },
+      () => {
+        completed++;
+        setBatchProgress({ processed: completed, total: ids.length });
+      }
+    );
 
     setBatchRunning(false);
     setBatchSelected(new Set());
+    setBatchFailed(failed);
 
     const cancelled = batchCancelRef.current;
     if (failed.length > 0) {
@@ -508,6 +552,12 @@ export default function InboxPage() {
       `${cancelled ? "Cancelled — " : ""}Completed ${succeeded.length} of ${ids.length}. Opening workspace…`
     );
     setTimeout(() => router.push(`/rfqs/workspace?ids=${succeeded.join(",")}`), 600);
+  }
+
+  function retryFailed() {
+    const ids = batchFailed.map((f) => f.id);
+    if (ids.length === 0) return;
+    handleBatchProcess(ids);
   }
 
   function cancelBatch() {
@@ -858,6 +908,24 @@ export default function InboxPage() {
           </div>
         )}
 
+        {/* ── Retry Failed banner ── */}
+        {batchFailed.length > 0 && !batchRunning && (
+          <div className="bg-red-50 border border-red-200 rounded-2xl px-5 py-3 flex items-center justify-between gap-3">
+            <p className="text-sm text-red-700">
+              <span className="font-semibold">{batchFailed.length} RFQ{batchFailed.length > 1 ? "s" : ""} failed to process.</span>
+              {" "}{batchFailed.map((f) => f.rfqCode).join(", ")}
+            </p>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <Button size="sm" onClick={retryFailed} className="bg-red-600 hover:bg-red-700 text-white h-8 text-xs">
+                Retry Failed ({batchFailed.length})
+              </Button>
+              <button onClick={() => setBatchFailed([])} className="text-red-400 hover:text-red-600" title="Dismiss">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ── Pending — AI not yet run (shown in All / New mail / Process it views) ── */}
         {visiblePending.length > 0 && viewMode !== "done" && (
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
@@ -945,7 +1013,23 @@ export default function InboxPage() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="font-semibold text-card-foreground text-sm">{rfq.rfq_code}</p>
                       {labels[rfq.id] && <LabelPill value={labels[rfq.id]} />}
+                      {rfq.status === "failed" && !processing[rfq.id] && (
+                        <span
+                          className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-50 text-red-700 border border-red-200"
+                          title={rfq.process_error ?? "Processing failed"}
+                        >
+                          <AlertTriangle className="w-3 h-3" /> Failed
+                        </span>
+                      )}
+                      {rfq.status === "processing" && !processing[rfq.id] && (
+                        <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                          <Loader2 className="w-3 h-3 animate-spin" /> Processing (another session)
+                        </span>
+                      )}
                     </div>
+                    {rfq.status === "failed" && rfq.process_error && !processing[rfq.id] && (
+                      <p className="text-xs text-red-500 mt-0.5 truncate" title={rfq.process_error}>{rfq.process_error}</p>
+                    )}
                     <p className="text-sm text-muted-foreground truncate mt-0.5">
                       {rfq.buyer_name ?? rfq.buyer_email ?? "Unknown sender"}
                     </p>
@@ -1128,7 +1212,7 @@ export default function InboxPage() {
               </Button>
               <Button
                 size="sm"
-                onClick={handleBatchProcess}
+                onClick={() => handleBatchProcess()}
                 className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full"
               >
                 <Sparkles className="w-3 h-3" /> Process Selected ({batchSelected.size})
