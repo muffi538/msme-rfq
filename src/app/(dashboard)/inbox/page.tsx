@@ -1327,6 +1327,14 @@ export default function InboxPage() {
                           <AlertTriangle className="w-3 h-3" /> Failed
                         </span>
                       )}
+                      {rfq.status === "cancelled" && !processing[rfq.id] && (
+                        <span
+                          className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-gray-100 text-gray-600 border border-gray-200"
+                          title={rfq.process_error ?? "Processing was cancelled"}
+                        >
+                          <X className="w-3 h-3" /> Cancelled
+                        </span>
+                      )}
                       {rfq.status === "processing" && !processing[rfq.id] && (
                         <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-blue-50 text-blue-700 border border-blue-200">
                           <Loader2 className="w-3 h-3 animate-spin" /> Processing (another session)
@@ -1335,6 +1343,9 @@ export default function InboxPage() {
                     </div>
                     {rfq.status === "failed" && rfq.process_error && !processing[rfq.id] && (
                       <p className="text-xs text-red-500 mt-0.5 truncate" title={rfq.process_error}>{rfq.process_error}</p>
+                    )}
+                    {rfq.status === "cancelled" && rfq.process_error && !processing[rfq.id] && (
+                      <p className="text-xs text-gray-500 mt-0.5 truncate" title={rfq.process_error}>{rfq.process_error}</p>
                     )}
                     <p className="text-sm text-muted-foreground truncate mt-0.5">
                       {rfq.buyer_name ?? rfq.buyer_email ?? "Unknown sender"}

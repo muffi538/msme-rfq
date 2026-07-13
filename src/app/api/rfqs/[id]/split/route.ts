@@ -43,6 +43,8 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: rfqId } = await params;
+  const startedAt = Date.now();
+  console.log(`[rfqs/split] rfq=${rfqId} stage=supplier_split started`);
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
@@ -153,5 +155,6 @@ export async function POST(
   const { error: statusError } = await supabase.from("rfqs").update({ status: "approved" }).eq("id", rfqId);
   if (statusError) logError("[rfqs/split] status update failed", statusError);
 
+  console.log(`[rfqs/split] rfq=${rfqId} stage=supplier_split completed in ${Date.now() - startedAt}ms, outgoing=${outgoingRows.length}`);
   return NextResponse.json({ outgoing: outgoingRows });
 }

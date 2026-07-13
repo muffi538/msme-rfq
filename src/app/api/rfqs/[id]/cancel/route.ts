@@ -2,12 +2,11 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { logError } from "@/lib/logError";
 
-// User-initiated cancel for a stuck or unwanted "processing" RFQ. Reuses the
-// existing "failed" terminal state (with a distinct, clear message) rather
-// than introducing a separate "cancelled" status throughout the app — every
-// place that already knows how to show/retry a failed RFQ handles this for
-// free. Marks BOTH the RFQ and any of this user's still-active jobs for it,
-// so a stuck client-side poll resolves (as a clean failure) within one poll
+// User-initiated cancel for a stuck or unwanted "processing" RFQ. Uses a
+// genuinely distinct "cancelled" terminal status (not "failed") so the UI
+// and any reporting can tell "something went wrong" apart from "the user
+// chose to stop this." Marks BOTH the RFQ and any of this user's still-
+// active jobs for it, so a stuck client-side poll resolves within one poll
 // interval instead of running out its own timeout.
 export async function POST(
   _request: Request,
@@ -32,7 +31,7 @@ export async function POST(
 
   const { error: rfqError } = await supabase
     .from("rfqs")
-    .update({ status: "failed", process_error: message })
+    .update({ status: "cancelled", process_error: message })
     .eq("id", id)
     .eq("status", "processing"); // only if it's still actually processing at write time
   if (rfqError) {
@@ -42,7 +41,7 @@ export async function POST(
 
   const { error: jobError } = await supabase
     .from("jobs")
-    .update({ status: "failed", error: message, updated_at: new Date().toISOString() })
+    .update({ status: "cancelled", error: message, updated_at: new Date().toISOString() })
     .eq("user_id", user.id)
     .eq("rfq_id", id)
     .in("status", ["pending", "running"]);
