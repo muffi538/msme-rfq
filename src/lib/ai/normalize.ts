@@ -1,4 +1,5 @@
 import { withRetry } from "@/lib/retry";
+import { logError } from "@/lib/logError";
 
 export type RawItem = {
   line_number: number;
@@ -169,32 +170,38 @@ class OpenAiError extends Error {
   constructor(message: string, public status: number) { super(message); }
 }
 
-export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[] }> {
-  const labeled = files
-    .map((f) => `--- FILE: ${f.fileName} ---\n${f.text}`)
-    .join("\n\n")
-    .slice(0, MAX_COMBINED_CHARS);
+// Malformed JSON from the model — usually the response got cut off mid-
+// object because it hit max_tokens on an unusually large RFQ, or (rarer)
+// the model just produced something invalid despite response_format:
+// json_object. Distinct from OpenAiError because this reaches the OpenAI
+// API successfully (not a 429/5xx) but the CONTENT is unusable — worth one
+// retry (a fresh generation is not guaranteed to truncate at the same
+// point, and often doesn't), but not worth burning the full retry budget
+// on, since a genuinely oversized RFQ will likely truncate again.
+class InvalidAiJsonError extends Error {}
 
-  const res = await withRetry(
-    () => fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        temperature: 0,
-        max_tokens: 4000,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content: "You are a procurement assistant. Multiple source files (possibly duplicating each other) describe ONE request for quotation. Extract RFQ-level metadata plus every line item and return ONLY valid JSON.",
-          },
-          {
-            role: "user",
-            content: `Return JSON:
+type RawExtractionResponse = { rfq_number?: unknown; supplier?: unknown; date?: unknown; items?: unknown[] };
+
+async function callAndParseOnce(labeled: string): Promise<RawExtractionResponse> {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      max_tokens: 8000, // bumped from 4000 — a large multi-file RFQ (many line items) could hit the old cap mid-object, producing truncated/invalid JSON
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: "You are a procurement assistant. Multiple source files (possibly duplicating each other) describe ONE request for quotation. Extract RFQ-level metadata plus every line item and return ONLY valid JSON.",
+        },
+        {
+          role: "user",
+          content: `Return JSON:
 {"rfq_number": "..." or null, "supplier": "..." or null, "date": "..." or null,
  "items": [{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"part":null,"delivery":null,"cat":"POWER_TOOLS","conf":0.9,"file":"exact FILE name this item came from"},...]}
 
@@ -206,18 +213,59 @@ Rules: skip headers/totals/page numbers. If the same item is described in more t
 
 SOURCE FILES:
 ${labeled}`,
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(35000),
-    }).then(async (r) => {
-      if (!r.ok) {
-        if (r.status === 429 || r.status >= 500) throw new OpenAiError(await r.text(), r.status);
-        // Non-retryable — surface immediately instead of burning retries.
-        throw Object.assign(new Error(`OpenAI error: ${await r.text()}`), { nonRetryable: true });
-      }
-      return r;
+        },
+      ],
     }),
+    signal: AbortSignal.timeout(35000),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    if (res.status === 429 || res.status >= 500) throw new OpenAiError(body, res.status);
+    // Non-retryable — surface immediately instead of burning retries.
+    throw Object.assign(new Error(`OpenAI error: ${body}`), { nonRetryable: true });
+  }
+
+  const json = await res.json() as { choices?: { message: { content: string } }[] };
+  const content = json.choices?.[0]?.message?.content;
+  if (!content) throw new Error("OpenAI returned no content");
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch (err) {
+    // Log the raw content — this is the one thing that's actually useful
+    // for debugging a bad extraction after the fact, and it's otherwise
+    // lost the moment this throws.
+    logError("[normalize] AI returned invalid JSON", { rawContent: content.slice(0, 4000), parseError: err });
+    throw new InvalidAiJsonError("AI returned invalid JSON");
+  }
+
+  // Strict-enough schema validation before anything downstream trusts this
+  // shape — reject silently-wrong structures (e.g. the model returning a
+  // bare array, or "items" as a string) instead of letting them crash
+  // later deep in the merge/insert logic.
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    logError("[normalize] AI response was valid JSON but not the expected object shape", { rawContent: content.slice(0, 4000) });
+    throw new InvalidAiJsonError("AI response was not in the expected format");
+  }
+  const obj = parsed as RawExtractionResponse;
+  if (obj.items !== undefined && !Array.isArray(obj.items)) {
+    logError("[normalize] AI response's \"items\" field was not an array", { rawContent: content.slice(0, 4000) });
+    throw new InvalidAiJsonError("AI response's item list was not in the expected format");
+  }
+
+  return obj;
+}
+
+export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[] }> {
+  const labeled = files
+    .map((f) => `--- FILE: ${f.fileName} ---\n${f.text}`)
+    .join("\n\n")
+    .slice(0, MAX_COMBINED_CHARS);
+
+  const parsed = await withRetry(
+    () => callAndParseOnce(labeled),
     {
       // Worst case here (all attempts time out) is retries+1 * 35s ≈ 70s —
       // this single call already eats a large share of the process route's
@@ -231,27 +279,17 @@ ${labeled}`,
       // double-wraps this; this budget alone must stay safe.
       retries: 1,
       label: "RFQ item extraction",
-      // Retry OpenAI's own transient failures (429/5xx) and genuine network
-      // errors (timeouts, connection resets) — everything except the
-      // explicitly-tagged non-retryable 4xx case, which fails the same way
-      // every time.
+      // Retry OpenAI's own transient failures (429/5xx), genuine network
+      // errors (timeouts, connection resets), and invalid/malformed JSON
+      // (a fresh generation often doesn't truncate at the same point) —
+      // everything except the explicitly-tagged non-retryable 4xx case,
+      // which fails the same way every time.
       isRetryable: (err) => !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
     }
   ).catch((err) => {
     if (err instanceof OpenAiError) throw new Error(`OpenAI error: ${err.message}`);
     throw err;
   });
-
-  const json = await res.json() as { choices?: { message: { content: string } }[] };
-  const content = json.choices?.[0]?.message?.content;
-  if (!content) throw new Error("OpenAI returned no content");
-
-  let parsed: { rfq_number?: unknown; supplier?: unknown; date?: unknown; items?: unknown[] };
-  try {
-    parsed = JSON.parse(content) as typeof parsed;
-  } catch {
-    throw new Error("AI returned invalid JSON");
-  }
 
   const meta: RfqMeta = {
     source_rfq_number: parsed.rfq_number ? String(parsed.rfq_number) : null,

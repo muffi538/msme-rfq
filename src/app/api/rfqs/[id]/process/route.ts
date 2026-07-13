@@ -120,6 +120,17 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
   }
 
   try {
+    // Everything below is raced against the job-wide deadline as ONE unit —
+    // not just the AI/Gmail-heavy steps. A hang in a plain Supabase call
+    // (connection issue, lock contention — anything) would otherwise bypass
+    // every one of the more granular raceWithDeadline calls further down
+    // and run right up against the platform's own maxDuration kill, which
+    // (as found auditing a "processing never clears" report) terminates the
+    // function without ever reaching this catch block — leaving the job
+    // stuck exactly the way this whole mechanism exists to prevent. This
+    // outer race is the actual, comprehensive guarantee; the inner ones
+    // just make individual slow steps fail with a more specific message.
+    await raceWithDeadline((async () => {
     const { data: rfq } = await supabase.from("rfqs").select("id, raw_text, file_type, file_name, buyer_name").eq("id", rfqId).single();
     if (!rfq) { await updateJob(supabase, jobId, { status: "failed", error: "RFQ not found" }); return; }
 
@@ -453,6 +464,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
         },
       });
     }
+    })(), jobDeadline, "RFQ processing");
   } catch (err: unknown) {
     logError("[rfqs/process] job failed", err);
     await fail(err instanceof Error ? err.message : "Internal error");
@@ -488,8 +500,12 @@ export async function POST(
     // Escape hatch for a genuinely orphaned run (the process crashed or the
     // function was killed without ever reaching a terminal status) — after
     // a long stretch with no update at all, treat it as abandoned instead
-    // of blocking this RFQ from ever being retried again.
-    const STALE_MS = 10 * 60 * 1000;
+    // of blocking this RFQ from ever being retried again. Comfortably above
+    // JOB_DEADLINE_MS (100s) — under normal operation the outer deadline
+    // race above already guarantees a terminal status well before this
+    // fires; this is the last-resort backstop for the rare case where even
+    // that somehow doesn't run (e.g. the whole process getting killed hard).
+    const STALE_MS = 5 * 60 * 1000;
     const staleMs = rfq.updated_at ? Date.now() - new Date(rfq.updated_at).getTime() : Infinity;
     if (staleMs < STALE_MS) {
       return NextResponse.json(
