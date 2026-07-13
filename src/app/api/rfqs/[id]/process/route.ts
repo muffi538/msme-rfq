@@ -19,8 +19,50 @@ export const maxDuration = 120;
 // this is on top of, and independent from, the client's own concurrency
 // limit across DIFFERENT RFQs in a batch.
 const FILE_CONCURRENCY = 3;
+const ITEM_INSERT_CHUNK = 25; // items per insert batch — one round trip for typical RFQs, real parallel progress for large ones
 
-type ProgressStage = "found" | "ocr" | "parsing" | "matching" | "complete";
+// Every stage here corresponds to real work the job actually does — no
+// stage is entered, and no percent is reported, without a genuine
+// completion signal behind it (never a timer). "categorize" is the one
+// stage with no separate network call of its own: normalizeAndCategorizeMulti
+// returns already-categorized items in one response, so this stage exists
+// purely as a real checkpoint the instant that response is parsed, not as
+// separate work — kept as its own stage because the category assignment IS
+// a distinct, observable fact about the response at that point, not a
+// fabricated delay.
+type StageId = "download" | "parse" | "ocr" | "extract_items" | "categorize" | "match_images" | "save" | "complete";
+const BASE_WEIGHT: Record<StageId, number> = {
+  download: 5, parse: 15, ocr: 20, extract_items: 30, categorize: 5, match_images: 10, save: 10, complete: 5,
+};
+const STAGE_LABEL: Record<StageId, string> = {
+  download:      "Downloading",
+  parse:         "Parsing",
+  ocr:           "Running OCR",
+  extract_items: "Extracting items",
+  categorize:    "Categorizing",
+  match_images:  "Matching images",
+  save:          "Saving",
+  complete:      "Complete",
+};
+
+// Some stages don't apply to every RFQ (no OCR needed if there are no
+// images; no image matching if there are no images at all) — excluding
+// them from the weight total means the ones that DO run get the freed-up
+// weight, so percent still moves smoothly across the stages that actually
+// execute instead of visibly jumping over a stage that was skipped.
+function makePercentCalculator(activeStages: StageId[]) {
+  const totalWeight = activeStages.reduce((s, id) => s + BASE_WEIGHT[id], 0);
+  const cumBefore = new Map<StageId, number>();
+  let running = 0;
+  for (const id of activeStages) { cumBefore.set(id, running); running += BASE_WEIGHT[id]; }
+  return (stage: StageId, processed: number, total: number): number => {
+    const before = cumBefore.get(stage) ?? running; // unknown/inactive stage — treat as "past everything counted"
+    const frac = total > 0 ? Math.min(1, Math.max(0, processed / total)) : (stage === "complete" ? 1 : 0);
+    const weight = BASE_WEIGHT[stage] ?? 0;
+    return Math.min(100, Math.round(((before + weight * frac) / totalWeight) * 100));
+  };
+}
+
 type Attachment = { name: string; type: FileType; text: string; error: string | null; fileRowId: string | null };
 
 // The Gmail import used to only capture the FIRST attachment's text and
@@ -29,9 +71,6 @@ type Attachment = { name: string; type: FileType; text: string; error: string | 
 // merges + dedupes across all of them, and reports real per-attachment
 // progress instead of blocking on one request.
 async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: string, rfqId: string) {
-  const report = (stage: ProgressStage, processed: number, total: number, currentFile?: string) =>
-    updateJob(supabase, jobId, { status: "running", progress: { stage, processed, total, currentFile } });
-
   // Every failure exit needs to leave the RFQ in a real 'failed' state
   // (with the reason recorded) instead of the old behavior of silently
   // reverting to 'pending' — which made a failed run indistinguishable
@@ -55,9 +94,30 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
     await supabase.from("rfqs").update({ status: "processing", process_error: null }).eq("id", rfqId);
 
     let attachments: Attachment[];
+    let activeStages: StageId[];
 
     if (fileRows && fileRows.length > 0) {
-      await report("found", 0, fileRows.length);
+      const hasImages = fileRows.some((r) => r.file_type === "image");
+      // Known upfront from stored file_type; a PDF that unexpectedly falls
+      // back to OCR mid-parse still gets OCR'd correctly, it just doesn't
+      // get its own separately-weighted stage since that can't be known
+      // before parsing starts.
+      const needsOcr = hasImages;
+      // Order matches actual execution order below, not the checklist order
+      // in the UI copy — image matching needs insertedItems, so items must
+      // be saved first. Getting this backwards would make percent briefly
+      // go backwards when "save" runs after a stage the weight table
+      // thought came later.
+      activeStages = (["download", "parse", needsOcr ? "ocr" : null, "extract_items", "categorize", "save", hasImages ? "match_images" : null, "complete"] as (StageId | null)[])
+        .filter((s): s is StageId => s !== null);
+      const percentFor = makePercentCalculator(activeStages);
+      const report = (stage: StageId, processed: number, total: number, currentFile?: string) =>
+        updateJob(supabase, jobId, {
+          status: "running",
+          progress: { stage, label: STAGE_LABEL[stage], processed, total, currentFile, percent: percentFor(stage, processed, total) },
+        });
+
+      await report("download", 0, fileRows.length);
       let completed = 0;
 
       attachments = await mapWithConcurrency(
@@ -110,20 +170,32 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
         },
         () => {
           completed++;
-          report(fileRows.some((r) => r.file_type === "image") ? "ocr" : "parsing", completed, fileRows.length);
+          report(needsOcr ? "ocr" : "parse", completed, fileRows.length);
         }
       );
+
+      await runRest(report, activeStages, fileRows);
     } else {
       // Legacy single-blob RFQ (fetched before rfq_files existed, or a
       // manually-created one with no attachment rows) — synthesize one
       // pseudo-attachment from rfqs.raw_text so the rest of the pipeline
       // is identical either way.
-      await report("found", 0, 1);
+      const isImage = rfq.raw_text?.startsWith("base64img:") ?? false;
+      const isPdf   = rfq.raw_text?.startsWith("base64pdf:") ?? false;
+      activeStages = (["download", isImage ? "ocr" : "parse", "extract_items", "categorize", "save", "complete"] as StageId[]);
+      const percentFor = makePercentCalculator(activeStages);
+      const report = (stage: StageId, processed: number, total: number, currentFile?: string) =>
+        updateJob(supabase, jobId, {
+          status: "running",
+          progress: { stage, label: STAGE_LABEL[stage], processed, total, currentFile, percent: percentFor(stage, processed, total) },
+        });
+
+      await report("download", 0, 1);
       let rawText = (rfq.raw_text ?? "").trim();
       let error: string | null = null;
 
-      if (rawText.startsWith("base64pdf:")) {
-        await report("parsing", 0, 1, rfq.file_name ?? undefined);
+      if (isPdf) {
+        await report("parse", 0, 1, rfq.file_name ?? undefined);
         const buffer = Buffer.from(rawText.slice("base64pdf:".length), "base64");
         try {
           rawText = await parsePdf(buffer);
@@ -136,7 +208,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
             error = err instanceof Error ? err.message : "Could not parse this PDF";
           }
         }
-      } else if (rawText.startsWith("base64img:")) {
+      } else if (isImage) {
         await report("ocr", 0, 1, rfq.file_name ?? undefined);
         // Format is exactly "base64img:<mimeType>:<base64>" — base64's own
         // alphabet never contains ":", so a plain 3-way split is safe.
@@ -149,124 +221,157 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
           error = err instanceof Error ? err.message : "Could not read this image";
         }
       } else {
-        await report("parsing", 0, 1, rfq.file_name ?? undefined);
+        await report("parse", 0, 1, rfq.file_name ?? undefined);
       }
 
       if (!rawText.trim() && !error) error = "No text could be extracted from this email.";
       attachments = [{ name: rfq.file_name ?? "attachment", type: (rfq.file_type as FileType) ?? "text", text: rawText, error, fileRowId: null }];
+
+      await runRest(report, activeStages, fileRows);
     }
 
-    const usable = attachments.filter((a) => !a.error && a.text.trim());
-    const failed = attachments.filter((a) => a.error);
+    // --- shared tail: extract → categorize → match images → save → complete ---
+    async function runRest(
+      report: (stage: StageId, processed: number, total: number, currentFile?: string) => Promise<void>,
+      stages: StageId[],
+      fileRowsForMatching: typeof fileRows
+    ) {
+      const usable = attachments.filter((a) => !a.error && a.text.trim());
+      const failed = attachments.filter((a) => a.error);
 
-    if (usable.length === 0) {
-      await fail(
-        failed.length > 0
-          ? `Could not extract any text from the attachment(s). ${failed.map((f) => f.error).join(" ")}`
-          : "No text could be extracted from this email. Please upload the file manually via Upload RFQ."
-      );
-      return;
-    }
-
-    await report("parsing", attachments.length, attachments.length);
-    const multiInput: MultiFileInput[] = usable.map((a) => ({ fileName: a.name, text: a.text }));
-    const { meta, items } = await withRetry(
-      () => normalizeAndCategorizeMulti(multiInput),
-      { retries: 1, label: "AI item extraction" } // normalizeAndCategorizeMulti already retries its own OpenAI call; this covers a second, coarser layer (e.g. a transient DB hiccup wouldn't apply here, so kept small)
-    );
-
-    const rfqWarnings: string[] = failed.map((f) => `Could not read "${f.name}": ${f.error}`);
-    if (items.length === 0) rfqWarnings.push("No line items could be extracted — please review the source file(s) manually.");
-
-    // Re-processing: clear whatever a previous run produced.
-    await supabase.from("rfq_items").delete().eq("rfq_id", rfqId);
-    await supabase.from("rfq_item_images").delete().eq("rfq_id", rfqId);
-
-    let insertedItems: { id: string; name: string; brand: string | null; spec: string | null }[] = [];
-    if (items.length > 0) {
-      const rows = items.map((item) => ({
-        rfq_id:              rfqId,
-        user_id:             userId,
-        line_number:         item.line_number,
-        raw_text:            item.raw_text,
-        name:                item.name,
-        qty:                 item.qty,
-        unit:                item.unit,
-        brand:               item.brand,
-        spec:                item.spec,
-        notes:               item.notes,
-        part_number:         item.part_number,
-        delivery_details:    item.delivery_details,
-        category:            item.category,
-        category_source:     item.category_source,
-        category_confidence: item.category_confidence,
-        confidence:          item.confidence,
-        warnings:            item.warnings,
-        merged_from_count:   item.merged_from_count,
-        source_files:        item.source_files,
-        flagged:             item.category_confidence < 0.7 || item.confidence < 0.6,
-      }));
-
-      try {
-        const inserted = await withRetry(
-          async () => {
-            const { data, error: itemsError } = await supabase.from("rfq_items").insert(rows).select("id, name, brand, spec");
-            if (itemsError) throw itemsError;
-            return data;
-          },
-          { retries: 2, label: "rfq_items insert" }
+      if (usable.length === 0) {
+        await fail(
+          failed.length > 0
+            ? `Could not extract any text from the attachment(s). ${failed.map((f) => f.error).join(" ")}`
+            : "No text could be extracted from this email. Please upload the file manually via Upload RFQ."
         );
-        insertedItems = inserted ?? [];
-      } catch (err) {
-        logError("[rfqs/process] rfq_items insert failed", err);
-        await fail(`Could not save extracted items: ${err instanceof Error ? err.message : "unknown error"}`);
         return;
       }
+
+      await report("extract_items", 0, 1);
+      const multiInput: MultiFileInput[] = usable.map((a) => ({ fileName: a.name, text: a.text }));
+      const { meta, items } = await withRetry(
+        () => normalizeAndCategorizeMulti(multiInput),
+        { retries: 1, label: "AI item extraction" } // normalizeAndCategorizeMulti already retries its own OpenAI call; this covers a second, coarser layer
+      );
+      await report("extract_items", 1, 1);
+      // Categories arrive already assigned in the same response above — this
+      // is a real checkpoint (the categorized item set now genuinely
+      // exists), not a separate wait.
+      await report("categorize", items.length, items.length || 1);
+
+      const rfqWarnings: string[] = failed.map((f) => `Could not read "${f.name}": ${f.error}`);
+      if (items.length === 0) rfqWarnings.push("No line items could be extracted — please review the source file(s) manually.");
+
+      // Re-processing: clear whatever a previous run produced.
+      await supabase.from("rfq_items").delete().eq("rfq_id", rfqId);
+      await supabase.from("rfq_item_images").delete().eq("rfq_id", rfqId);
+
+      let insertedItems: { id: string; name: string; brand: string | null; spec: string | null }[] = [];
+      if (items.length > 0) {
+        const rows = items.map((item) => ({
+          rfq_id:              rfqId,
+          user_id:             userId,
+          line_number:         item.line_number,
+          raw_text:            item.raw_text,
+          name:                item.name,
+          qty:                 item.qty,
+          unit:                item.unit,
+          brand:               item.brand,
+          spec:                item.spec,
+          notes:               item.notes,
+          part_number:         item.part_number,
+          delivery_details:    item.delivery_details,
+          category:            item.category,
+          category_source:     item.category_source,
+          category_confidence: item.category_confidence,
+          confidence:          item.confidence,
+          warnings:            item.warnings,
+          merged_from_count:   item.merged_from_count,
+          source_files:        item.source_files,
+          flagged:             item.category_confidence < 0.7 || item.confidence < 0.6,
+        }));
+
+        // Chunked + concurrent — for a typical RFQ (<= ITEM_INSERT_CHUNK
+        // items) this is exactly one insert, identical cost to before; for
+        // a large RFQ it's genuinely faster (parallel round trips) AND
+        // gives real "Items X/Y" progress instead of one opaque insert.
+        const chunks: (typeof rows)[] = [];
+        for (let i = 0; i < rows.length; i += ITEM_INSERT_CHUNK) chunks.push(rows.slice(i, i + ITEM_INSERT_CHUNK));
+
+        let savedCount = 0;
+        try {
+          const chunkResults = await mapWithConcurrency(
+            chunks,
+            3,
+            (chunk) => withRetry(
+              async () => {
+                const { data, error: itemsError } = await supabase.from("rfq_items").insert(chunk).select("id, name, brand, spec");
+                if (itemsError) throw itemsError;
+                return data ?? [];
+              },
+              { retries: 2, label: "rfq_items insert" }
+            ),
+            (result) => { savedCount += result.length; report("save", savedCount, rows.length); }
+          );
+          insertedItems = chunkResults.flat();
+        } catch (err) {
+          logError("[rfqs/process] rfq_items insert failed", err);
+          await fail(`Could not save extracted items: ${err instanceof Error ? err.message : "unknown error"}`);
+          return;
+        }
+      } else {
+        await report("save", 1, 1); // nothing to insert — stage is trivially complete
+      }
+
+      if (stages.includes("match_images")) {
+        const imageAttachments = attachments.filter((a) => a.type === "image" && !a.error && a.fileRowId);
+        await report("match_images", 0, Math.max(imageAttachments.length, 1));
+        if (imageAttachments.length > 0) {
+          // Reuse fileRows (already fetched above) instead of re-querying —
+          // it already has every file_url keyed by id.
+          const urlById = new Map((fileRowsForMatching ?? []).map((r) => [r.id, r.file_url]));
+
+          const imageRows = imageAttachments.map((a) => {
+            const storedPath = urlById.get(a.fileRowId!);
+            if (!storedPath) return null;
+            const match = matchImageToItem(a.text, insertedItems);
+            return {
+              rfq_id:           rfqId,
+              item_id:          match?.itemId ?? null,
+              user_id:          userId,
+              file_url:         storedPath,
+              source_file_name: a.name,
+              match_confidence: match?.confidence ?? null,
+            };
+          }).filter((r): r is NonNullable<typeof r> => r !== null);
+
+          if (imageRows.length > 0) await supabase.from("rfq_item_images").insert(imageRows);
+        }
+        await report("match_images", imageAttachments.length, Math.max(imageAttachments.length, 1));
+      }
+
+      await supabase.from("rfqs").update({
+        status:            "processed",
+        process_error:      null,
+        source_rfq_number: meta.source_rfq_number,
+        source_date:        meta.source_date,
+        warnings:           rfqWarnings,
+      }).eq("id", rfqId);
+
+      await report("complete", 1, 1);
+      await updateJob(supabase, jobId, {
+        status: "done",
+        progress: { stage: "complete", label: STAGE_LABEL.complete, processed: 1, total: 1, percent: 100 },
+        result: {
+          itemCount:      items.length,
+          foundCount:     attachments.length,
+          processedCount: usable.length,
+          failedFiles:    failed.map((f) => f.name),
+          warnings:       rfqWarnings,
+        },
+      });
     }
-
-    await report("matching", attachments.length, attachments.length);
-    const imageAttachments = attachments.filter((a) => a.type === "image" && !a.error && a.fileRowId);
-    if (imageAttachments.length > 0) {
-      // Reuse fileRows (already fetched above) instead of re-querying —
-      // it already has every file_url keyed by id.
-      const urlById = new Map((fileRows ?? []).map((r) => [r.id, r.file_url]));
-
-      const imageRows = imageAttachments.map((a) => {
-        const storedPath = urlById.get(a.fileRowId!);
-        if (!storedPath) return null;
-        const match = matchImageToItem(a.text, insertedItems);
-        return {
-          rfq_id:           rfqId,
-          item_id:          match?.itemId ?? null,
-          user_id:          userId,
-          file_url:         storedPath,
-          source_file_name: a.name,
-          match_confidence: match?.confidence ?? null,
-        };
-      }).filter((r): r is NonNullable<typeof r> => r !== null);
-
-      if (imageRows.length > 0) await supabase.from("rfq_item_images").insert(imageRows);
-    }
-
-    await supabase.from("rfqs").update({
-      status:            "processed",
-      process_error:      null,
-      source_rfq_number: meta.source_rfq_number,
-      source_date:        meta.source_date,
-      warnings:           rfqWarnings,
-    }).eq("id", rfqId);
-
-    await updateJob(supabase, jobId, {
-      status: "done",
-      progress: { stage: "complete", processed: attachments.length, total: attachments.length },
-      result: {
-        itemCount:      items.length,
-        foundCount:     attachments.length,
-        processedCount: usable.length,
-        failedFiles:    failed.map((f) => f.name),
-        warnings:       rfqWarnings,
-      },
-    });
   } catch (err: unknown) {
     logError("[rfqs/process] job failed", err);
     await fail(err instanceof Error ? err.message : "Internal error");
@@ -291,16 +396,10 @@ export async function POST(
   if (!rfq) return NextResponse.json({ error: "RFQ not found" }, { status: 404 });
 
   // Idempotency guard — if this RFQ already has a job in flight (a
-  // double-click, two tabs on the same row, or now that RFQs are shared
-  // company data, a DIFFERENT user hitting "Process it" on a row someone
-  // else already started), don't kick off a second concurrent run that
-  // would race the first one writing rfq_items for the same RFQ.
-  //
-  // The jobs table stays per-user (RLS), so this user's own query can only
-  // ever find THEIR OWN active job — it can't see another user's job row
-  // to hand back. rfqs.status is shared, though, so that's the signal of
-  // record: if it says "processing" and this user has no matching job of
-  // their own, someone else's run is in flight — refuse rather than guess.
+  // double-click, or two tabs on the same row), don't kick off a second
+  // concurrent run that would race the first one writing rfq_items for the
+  // same RFQ. RFQs are strictly per-account (RLS), so this can only ever be
+  // this same user's own in-flight run — never another account's.
   if (rfq.status === "processing") {
     const active = await findActiveJobForRfq(supabase, user.id, id);
     if (active) return NextResponse.json({ jobId: active.id }, { status: 202 });
@@ -313,7 +412,7 @@ export async function POST(
     const staleMs = rfq.updated_at ? Date.now() - new Date(rfq.updated_at).getTime() : Infinity;
     if (staleMs < STALE_MS) {
       return NextResponse.json(
-        { error: "This RFQ is already being processed — possibly by another user. Please wait a few minutes and try again." },
+        { error: "This RFQ is already being processed. Please wait a few minutes and try again." },
         { status: 409 }
       );
     }
