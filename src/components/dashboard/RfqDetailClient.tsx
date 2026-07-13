@@ -22,6 +22,7 @@ import {
   isWorkflowComplete,
 } from "@/lib/rfq-lifecycle";
 import { exportItemsToExcel, exportItemsToCsv, exportItemsToPdf } from "@/lib/exportRfqItems";
+import { normalizePhone, buildWaUrl, isValidWhatsappGroupLink } from "@/lib/whatsapp";
 
 const PRESET_CATEGORIES = [
   "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
@@ -30,25 +31,6 @@ const PRESET_CATEGORIES = [
 ];
 
 const CUSTOM_VALUE = "__CUSTOM__";
-
-/* ── WhatsApp helpers ──────────────────────────────────────────────
- * normalizePhone: strip non-digits and add India's +91 country code
- * if the user saved the number without one. wa.me silently fails on
- * a 10-digit local number — it must be in international form.
- */
-function normalizePhone(raw: string): string {
-  const digits = raw.replace(/[^0-9]/g, "");
-  if (!digits) return "";
-  // 10-digit Indian mobile → prepend 91
-  if (digits.length === 10) return `91${digits}`;
-  // 11 digits starting with 0 → drop the 0, prepend 91
-  if (digits.length === 11 && digits.startsWith("0")) return `91${digits.slice(1)}`;
-  return digits;
-}
-
-function buildWaUrl(phone: string, message: string): string {
-  return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
-}
 
 const statusStyle: Record<string, string> = {
   draft:       "bg-gray-100 text-gray-600",
@@ -352,7 +334,7 @@ function SupplierSplitCard({
 
 export default function RfqDetailClient({
   rfq, items: initialItems, outgoing: initialOutgoing, outgoingItems,
-  outgoingStats, buyerLog, itemImages,
+  outgoingStats, buyerLog, itemImages, onDirtyChange,
 }: {
   rfq: Rfq;
   items: Item[];
@@ -361,6 +343,10 @@ export default function RfqDetailClient({
   outgoingStats: OutgoingStats;
   buyerLog: BuyerReplyLog | null;
   itemImages: ItemImage[];
+  // Fires whenever this RFQ has locally-edited-but-unsent supplier message
+  // text — used by the multi-RFQ workspace to warn before closing a tab.
+  // Optional and unused by the single-RFQ page.
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [items, setItems]         = useState<Item[]>(initialItems);
   const [outgoing, setOutgoing]   = useState<OutgoingRfq[]>(initialOutgoing);
@@ -370,6 +356,16 @@ export default function RfqDetailClient({
   const [selected, setSelected]   = useState<Set<string>>(new Set());
   const [expanded, setExpanded]   = useState<Set<string>>(new Set());
   const [lifecycleOpen, setLifecycleOpen] = useState(false);
+  const dirtyMessageIds = useRef<Set<string>>(new Set());
+
+  function markMessageDirty(outgoingId: string) {
+    dirtyMessageIds.current.add(outgoingId);
+    onDirtyChange?.(true);
+  }
+  function markMessageSent(outgoingId: string) {
+    dirtyMessageIds.current.delete(outgoingId);
+    onDirtyChange?.(dirtyMessageIds.current.size > 0);
+  }
 
   const workflowSteps = computeWorkflowSteps(outgoingStats, buyerLog);
   const workflowComplete = isWorkflowComplete(workflowSteps);
@@ -419,6 +415,10 @@ export default function RfqDetailClient({
 
   // --- Approve + send a child RFQ ---
   function openGroupModal(outgoingId: string, groupLink: string, message: string, supplierName: string) {
+    if (!isValidWhatsappGroupLink(groupLink)) {
+      toast.error(`"${supplierName}"'s WhatsApp group link looks invalid — it should look like https://chat.whatsapp.com/xxxxx. Update it in Suppliers.`, { duration: 8000 });
+      return;
+    }
     setGroupModal({ outgoingId, groupLink, message, supplierName });
     setCopied(false);
   }
@@ -430,82 +430,127 @@ export default function RfqDetailClient({
     setTimeout(() => setCopied(false), 2500);
   }
 
+  async function markOutgoingSent(outgoingId: string, channel: string) {
+    const res = await fetch(`/api/rfqs/${rfq.id}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outgoingId, channel }),
+    });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      throw new Error(json.error ?? "Could not mark as sent");
+    }
+    setOutgoing((prev) =>
+      prev.map((o) => o.id === outgoingId ? { ...o, status: "sent", sent_at: new Date().toISOString() } : o)
+    );
+    markMessageSent(outgoingId);
+  }
+
   async function confirmGroupSend() {
     if (!groupModal) return;
-    const { outgoingId } = groupModal;
+    const { outgoingId, groupLink, message } = groupModal;
+
+    if (!isValidWhatsappGroupLink(groupLink)) {
+      toast.error("This group link looks invalid. Update it in Suppliers, then try again.");
+      return;
+    }
 
     // ⚠️ window.open MUST run synchronously inside the click handler — any
     // `await` before it causes Chrome/Safari to flag it as a programmatic
     // pop-up and silently block it. So open the group FIRST, do everything
     // else after.
-    const newWin = window.open(groupModal.groupLink, "_blank", "noopener,noreferrer");
+    const newWin = window.open(groupLink, "_blank", "noopener,noreferrer");
     if (!newWin) {
       toast.error("Pop-up blocked — please allow pop-ups for this site, then try again.");
       return;
     }
 
     // Now safe to do async work
-    try { await navigator.clipboard.writeText(groupModal.message); } catch { /* ignore */ }
+    try {
+      await navigator.clipboard.writeText(message);
+      toast.success("Message copied! Click the text box in the group and press Ctrl+V to paste.", { duration: 6000 });
+    } catch {
+      toast.warning("Group opened, but the message couldn't be auto-copied — copy it manually from below.", { duration: 6000 });
+    }
 
-    toast.success("✅ Message copied! Click the text box in the group and press Ctrl+V to paste.", { duration: 6000 });
-
-    // Mark as sent
-    const res = await fetch(`/api/rfqs/${rfq.id}/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ outgoingId, channel: "whatsapp" }),
-    });
-    if (res.ok) {
-      setOutgoing((prev) =>
-        prev.map((o) => o.id === outgoingId ? { ...o, status: "sent", sent_at: new Date().toISOString() } : o)
+    try {
+      await markOutgoingSent(outgoingId, "whatsapp");
+      setGroupModal(null);
+    } catch (err) {
+      // Group is open and the message is copied either way — only the
+      // "mark as sent" bookkeeping failed, so keep the modal open and let
+      // the user retry that specific step by clicking Open Group again.
+      toast.error(
+        `Group opened and message copied, but couldn't record it as sent: ${err instanceof Error ? err.message : "unknown error"}. Click Open Group to retry.`,
+        { duration: 8000 }
       );
     }
-    setGroupModal(null);
   }
 
-  async function handleSend(outgoingId: string, channel: string, whatsappNumber?: string | null, message?: string | null, groupLink?: string | null, supplierName?: string) {
+  async function handleSend(outgoingId: string, channel: string, whatsappNumber?: string | null, message?: string | null) {
     setSending(outgoingId);
     try {
-      if (channel === "whatsapp_group" && groupLink) {
-        setSending(null);
-        openGroupModal(outgoingId, groupLink, message ?? "", supplierName ?? "Supplier");
-        return;
-      } else if (channel === "whatsapp" && whatsappNumber) {
+      if (channel === "whatsapp") {
+        if (!whatsappNumber) {
+          toast.error("This supplier has no WhatsApp number. Add one in Suppliers.");
+          return;
+        }
         const phone = normalizePhone(whatsappNumber);
         if (!phone) {
-          toast.error("This supplier has no valid WhatsApp number. Add one in Suppliers.");
-          setSending(null);
+          toast.error(`"${whatsappNumber}" isn't a valid WhatsApp number. Update it in Suppliers.`);
           return;
         }
         const newWin = window.open(buildWaUrl(phone, message ?? ""), "_blank", "noopener,noreferrer");
         if (!newWin) {
           toast.error("Pop-up blocked — please allow pop-ups for this site, then try again.");
-          setSending(null);
           return;
         }
         toast.success("WhatsApp opened — tap Send in WhatsApp to deliver the message.");
-      } else if (channel === "whatsapp" || channel === "whatsapp_group") {
-        toast.error("This supplier is missing a WhatsApp number or group link. Update them in Suppliers.");
-        setSending(null);
-        return;
       } else {
         toast.info("Email channel — marking as sent.");
       }
-      const res = await fetch(`/api/rfqs/${rfq.id}/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ outgoingId, channel }),
-      });
-      if (res.ok) {
-        setOutgoing((prev) =>
-          prev.map((o) => o.id === outgoingId ? { ...o, status: "sent", sent_at: new Date().toISOString() } : o)
-        );
-      }
-    } catch {
-      toast.error("Could not mark as sent. Please try again.");
+      await markOutgoingSent(outgoingId, channel);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not mark as sent. Please try again.");
     } finally {
       setSending(null);
     }
+  }
+
+  // Bulk WhatsApp send — fires every window.open() back-to-back BEFORE any
+  // await, since browsers only treat pop-ups opened synchronously within
+  // the click's call stack as user-initiated; anything after an awaited
+  // network call is liable to be blocked regardless of how this is written.
+  // Reports exactly what happened instead of the previous silent forEach.
+  async function handleBulkWhatsappSend(targets: OutgoingRfq[]) {
+    const attempts = targets.map((o) => {
+      const phone = normalizePhone(o.suppliers?.whatsapp_number ?? "");
+      if (!phone) return { o, win: null as Window | null, invalid: true };
+      const win = window.open(buildWaUrl(phone, o.message_body), "_blank", "noopener,noreferrer");
+      return { o, win, invalid: false };
+    });
+
+    let opened = 0, blocked = 0, invalidPhone = 0, markFailed = 0;
+    for (const { o, win, invalid } of attempts) {
+      if (invalid) { invalidPhone++; continue; }
+      if (!win) { blocked++; continue; }
+      opened++;
+      try {
+        await markOutgoingSent(o.id, "whatsapp");
+      } catch {
+        markFailed++;
+      }
+    }
+
+    setSelected(new Set());
+    const parts: string[] = [];
+    if (opened)       parts.push(`${opened} opened`);
+    if (blocked)      parts.push(`${blocked} blocked by your browser's pop-up blocker`);
+    if (invalidPhone) parts.push(`${invalidPhone} missing/invalid number`);
+    if (markFailed)   parts.push(`${markFailed} sent but couldn't be marked`);
+    const msg = `WhatsApp: ${parts.join(", ")}.`;
+    if (blocked || invalidPhone || markFailed) toast.warning(msg, { duration: 8000 });
+    else toast.success(msg);
   }
 
   function itemsForOutgoing(outgoingId: string): Item[] {
@@ -524,6 +569,7 @@ export default function RfqDetailClient({
 
   function updateOutgoingMessage(outgoingId: string, body: string) {
     setOutgoing((prev) => prev.map((o) => (o.id === outgoingId ? { ...o, message_body: body } : o)));
+    markMessageDirty(outgoingId);
   }
 
   return (
@@ -547,6 +593,7 @@ export default function RfqDetailClient({
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
               <p className="font-semibold mb-1">WhatsApp groups don&apos;t support auto-fill</p>
               <p className="text-xs text-amber-700">Click <strong>Open Group</strong> — the message is auto-copied. When WhatsApp opens, click the text box and press <strong>Ctrl+V</strong> to paste, then send.</p>
+              <p className="text-xs text-amber-700 mt-1.5">WhatsApp links can&apos;t auto-attach files — if this RFQ needs the original PDF/Excel attached, download it separately and attach it manually in WhatsApp before sending.</p>
             </div>
 
             {/* Message preview */}
@@ -849,10 +896,9 @@ export default function RfqDetailClient({
                     <Button
                       size="sm"
                       onClick={() => {
-                        outgoing.filter(o => selected.has(o.id) && o.suppliers?.whatsapp_number).forEach(o => {
-                          handleSend(o.id, "whatsapp", o.suppliers?.whatsapp_number, o.message_body);
-                        });
-                        setSelected(new Set());
+                        const targets = outgoing.filter(o => selected.has(o.id) && o.suppliers?.whatsapp_number);
+                        if (targets.length === 0) { toast.error("None of the selected suppliers have a WhatsApp number."); return; }
+                        handleBulkWhatsappSend(targets);
                       }}
                       className="bg-green-600 hover:bg-green-700 text-white gap-1.5 h-8 text-xs"
                     >
@@ -861,11 +907,14 @@ export default function RfqDetailClient({
                     <Button
                       size="sm"
                       onClick={() => {
-                        const groupOnes = outgoing.filter(o => selected.has(o.id) && o.suppliers?.whatsapp_group_link);
-                        if (groupOnes.length > 0) {
-                          // Open first one — user handles each group sequentially
-                          const o = groupOnes[0];
-                          openGroupModal(o.id, o.suppliers!.whatsapp_group_link!, o.message_body, o.suppliers!.name);
+                        const groupOnes = outgoing.filter(o => selected.has(o.id) && isValidWhatsappGroupLink(o.suppliers?.whatsapp_group_link));
+                        if (groupOnes.length === 0) { toast.error("None of the selected suppliers have a valid WhatsApp group link."); return; }
+                        // Groups can't be auto-sent (no prefill support) — open the
+                        // first one and tell the user how many more to repeat for.
+                        const o = groupOnes[0];
+                        openGroupModal(o.id, o.suppliers!.whatsapp_group_link!, o.message_body, o.suppliers!.name);
+                        if (groupOnes.length > 1) {
+                          toast.info(`Opening group 1 of ${groupOnes.length} — repeat "Send to Groups" for the other ${groupOnes.length - 1} after this one.`, { duration: 8000 });
                         }
                         setSelected(new Set());
                       }}
@@ -910,7 +959,7 @@ export default function RfqDetailClient({
                     }}
                     onMessageChange={(body) => updateOutgoingMessage(o.id, body)}
                     onSend={(channel, whatsappNumber) =>
-                      handleSend(o.id, channel, whatsappNumber, o.message_body, undefined, o.suppliers?.name)
+                      handleSend(o.id, channel, whatsappNumber, o.message_body)
                     }
                     onOpenGroup={() =>
                       openGroupModal(
