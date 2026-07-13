@@ -328,21 +328,22 @@ ${labeled}`,
     // lost the moment this throws.
     logError("[normalize] AI returned invalid JSON", { rawContent: content.slice(0, 4000), parseError: err, truncatedByModel });
 
-    // Only repair a CONFIRMED truncation. A fresh retry (the normal path,
-    // one level up) is likelier to just work for a one-off malformation
-    // unrelated to length — repairing immediately here would spend that
-    // retry attempt for no reason. But a genuine max_tokens cutoff on
-    // deterministic (temperature: 0) input is likely to truncate at nearly
-    // the same point again, so salvaging what's already recovered here beats
-    // gambling a full retry on an outcome that's probably the same.
-    if (truncatedByModel) {
-      const repaired = tryRepairTruncatedJson(content);
-      if (repaired) {
-        logError("[normalize] recovered a truncated AI response via JSON repair", {
-          recoveredItemCount: repaired.items?.length ?? 0,
-        });
-        return { data: repaired, truncated: true };
-      }
+    // Always attempt repair on ANY parse failure, not just a confirmed
+    // truncation — it's a cheap, local, no-cost string operation (no extra
+    // network call), so there's no real reason to gate it. A RFQ that kept
+    // failing across multiple already-shipped fixes (schema validation,
+    // retries, truncation-only repair) turned out to be exactly this case:
+    // finish_reason wasn't "length", so the truncation-only repair never
+    // even tried, even though the same salvageable-items structure was
+    // present in the malformed response. If nothing is salvageable, this
+    // still falls through to a normal retry (fresh generation) as before.
+    const repaired = tryRepairTruncatedJson(content);
+    if (repaired) {
+      logError("[normalize] recovered a malformed AI response via JSON repair", {
+        recoveredItemCount: repaired.items?.length ?? 0,
+        truncatedByModel,
+      });
+      return { data: repaired, truncated: true };
     }
     throw new InvalidAiJsonError("AI returned invalid JSON");
   }
