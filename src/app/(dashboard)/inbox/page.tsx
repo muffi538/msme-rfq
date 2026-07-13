@@ -322,11 +322,14 @@ export default function InboxPage() {
 
   useEffect(() => { loadAll(); loadLabels(); loadGmailStatus(); }, []);
 
-  /* ── Auto-sync status — the actual "poll every 2 minutes" work happens
-     server-side via Vercel cron (/api/cron/gmail-sync), independent of
-     whether this tab is even open. This just polls a cheap status endpoint
-     so the UI reflects it and quietly refreshes the list when a background
-     sync has landed new mail — no manual refresh needed. ── */
+  /* ── Auto-sync status — when the server-side Vercel cron
+     (/api/cron/gmail-sync) is enabled, it independently syncs Gmail every
+     couple of minutes regardless of whether this tab is even open; the
+     cron is currently disabled (see vercel.json) since Vercel Hobby only
+     allows daily schedules. This still polls the cheap status endpoint so
+     the UI reflects the last real sync (manual "Fetch Now", or the cron
+     once re-enabled) and quietly refreshes the list when new mail has
+     landed — no manual page refresh needed either way. ── */
   async function pollSyncStatus() {
     try {
       const res = await apiFetch("/api/email/sync-status");
@@ -364,9 +367,9 @@ export default function InboxPage() {
         { created: number; fetched: number; deduped: number; insertFailed: number }
       >(json.jobId, setOnboardProgress, unmountControllerRef.current.signal);
 
-      if (count === 0) toast.success("Auto-sync is on — new mail will import automatically.");
-      else if (result.created > 0) toast.success(`Imported ${result.created} email${result.created > 1 ? "s" : ""}. Auto-sync is now on.`);
-      else toast.info("No importable emails found — auto-sync is now on.");
+      if (count === 0) toast.success("Gmail connected — click \"Fetch Now\" any time to check for new mail.");
+      else if (result.created > 0) toast.success(`Imported ${result.created} email${result.created > 1 ? "s" : ""}.`);
+      else toast.info("No importable emails found.");
 
       setOnboardOpen(false);
       await loadAll();
@@ -1060,9 +1063,14 @@ export default function InboxPage() {
 
           {gmailEmail && !gmailLoading && !needsReconnect && (
             <div className="flex items-center gap-2 mb-4 text-xs">
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-50 text-green-700 border border-green-200 font-medium">
-                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-                Auto-sync ON · every 2 min
+              {/* The server-side cron this label describes is currently
+                 disabled in vercel.json (Vercel Hobby only allows daily
+                 cron schedules) — flip this back when the cron is
+                 re-enabled, so the UI doesn't claim automatic sync is
+                 running when it isn't. */}
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gray-100 text-gray-600 border border-gray-200 font-medium">
+                <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
+                Auto-sync paused — use Fetch Now
               </span>
               <span className="text-muted-foreground">
                 Last synced: {lastSyncedAt ? fmt(lastSyncedAt) : "Never yet"}
@@ -1322,7 +1330,7 @@ export default function InboxPage() {
                       {rfq.status === "failed" && !processing[rfq.id] && (
                         <span
                           className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-50 text-red-700 border border-red-200"
-                          title={rfq.process_error ?? "Processing failed"}
+                          title="Processing failed — tap Process it to try again"
                         >
                           <AlertTriangle className="w-3 h-3" /> Failed
                         </span>
@@ -1330,7 +1338,7 @@ export default function InboxPage() {
                       {rfq.status === "cancelled" && !processing[rfq.id] && (
                         <span
                           className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-gray-100 text-gray-600 border border-gray-200"
-                          title={rfq.process_error ?? "Processing was cancelled"}
+                          title="Cancelled — tap Process it to try again"
                         >
                           <X className="w-3 h-3" /> Cancelled
                         </span>
@@ -1341,11 +1349,15 @@ export default function InboxPage() {
                         </span>
                       )}
                     </div>
-                    {rfq.status === "failed" && rfq.process_error && !processing[rfq.id] && (
-                      <p className="text-xs text-red-500 mt-0.5 truncate" title={rfq.process_error}>{rfq.process_error}</p>
+                    {/* The underlying reason (which can include technical AI/API
+                       detail) is intentionally not shown here — only a generic,
+                       non-technical status. Full detail is still recorded in
+                       rfq.process_error and server logs for debugging. */}
+                    {rfq.status === "failed" && !processing[rfq.id] && (
+                      <p className="text-xs text-red-500 mt-0.5 truncate">Something went wrong. Tap &quot;Process it&quot; to try again.</p>
                     )}
-                    {rfq.status === "cancelled" && rfq.process_error && !processing[rfq.id] && (
-                      <p className="text-xs text-gray-500 mt-0.5 truncate" title={rfq.process_error}>{rfq.process_error}</p>
+                    {rfq.status === "cancelled" && !processing[rfq.id] && (
+                      <p className="text-xs text-gray-500 mt-0.5 truncate">Cancelled. Tap &quot;Process it&quot; to try again.</p>
                     )}
                     <p className="text-sm text-muted-foreground truncate mt-0.5">
                       {rfq.buyer_name ?? rfq.buyer_email ?? "Unknown sender"}
@@ -1480,7 +1492,7 @@ export default function InboxPage() {
               {viewMode === "new" ? "Nothing new in the last 24 hours" : "No older backlog — you're caught up!"}
             </p>
             <p className="text-sm mt-1 opacity-70">
-              {viewMode === "new" ? "New mail arrives automatically — or click \"Fetch Now\"." : "All older RFQs have been processed."}
+              {viewMode === "new" ? "Click \"Fetch Now\" to check for new mail." : "All older RFQs have been processed."}
             </p>
           </div>
         )}
@@ -1492,8 +1504,8 @@ export default function InboxPage() {
             <p className="font-medium">No emails yet</p>
             <p className="text-sm mt-1 opacity-70">
               {gmailEmail
-                ? <>New mail is imported automatically every 2 minutes — or click &quot;Fetch Now&quot;</>
-                : <>Connect Gmail above to start pulling RFQs automatically</>}
+                ? <>Click &quot;Fetch Now&quot; to check for new mail</>
+                : <>Connect Gmail above to start pulling RFQs</>}
             </p>
 
             {/* Try-a-sample CTA — solves the "I signed up at midnight, no real RFQs yet" problem */}
@@ -1642,7 +1654,7 @@ export default function InboxPage() {
               <div>
                 <p className="font-semibold text-card-foreground">Import your past RFQ emails?</p>
                 <p className="text-sm text-muted-foreground mt-0.5">
-                  Choose how many recent emails to pull in now. After this, new mail imports automatically every couple of minutes.
+                  Choose how many recent emails to pull in now. After this, click &quot;Fetch Now&quot; any time to check for new mail.
                 </p>
               </div>
             </div>
