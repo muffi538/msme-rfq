@@ -6,11 +6,21 @@ import { syncGmailForUser } from "@/lib/email/sync";
 import { mapWithConcurrency } from "@/lib/concurrency";
 
 /**
- * Automatic Gmail sync — runs every 2 minutes via Vercel cron (see
- * vercel.json). For every user with Gmail connected, pulls only
+ * Automatic Gmail sync. For every user with Gmail connected, pulls only
  * new/unprocessed messages (via History API, falling back to a bounded
  * unread scan when there's no checkpoint yet or it's expired) and inserts
  * them as pending RFQs. One user's failure never blocks the others.
+ *
+ * NOT currently scheduled: the every-2-minutes cron entry was removed
+ * from vercel.json because Vercel's Hobby plan only allows daily cron
+ * jobs, which was blocking Production deploys. This route's logic is
+ * untouched and still fully callable (manually, or via any external
+ * scheduler hitting this URL with CRON_SECRET) — the "Fetch New Emails"
+ * button in the inbox calls a separate route (/api/email/fetch) and is
+ * unaffected either way. To re-enable automatic sync, add the cron entry
+ * back to vercel.json's "crons" array with a "path" of
+ * "/api/cron/gmail-sync" and a "schedule" of once/day on Hobby (or any
+ * interval on Pro+).
  */
 
 export const maxDuration = 60;
