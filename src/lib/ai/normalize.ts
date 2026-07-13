@@ -209,7 +209,7 @@ ${labeled}`,
           },
         ],
       }),
-      signal: AbortSignal.timeout(60000),
+      signal: AbortSignal.timeout(35000),
     }).then(async (r) => {
       if (!r.ok) {
         if (r.status === 429 || r.status >= 500) throw new OpenAiError(await r.text(), r.status);
@@ -219,7 +219,17 @@ ${labeled}`,
       return r;
     }),
     {
-      retries: 2,
+      // Worst case here (all attempts time out) is retries+1 * 35s ≈ 70s —
+      // this single call already eats a large share of the process route's
+      // overall time budget (see JOB_DEADLINE_MS there), so it can't afford
+      // its own generous retry budget on top of that. Was 60s/2 retries
+      // (worst case ~180s) until an audit found that, combined with the
+      // caller's OWN retry wrapper around this whole function, could
+      // compound past the route's maxDuration and get the serverless
+      // function killed mid-flight — leaving the job stuck "processing"
+      // forever with no terminal status ever written. The caller no longer
+      // double-wraps this; this budget alone must stay safe.
+      retries: 1,
       label: "RFQ item extraction",
       // Retry OpenAI's own transient failures (429/5xx) and genuine network
       // errors (timeouts, connection resets) — everything except the

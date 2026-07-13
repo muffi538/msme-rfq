@@ -426,6 +426,21 @@ export default function InboxPage() {
       toast.error(withDetail("Couldn't read your Gmail address from Google. Please try connecting again."), { duration: 15000 });
     } else if (error === "save_failed") {
       toast.error(withDetail("Connected to Gmail, but couldn't save it to your account. Please try again."), { duration: 15000 });
+    } else if (error?.startsWith("health_check_failed")) {
+      // The account connected, but automatic validation caught a real
+      // problem before it could ever start silently failing syncs — the
+      // credentials were rolled back, so "Connect Gmail" is safe to retry.
+      const step = error.replace("health_check_failed_", "");
+      const stepLabel: Record<string, string> = {
+        gmail_api:     "Gmail API access",
+        gmail_read:    "reading your inbox",
+        db_readwrite:  "saving your connection",
+        queue:         "background processing setup",
+      };
+      toast.error(
+        withDetail(`Gmail connected, but a check failed (${stepLabel[step] ?? step}) — connection was not saved. Please try again.`),
+        { duration: 15000 }
+      );
     } else {
       toast.error(withDetail("Something went wrong connecting Gmail."), { duration: 15000 });
     }

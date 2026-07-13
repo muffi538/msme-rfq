@@ -20,6 +20,39 @@ export const maxDuration = 120;
 // limit across DIFFERENT RFQs in a batch.
 const FILE_CONCURRENCY = 3;
 const ITEM_INSERT_CHUNK = 25; // items per insert batch — one round trip for typical RFQs, real parallel progress for large ones
+const DOWNLOAD_TIMEOUT_MS = 20_000; // storage.download() has no built-in timeout of its own — without this, a stalled network call would hang indefinitely
+
+// A hard ceiling on the whole job, independent of any individual step's own
+// retry/timeout tuning — the actual backstop for "every job must end as
+// Completed or Failed, never infinite loading." Even if some future change
+// reintroduces an overly generous retry budget somewhere in the pipeline,
+// this still guarantees the job fails cleanly with a real error well before
+// the platform would kill the function outright (maxDuration=120 above),
+// which is the scenario that otherwise leaves a job stuck "processing"
+// forever with no terminal status ever written.
+const JOB_DEADLINE_MS = 100_000;
+
+class JobTimeoutError extends Error {
+  constructor(label: string) { super(`${label} took too long — processing was stopped after its safe time budget to avoid hanging forever.`); }
+}
+
+function raceWithDeadline<T>(promise: Promise<T>, deadlineAt: number, label: string): Promise<T> {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) return Promise.reject(new JobTimeoutError(label));
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new JobTimeoutError(label)), remaining);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// Per-stage timing, logged unconditionally (not just on failure) — the
+// "add logs and timing for every stage" requirement, and genuinely useful
+// for spotting which stage is slow in production without waiting for a
+// full timeout to trip.
+function logStageTiming(rfqId: string, stage: string, startedAt: number) {
+  console.log(`[rfqs/process] rfq=${rfqId} stage=${stage} took ${Date.now() - startedAt}ms`);
+}
 
 // Every stage here corresponds to real work the job actually does — no
 // stage is entered, and no percent is reported, without a genuine
@@ -71,12 +104,17 @@ type Attachment = { name: string; type: FileType; text: string; error: string | 
 // merges + dedupes across all of them, and reports real per-attachment
 // progress instead of blocking on one request.
 async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: string, rfqId: string) {
+  const jobStartedAt = Date.now();
+  const jobDeadline = jobStartedAt + JOB_DEADLINE_MS;
+  console.log(`[rfqs/process] rfq=${rfqId} job=${jobId} started, deadline in ${JOB_DEADLINE_MS}ms`);
+
   // Every failure exit needs to leave the RFQ in a real 'failed' state
   // (with the reason recorded) instead of the old behavior of silently
   // reverting to 'pending' — which made a failed run indistinguishable
   // from one that was never attempted, and gave "Retry Failed" nothing
   // to show the user.
   async function fail(message: string) {
+    console.log(`[rfqs/process] rfq=${rfqId} FAILED after ${Date.now() - jobStartedAt}ms: ${message}`);
     await supabase.from("rfqs").update({ status: "failed", process_error: message }).eq("id", rfqId);
     await updateJob(supabase, jobId, { status: "failed", error: message });
   }
@@ -119,60 +157,79 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
 
       await report("download", 0, fileRows.length);
       let completed = 0;
+      const filesStartedAt = Date.now();
 
-      attachments = await mapWithConcurrency(
-        fileRows,
-        FILE_CONCURRENCY,
-        async (row): Promise<Attachment> => {
-          const type = row.file_type as FileType;
+      attachments = await raceWithDeadline(
+        mapWithConcurrency(
+          fileRows,
+          FILE_CONCURRENCY,
+          async (row): Promise<Attachment> => {
+            const type = row.file_type as FileType;
+            const fileStartedAt = Date.now();
 
-          // Already parsed on an earlier "Process it" click (re-processing
-          // an RFQ shouldn't re-run OCR/parsing on files that already succeeded).
-          if (row.status === "parsed" && row.raw_text) {
-            return { name: row.file_name, type, text: row.raw_text, error: null, fileRowId: row.id };
+            // Already parsed on an earlier "Process it" click (re-processing
+            // an RFQ shouldn't re-run OCR/parsing on files that already succeeded).
+            if (row.status === "parsed" && row.raw_text) {
+              return { name: row.file_name, type, text: row.raw_text, error: null, fileRowId: row.id };
+            }
+            if (row.status === "failed") {
+              return { name: row.file_name, type, text: "", error: row.error ?? "Previously failed to parse", fileRowId: row.id };
+            }
+            if (!row.file_url) {
+              return { name: row.file_name, type, text: "", error: `Could not find the stored file for "${row.file_name}"`, fileRowId: row.id };
+            }
+
+            try {
+              const buffer = await withRetry(
+                () => raceWithDeadline(
+                  (async () => {
+                    const { data: blob, error: downloadError } = await supabase.storage.from("rfq-files").download(row.file_url!);
+                    if (downloadError || !blob) throw new Error(`Could not download "${row.file_name}" from storage`);
+                    return Buffer.from(await blob.arrayBuffer());
+                  })(),
+                  Date.now() + DOWNLOAD_TIMEOUT_MS, // per-attempt timeout — storage.download() has none of its own
+                  `Downloading "${row.file_name}"`
+                ),
+                { retries: 1, label: `download "${row.file_name}"` }
+              );
+
+              console.log(`[rfqs/process] rfq=${rfqId} file="${row.file_name}" download took ${Date.now() - fileStartedAt}ms`);
+              const parseStartedAt = Date.now();
+              const parsed = await parseOneFile(row.file_name, type, buffer, "");
+              console.log(`[rfqs/process] rfq=${rfqId} file="${row.file_name}" parse${parsed.usedOcr ? "+ocr" : ""} took ${Date.now() - parseStartedAt}ms`);
+
+              await withRetry(
+                async () => {
+                  const { error: updateError } = await supabase.from("rfq_files").update({
+                    status:   parsed.error ? "failed" : "parsed",
+                    raw_text: parsed.text || null,
+                    error:    parsed.error,
+                  }).eq("id", row.id);
+                  if (updateError) throw updateError;
+                },
+                { retries: 2, label: `rfq_files update for "${row.file_name}"` }
+              ).catch((err) => logError("[rfqs/process] rfq_files status update failed (non-fatal)", err));
+
+              return { name: row.file_name, type, text: parsed.text, error: parsed.error, fileRowId: row.id };
+            } catch (err) {
+              // Never let one bad attachment take the others down with it —
+              // record the failure on this file and move on; the batch as a
+              // whole still succeeds as long as at least one file yields text.
+              const message = err instanceof Error ? err.message : `Could not read "${row.file_name}"`;
+              logError(`[rfqs/process] rfq=${rfqId} file="${row.file_name}" failed after ${Date.now() - fileStartedAt}ms`, err);
+              await supabase.from("rfq_files").update({ status: "failed", error: message }).eq("id", row.id);
+              return { name: row.file_name, type, text: "", error: message, fileRowId: row.id };
+            }
+          },
+          () => {
+            completed++;
+            report(needsOcr ? "ocr" : "parse", completed, fileRows.length);
           }
-          if (row.status === "failed") {
-            return { name: row.file_name, type, text: "", error: row.error ?? "Previously failed to parse", fileRowId: row.id };
-          }
-          if (!row.file_url) {
-            return { name: row.file_name, type, text: "", error: `Could not find the stored file for "${row.file_name}"`, fileRowId: row.id };
-          }
-
-          try {
-            const buffer = await withRetry(
-              async () => {
-                const { data: blob, error: downloadError } = await supabase.storage.from("rfq-files").download(row.file_url!);
-                if (downloadError || !blob) throw new Error(`Could not download "${row.file_name}" from storage`);
-                return Buffer.from(await blob.arrayBuffer());
-              },
-              { retries: 2, label: `download "${row.file_name}"` }
-            );
-
-            const parsed = await parseOneFile(row.file_name, type, buffer, "");
-            await withRetry(
-              async () => {
-                const { error: updateError } = await supabase.from("rfq_files").update({
-                  status:   parsed.error ? "failed" : "parsed",
-                  raw_text: parsed.text || null,
-                  error:    parsed.error,
-                }).eq("id", row.id);
-                if (updateError) throw updateError;
-              },
-              { retries: 2, label: `rfq_files update for "${row.file_name}"` }
-            ).catch((err) => logError("[rfqs/process] rfq_files status update failed (non-fatal)", err));
-
-            return { name: row.file_name, type, text: parsed.text, error: parsed.error, fileRowId: row.id };
-          } catch (err) {
-            const message = err instanceof Error ? err.message : `Could not read "${row.file_name}"`;
-            await supabase.from("rfq_files").update({ status: "failed", error: message }).eq("id", row.id);
-            return { name: row.file_name, type, text: "", error: message, fileRowId: row.id };
-          }
-        },
-        () => {
-          completed++;
-          report(needsOcr ? "ocr" : "parse", completed, fileRows.length);
-        }
+        ),
+        jobDeadline,
+        "Downloading/parsing attachments"
       );
+      logStageTiming(rfqId, needsOcr ? "ocr" : "parse", filesStartedAt);
 
       await runRest(report, activeStages, fileRows);
     } else {
@@ -193,6 +250,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       await report("download", 0, 1);
       let rawText = (rfq.raw_text ?? "").trim();
       let error: string | null = null;
+      const legacyStartedAt = Date.now();
 
       if (isPdf) {
         await report("parse", 0, 1, rfq.file_name ?? undefined);
@@ -202,7 +260,13 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
         } catch {
           try {
             await report("ocr", 0, 1, rfq.file_name ?? undefined);
-            rawText = await withRetry(() => extractTextViaOpenAI(buffer, "application/pdf"), { retries: 2, label: "legacy PDF OCR" });
+            // Same tightened budget as parseFile.ts's OCR fallback — one
+            // retry, not two, kept safely inside JOB_DEADLINE_MS.
+            rawText = await raceWithDeadline(
+              withRetry(() => extractTextViaOpenAI(buffer, "application/pdf"), { retries: 1, label: "legacy PDF OCR" }),
+              jobDeadline,
+              "Legacy PDF OCR"
+            );
           } catch (err) {
             rawText = "";
             error = err instanceof Error ? err.message : "Could not parse this PDF";
@@ -215,7 +279,11 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
         const [, mimeType, base64] = rawText.split(":", 3);
         const buffer = Buffer.from(base64 ?? "", "base64");
         try {
-          rawText = await withRetry(() => extractTextViaOpenAI(buffer, mimeType || "image/jpeg"), { retries: 2, label: "legacy image OCR" });
+          rawText = await raceWithDeadline(
+            withRetry(() => extractTextViaOpenAI(buffer, mimeType || "image/jpeg"), { retries: 1, label: "legacy image OCR" }),
+            jobDeadline,
+            "Legacy image OCR"
+          );
         } catch (err) {
           rawText = "";
           error = err instanceof Error ? err.message : "Could not read this image";
@@ -224,6 +292,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
         await report("parse", 0, 1, rfq.file_name ?? undefined);
       }
 
+      logStageTiming(rfqId, isImage ? "ocr" : "parse", legacyStartedAt);
       if (!rawText.trim() && !error) error = "No text could be extracted from this email.";
       attachments = [{ name: rfq.file_name ?? "attachment", type: (rfq.file_type as FileType) ?? "text", text: rawText, error, fileRowId: null }];
 
@@ -249,11 +318,18 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       }
 
       await report("extract_items", 0, 1);
+      const extractStartedAt = Date.now();
       const multiInput: MultiFileInput[] = usable.map((a) => ({ fileName: a.name, text: a.text }));
-      const { meta, items } = await withRetry(
-        () => normalizeAndCategorizeMulti(multiInput),
-        { retries: 1, label: "AI item extraction" } // normalizeAndCategorizeMulti already retries its own OpenAI call; this covers a second, coarser layer
-      );
+      // normalizeAndCategorizeMulti already retries its own OpenAI call
+      // internally (see its own worst-case budget comment) — do NOT wrap it
+      // in another withRetry here. An earlier version of this route did,
+      // and that compounding (retries inside retries) could exceed 5
+      // minutes worst-case, well past this route's own maxDuration, which
+      // is exactly how a job could get killed mid-flight and get stuck
+      // "processing" forever with no terminal status ever written. The
+      // deadline race below is the real backstop now, not nested retries.
+      const { meta, items } = await raceWithDeadline(normalizeAndCategorizeMulti(multiInput), jobDeadline, "AI item extraction");
+      logStageTiming(rfqId, "extract_items", extractStartedAt);
       await report("extract_items", 1, 1);
       // Categories arrive already assigned in the same response above — this
       // is a real checkpoint (the categorized item set now genuinely
@@ -300,6 +376,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
         for (let i = 0; i < rows.length; i += ITEM_INSERT_CHUNK) chunks.push(rows.slice(i, i + ITEM_INSERT_CHUNK));
 
         let savedCount = 0;
+        const saveStartedAt = Date.now();
         try {
           const chunkResults = await mapWithConcurrency(
             chunks,
@@ -315,6 +392,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
             (result) => { savedCount += result.length; report("save", savedCount, rows.length); }
           );
           insertedItems = chunkResults.flat();
+          logStageTiming(rfqId, "save", saveStartedAt);
         } catch (err) {
           logError("[rfqs/process] rfq_items insert failed", err);
           await fail(`Could not save extracted items: ${err instanceof Error ? err.message : "unknown error"}`);
@@ -325,6 +403,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       }
 
       if (stages.includes("match_images")) {
+        const matchStartedAt = Date.now();
         const imageAttachments = attachments.filter((a) => a.type === "image" && !a.error && a.fileRowId);
         await report("match_images", 0, Math.max(imageAttachments.length, 1));
         if (imageAttachments.length > 0) {
@@ -349,6 +428,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
           if (imageRows.length > 0) await supabase.from("rfq_item_images").insert(imageRows);
         }
         await report("match_images", imageAttachments.length, Math.max(imageAttachments.length, 1));
+        logStageTiming(rfqId, "match_images", matchStartedAt);
       }
 
       await supabase.from("rfqs").update({
@@ -360,6 +440,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       }).eq("id", rfqId);
 
       await report("complete", 1, 1);
+      console.log(`[rfqs/process] rfq=${rfqId} job=${jobId} COMPLETED in ${Date.now() - jobStartedAt}ms`);
       await updateJob(supabase, jobId, {
         status: "done",
         progress: { stage: "complete", label: STAGE_LABEL.complete, processed: 1, total: 1, percent: 100 },
