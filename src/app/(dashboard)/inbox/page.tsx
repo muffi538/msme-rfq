@@ -236,6 +236,7 @@ export default function InboxPage() {
   const [pending,      setPending]      = useState<PendingRfq[]>([]);
   const [done,         setDone]         = useState<DoneRfq[]>([]);
   const [processing,   setProcessing]   = useState<Record<string, boolean>>({});
+  const [cancelling,   setCancelling]   = useState<Record<string, boolean>>({});
   const [processProgress, setProcessProgress] = useState<Record<string, ProcessProgress | null>>({});
   // Wall-clock start time per in-flight RFQ, used only to compute a real
   // elapsed-time-based ETA — never to fake progress itself.
@@ -721,6 +722,26 @@ export default function InboxPage() {
       `Files Processed: ${result.processedCount}/${result.foundCount} — Items Extracted: ${result.itemCount} — Failed Files: ${result.failedFiles.length}. Opening RFQ…`
     );
     setTimeout(() => router.push(`/rfqs/${rfqId}`), 800);
+  }
+
+  /* ── Cancel a stuck or unwanted "processing" RFQ — marks it failed
+     server-side (which any in-flight poll, including one running in
+     another tab, picks up within one poll interval) and refreshes the
+     list. Works whether this tab owns the job or it's showing "Processing
+     (another session)". ── */
+  async function handleCancelProcessing(rfqId: string) {
+    setCancelling((p) => ({ ...p, [rfqId]: true }));
+    try {
+      const res  = await apiFetch(`/api/rfqs/${rfqId}/cancel`, { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Could not cancel processing.");
+      toast.info("Processing cancelled.");
+      await loadPending();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Could not cancel processing.");
+    } finally {
+      setCancelling((p) => ({ ...p, [rfqId]: false }));
+    }
   }
 
   /* ── Batch processing — bounded parallelism. Each RFQ already runs as
@@ -1343,6 +1364,20 @@ export default function InboxPage() {
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
+                        {rfq.status === "processing" && (
+                          <button
+                            type="button"
+                            onClick={() => handleCancelProcessing(rfq.id)}
+                            disabled={cancelling[rfq.id]}
+                            title="Cancel processing"
+                            className="h-8 px-3 flex items-center justify-center gap-1 rounded-full text-xs font-medium text-red-600 border border-red-200 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
+                          >
+                            {cancelling[rfq.id]
+                              ? <Loader2 className="w-3 h-3 animate-spin" />
+                              : <X className="w-3 h-3" />}
+                            Cancel
+                          </button>
+                        )}
                         <Button
                           size="sm"
                           onClick={() => handleProcess(rfq.id)}
