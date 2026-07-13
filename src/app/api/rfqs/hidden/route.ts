@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
+// Lists RFQs hidden from the dashboard via the inbox "Delete" action —
+// backs the "Restore Hidden Emails" settings page.
 export async function GET() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -8,10 +10,9 @@ export async function GET() {
 
   const { data: rfqs } = await supabase
     .from("rfqs")
-    .select("id, rfq_code, buyer_name, buyer_email, file_name, created_at")
-    .in("status", ["pending", "needs_processing"])
-    .eq("hidden_from_dashboard", false)
-    .order("created_at", { ascending: false, nullsFirst: false });
+    .select("id, rfq_code, buyer_name, buyer_email, file_name, hidden_at")
+    .eq("hidden_from_dashboard", true)
+    .order("hidden_at", { ascending: false });
 
   return NextResponse.json({ rfqs: rfqs ?? [] });
 }

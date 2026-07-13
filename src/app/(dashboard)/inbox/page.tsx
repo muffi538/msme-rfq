@@ -400,23 +400,41 @@ export default function InboxPage() {
     }
   }
 
-  /* ── Delete email — removes the message from Gmail (moved to Trash)
-     and the RFQ card together. If the Gmail side fails, nothing is
-     removed so the card stays put and the user can retry. ── */
+  /* ── Remove from dashboard — this is a local hide, never a Gmail action.
+     The RFQ row stays in the database (hidden_from_dashboard=true) so the
+     same email is never re-imported on a future sync; it just stops
+     showing up here. Gmail itself is never touched. ── */
   async function confirmDeleteEmail() {
     if (!deleteTarget) return;
-    const rfqId = deleteTarget.id;
+    const rfq = deleteTarget;
     setDeletingEmail(true);
     try {
-      const res  = await fetch(`/api/rfqs/${rfqId}/delete-email`, { method: "POST" });
+      const res  = await fetch(`/api/rfqs/${rfq.id}/hide`, { method: "POST" });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "Could not delete this email");
+      if (!res.ok) throw new Error(json.error ?? "Could not remove this RFQ");
 
-      setPending((p) => p.filter((r) => r.id !== rfqId));
+      setPending((p) => p.filter((r) => r.id !== rfq.id));
       setDeleteTarget(null);
-      toast.success("Email deleted successfully.");
+
+      toast.success("Removed from dashboard — the original email is untouched in Gmail.", {
+        duration: 10000,
+        action: {
+          label: "Undo",
+          onClick: async () => {
+            try {
+              const undoRes = await fetch(`/api/rfqs/${rfq.id}/unhide`, { method: "POST" });
+              if (!undoRes.ok) throw new Error();
+              const ts = (r: PendingRfq) => (r.created_at ? new Date(r.created_at).getTime() : 0) || 0;
+              setPending((prev) => [...prev, rfq].sort((a, b) => ts(b) - ts(a)));
+              toast.success("Restored to dashboard.");
+            } catch {
+              toast.error("Couldn't undo — restore it from Settings → Restore Hidden Emails instead.");
+            }
+          },
+        },
+      });
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : "Could not delete this email");
+      toast.error(err instanceof Error ? err.message : "Could not remove this RFQ");
     } finally {
       setDeletingEmail(false);
     }
@@ -476,7 +494,7 @@ export default function InboxPage() {
 
   return (
     <>
-      {/* Delete email confirmation modal */}
+      {/* Remove-from-dashboard confirmation modal */}
       {deleteTarget && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
           <div className="bg-card border border-border rounded-2xl shadow-xl p-6 max-w-sm w-full space-y-4">
@@ -485,9 +503,9 @@ export default function InboxPage() {
                 <AlertTriangle className="w-5 h-5 text-red-600" />
               </div>
               <div>
-                <p className="font-semibold text-card-foreground">Are you sure you want to delete this email?</p>
+                <p className="font-semibold text-card-foreground">Remove this RFQ from your dashboard?</p>
                 <p className="text-sm text-muted-foreground mt-0.5">
-                  <strong>{deleteTarget.rfq_code}</strong> from {deleteTarget.buyer_name ?? deleteTarget.buyer_email ?? "this sender"} will be moved to Trash in Gmail and removed here.
+                  This will only remove <strong>{deleteTarget.rfq_code}</strong> from ProcureAI. The original email will remain safely in your Gmail inbox.
                 </p>
               </div>
             </div>
@@ -497,7 +515,7 @@ export default function InboxPage() {
                 disabled={deletingEmail}
                 className="flex-1 bg-red-600 hover:bg-red-700 text-white"
               >
-                {deletingEmail ? "Deleting..." : "Delete"}
+                {deletingEmail ? "Removing..." : "Remove from Dashboard"}
               </Button>
               <Button
                 variant="outline"
@@ -745,7 +763,7 @@ export default function InboxPage() {
                           type="button"
                           onClick={() => setDeleteTarget(rfq)}
                           disabled={processing[rfq.id]}
-                          title="Delete email"
+                          title="Remove from dashboard"
                           className="w-8 h-8 flex items-center justify-center rounded-full text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
                         >
                           <Trash2 className="w-4 h-4" />
