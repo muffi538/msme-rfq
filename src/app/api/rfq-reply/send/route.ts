@@ -24,12 +24,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid recipient email address" }, { status: 400 });
   }
 
-  const [{ data: companySettingRows }, { data: userSettingRows }] = await Promise.all([
-    supabase.from("company_settings").select("key, value").eq("key", "company_name"),
-    supabase.from("user_settings").select("key, value").eq("user_id", user.id).eq("key", "gmail_refresh_token"),
-  ]);
+  const { data: userSettingRows } = await supabase
+    .from("user_settings")
+    .select("key, value")
+    .eq("user_id", user.id)
+    .in("key", ["company_name", "gmail_refresh_token"]);
 
-  const companyName    = companySettingRows?.find((r) => r.key === "company_name")?.value    ?? "Procur.AI";
+  const companyName    = userSettingRows?.find((r) => r.key === "company_name")?.value    ?? "Procur.AI";
   const gmailToken     = userSettingRows?.find((r) => r.key === "gmail_refresh_token")?.value;
 
   if (!gmailToken) {

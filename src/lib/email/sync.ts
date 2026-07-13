@@ -67,11 +67,18 @@ async function checkpoint(supabase: SupabaseClient, userId: string, session: Gma
 // skipping it for known duplicates is the single biggest cost saver for a
 // backfill ("Fetch More History", re-onboarding) where most candidates are
 // typically mail we already have.
-async function filterUnseenMessageIds(supabase: SupabaseClient, ids: string[]): Promise<{ unseen: string[]; alreadySeen: number }> {
+//
+// Explicitly scoped to this user's own rows — the cron path calls this with
+// a service-role client that bypasses RLS entirely, so without this filter
+// one account's sync could "dedupe away" (silently skip importing) a
+// message that only collides in Gmail message id with something a
+// completely different, unrelated account already imported.
+async function filterUnseenMessageIds(supabase: SupabaseClient, userId: string, ids: string[]): Promise<{ unseen: string[]; alreadySeen: number }> {
   if (ids.length === 0) return { unseen: [], alreadySeen: 0 };
   const { data: existing } = await supabase
     .from("rfqs")
     .select("gmail_message_id")
+    .eq("user_id", userId)
     .in("gmail_message_id", ids);
   const seen = new Set((existing ?? []).map((r) => r.gmail_message_id as string));
   return { unseen: ids.filter((id) => !seen.has(id)), alreadySeen: seen.size };
@@ -107,7 +114,7 @@ async function importOneEmail(supabase: SupabaseClient, userId: string, session:
     fileType = supported.length === 1 ? supported[0].type : "mixed";
   }
 
-  const rfqCode = await generateRfqCode(supabase);
+  const rfqCode = await generateRfqCode(supabase, userId);
   const { data: rfq, error: insertError } = await supabase
     .from("rfqs")
     .insert({
@@ -207,7 +214,7 @@ async function fetchAndImport(
   ids: string[],
   onProgress?: (processed: number, total: number) => void
 ): Promise<Omit<SyncResult, "usedFallback">> {
-  const { unseen, alreadySeen } = await filterUnseenMessageIds(supabase, ids);
+  const { unseen, alreadySeen } = await filterUnseenMessageIds(supabase, userId, ids);
   const candidates = await session.fetchMessages(unseen);
   const imported = await importCandidateEmails(supabase, userId, session, candidates, onProgress);
   return { ...imported, fetched: ids.length, deduped: imported.deduped + alreadySeen };

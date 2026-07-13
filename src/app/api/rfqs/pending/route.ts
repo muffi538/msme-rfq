@@ -11,6 +11,7 @@ export async function GET() {
   const { data: rfqs } = await supabase
     .from("rfqs")
     .select("id, rfq_code, buyer_name, buyer_email, file_name, created_at, status, process_error")
+    .eq("user_id", user.id)
     .in("status", ["pending", "needs_processing", "processing", "failed"])
     .eq("hidden_from_dashboard", false)
     .order("created_at", { ascending: false, nullsFirst: false });

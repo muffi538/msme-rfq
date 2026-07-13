@@ -16,12 +16,14 @@ export default async function RfqsPage() {
     supabase
       .from("rfqs")
       .select("id, rfq_code, buyer_name, buyer_email, status, priority, file_type, created_at")
+      .eq("user_id", user.id)
       .not("status", "in", "(pending,needs_processing)")
       .order("created_at", { ascending: false }),
-    supabase.from("outgoing_rfqs").select("rfq_id, status"),
+    supabase.from("outgoing_rfqs").select("rfq_id, status").eq("user_id", user.id),
     supabase
       .from("buyer_reply_logs")
       .select("id, buyer_email, supplier_name, quote_summary, email_subject, email_body, sent_at")
+      .eq("user_id", user.id)
       .order("sent_at", { ascending: false }),
   ]);
   const buyerLogs = logsResult.error ? [] : (logsResult.data ?? []);

@@ -422,9 +422,12 @@ export default function InboxPage() {
 
   async function loadDone() {
     const supabase = createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
     const { data } = await supabase
       .from("rfqs")
       .select("id, rfq_code, buyer_name, status, created_at")
+      .eq("user_id", user.id)
       .in("status", ["processed", "approved", "sent"])
       .not("gmail_message_id", "is", null)
       .order("created_at", { ascending: false })
