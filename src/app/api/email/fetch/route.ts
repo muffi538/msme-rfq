@@ -1,7 +1,7 @@
 import { NextResponse, after } from "next/server";
 import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
-import { syncGmailForUser } from "@/lib/email/sync";
+import { syncGmailForUser, getGmailRefreshToken } from "@/lib/email/sync";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { createJob, updateJob } from "@/lib/jobs";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -15,8 +15,9 @@ async function runEmailFetchJob(supabase: SupabaseClient, userId: string, jobId:
   try {
     await updateJob(supabase, jobId, { status: "running" });
 
-    const result = await syncGmailForUser(supabase, userId, refreshToken, (processed, total) => {
-      updateJob(supabase, jobId, { progress: { processed, total } });
+    const result = await syncGmailForUser(supabase, userId, refreshToken, {
+      isManual: true,
+      onProgress: (processed, total) => updateJob(supabase, jobId, { progress: { processed, total } }),
     });
 
     console.log("[email-fetch] done", result);
@@ -44,20 +45,7 @@ export async function POST() {
     return NextResponse.json({ error: "Too many fetch requests. Please wait a few minutes and try again." }, { status: 429 });
   }
 
-  // Look up this user's own Gmail refresh token.
-  // .limit(1) instead of .single() — a duplicate row for this user_id+key
-  // would make .single() error out and look like "not connected".
-  const { data: tokenRows, error: tokenLookupError } = await supabase
-    .from("user_settings")
-    .select("value")
-    .eq("user_id", user.id)
-    .eq("key", "gmail_refresh_token")
-    .order("created_at", { ascending: false })
-    .limit(1);
-
-  if (tokenLookupError) logError("[email-fetch] token lookup failed", tokenLookupError);
-  const refreshToken = tokenRows?.[0]?.value;
-
+  const refreshToken = await getGmailRefreshToken(supabase, user.id);
   if (!refreshToken) {
     return NextResponse.json(
       { error: "Gmail not connected. Please connect your Gmail account first." },

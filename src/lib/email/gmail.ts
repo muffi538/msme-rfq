@@ -1,3 +1,5 @@
+import { mapWithConcurrency } from "@/lib/concurrency";
+
 export type FetchedEmail = {
   messageId: string;
   threadId:  string;
@@ -149,13 +151,6 @@ export async function sendEmail({
   await gmailPost("/messages/send", token, { raw: encoded });
 }
 
-export async function markAsRead(messageId: string, refreshToken: string): Promise<void> {
-  const token = await getAccessToken(refreshToken);
-  await gmailPost(`/messages/${messageId}/modify`, token, {
-    removeLabelIds: ["UNREAD"],
-  });
-}
-
 async function fetchMessageById(id: string, token: string): Promise<FetchedEmail> {
   const msg = await gmailGet(`/messages/${id}?format=full`, token) as {
     id: string;
@@ -191,52 +186,55 @@ async function fetchMessageById(id: string, token: string): Promise<FetchedEmail
   };
 }
 
-export async function fetchUnreadEmails(limit = 20, refreshToken: string): Promise<FetchedEmail[]> {
-  const token = await getAccessToken(refreshToken);
+async function listMessageIds(
+  token: string,
+  query: string,
+  opts: { maxResults?: number; maxPages?: number } = {}
+): Promise<string[]> {
+  const maxResults = opts.maxResults ?? 20;
+  const maxPages    = opts.maxPages ?? 5;
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+  let pages = 0;
 
-  // Only fetch emails still marked UNREAD — Gmail's own flag is the dedup mechanism.
-  // Caller marks each message read only AFTER successfully saving it (see
-  // markAsRead above) — marking read here unconditionally would permanently
-  // lose any message whose DB save failed, since it'd never be re-fetched.
-  const query = `is:unread in:inbox`;
+  do {
+    const remaining = maxResults - ids.length;
+    if (remaining <= 0) break;
+    const qs = new URLSearchParams({ q: query, maxResults: String(Math.min(100, remaining)) });
+    if (pageToken) qs.set("pageToken", pageToken);
 
-  const listRes = await gmailGet(
-    `/messages?q=${encodeURIComponent(query)}&maxResults=${limit}`,
-    token
-  ) as { messages?: { id: string }[] };
+    const res = await gmailGet(`/messages?${qs}`, token) as { messages?: { id: string }[]; nextPageToken?: string };
+    ids.push(...(res.messages ?? []).map((m) => m.id));
+    pageToken = res.nextPageToken;
+    pages++;
+  } while (pageToken && pages < maxPages);
 
-  const messageList = listRes.messages ?? [];
-  if (messageList.length === 0) return [];
-
-  const emails: FetchedEmail[] = [];
-  for (const { id } of messageList) emails.push(await fetchMessageById(id, token));
-
-  // Newest first — Gmail's list usually returns this order, but enforce it
-  // explicitly so downstream code (and DB inserts) are deterministic.
-  emails.sort((a, b) => b.date.getTime() - a.date.getTime());
-  return emails;
+  return ids.slice(0, maxResults);
 }
 
-export async function fetchMessagesByIds(ids: string[], refreshToken: string): Promise<FetchedEmail[]> {
+// Bounded concurrency — fetching full message bodies (+ any attachments) is
+// the slowest part of a sync, so this is the highest-value place to
+// parallelize. 5 in flight is comfortably under Gmail's per-user rate limit
+// while still being several times faster than fetching one at a time.
+async function fetchMessages(token: string, ids: string[], concurrency = 5): Promise<FetchedEmail[]> {
   if (ids.length === 0) return [];
-  const token = await getAccessToken(refreshToken);
-  const emails: FetchedEmail[] = [];
-  for (const id of ids) {
+  const results = await mapWithConcurrency(ids, concurrency, async (id) => {
     try {
-      emails.push(await fetchMessageById(id, token));
+      return await fetchMessageById(id, token);
     } catch (err) {
-      // A message referenced by history.list can have been deleted since
-      // (e.g. the user trashed it seconds later) — 404s on the individual
-      // GET are expected and shouldn't abort the whole sync.
-      if (!(err instanceof Error && /404/.test(err.message))) throw err;
+      // A message referenced by a list/history call can have been deleted
+      // since (e.g. the user trashed it seconds later) — 404s on the
+      // individual GET are expected and shouldn't abort the whole batch.
+      if (err instanceof Error && /\(404\)/.test(err.message)) return null;
+      throw err;
     }
-  }
+  });
+  const emails = results.filter((e): e is FetchedEmail => e !== null);
   emails.sort((a, b) => b.date.getTime() - a.date.getTime());
   return emails;
 }
 
-export async function getGmailProfile(refreshToken: string): Promise<{ historyId: string; emailAddress: string }> {
-  const token = await getAccessToken(refreshToken);
+async function getProfile(token: string): Promise<{ historyId: string; emailAddress: string }> {
   const profile = await gmailGet(`/profile`, token) as { historyId?: string; emailAddress?: string };
   if (!profile.historyId) throw new Error("Gmail profile did not return a historyId");
   return { historyId: profile.historyId, emailAddress: profile.emailAddress ?? "" };
@@ -247,11 +245,10 @@ export async function getGmailProfile(refreshToken: string): Promise<{ historyId
 // Returns expired:true when Gmail has already garbage-collected that
 // history point (typically after ~7 days) — the caller must fall back to a
 // full scan and re-establish a fresh baseline historyId in that case.
-export async function listNewMessagesSince(
-  startHistoryId: string,
-  refreshToken: string
+async function listHistorySince(
+  token: string,
+  startHistoryId: string
 ): Promise<{ expired: true } | { expired: false; messageIds: string[]; historyId: string }> {
-  const token = await getAccessToken(refreshToken);
   const messageIds = new Set<string>();
   let pageToken: string | undefined;
   let latestHistoryId = startHistoryId;
@@ -286,4 +283,32 @@ export async function listNewMessagesSince(
   } while (pageToken);
 
   return { expired: false, messageIds: [...messageIds], historyId: latestHistoryId };
+}
+
+async function markAsRead(messageId: string, token: string): Promise<void> {
+  await gmailPost(`/messages/${messageId}/modify`, token, { removeLabelIds: ["UNREAD"] });
+}
+
+export type GmailSession = {
+  listMessageIds(query: string, opts?: { maxResults?: number; maxPages?: number }): Promise<string[]>;
+  fetchMessages(ids: string[], concurrency?: number): Promise<FetchedEmail[]>;
+  getProfile(): Promise<{ historyId: string; emailAddress: string }>;
+  listHistorySince(startHistoryId: string): Promise<{ expired: true } | { expired: false; messageIds: string[]; historyId: string }>;
+  markAsRead(messageId: string): Promise<void>;
+};
+
+// Resolves the OAuth access token exactly once and binds every Gmail call
+// in the session to it, instead of every helper independently exchanging
+// the refresh token (each a ~100-300ms round trip to Google). A single
+// sync cycle can make history + profile + a dozen message calls — batching
+// the token exchange is the single biggest latency win available here.
+export async function createGmailSession(refreshToken: string): Promise<GmailSession> {
+  const token = await getAccessToken(refreshToken);
+  return {
+    listMessageIds: (query, opts) => listMessageIds(token, query, opts),
+    fetchMessages:  (ids, concurrency) => fetchMessages(token, ids, concurrency),
+    getProfile:     () => getProfile(token),
+    listHistorySince: (startHistoryId) => listHistorySince(token, startHistoryId),
+    markAsRead:     (messageId) => markAsRead(messageId, token),
+  };
 }
