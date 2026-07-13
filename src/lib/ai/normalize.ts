@@ -295,10 +295,15 @@ ${labeled}`,
         },
       ],
     }),
-    // Tightened from 35s to keep a 3-attempt budget (see retries: 2 below)
-    // safely inside JOB_DEADLINE_MS in the process route — gpt-4o-mini
-    // typically returns well under this for the input sizes used here.
-    signal: AbortSignal.timeout(20000),
+    // Was tightened to 20s to keep a 3-attempt budget safely inside
+    // JOB_DEADLINE_MS — found (via a real production failure, RFQ-0035:
+    // process_error = "The operation was aborted due to timeout") to be
+    // too tight for a legitimately larger multi-file RFQ, where
+    // gpt-4o-mini genuinely needs more than 20s to generate a full
+    // response at max_tokens: 8000. Raised back up; JOB_DEADLINE_MS in the
+    // process route was raised alongside it to keep the worst case
+    // (3 attempts) safely inside the job's shared deadline.
+    signal: AbortSignal.timeout(30000),
   });
 
   if (!res.ok) {
@@ -374,10 +379,11 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
   const { data: parsed, truncated } = await withRetry(
     () => callAndParseOnce(labeled),
     {
-      // Worst case here (every attempt times out) is 3 * 20s = 60s — this
+      // Worst case here (every attempt times out) is 3 * 30s = 90s — this
       // single call already eats a large share of the process route's
-      // overall time budget (see JOB_DEADLINE_MS there), so it can't afford
-      // an unbounded retry budget on top of that. The caller does NOT
+      // overall time budget (see JOB_DEADLINE_MS there, raised to 110s
+      // alongside this), so it can't afford an unbounded retry budget on
+      // top of that. The caller does NOT
       // double-wrap this in another retry — an earlier version did, and
       // that compounding could exceed the route's maxDuration and get the
       // serverless function killed mid-flight, leaving the job stuck
@@ -410,7 +416,19 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
         err.message
       );
     }
-    throw err;
+    // Catch-all for everything else that can come out of fetch() — most
+    // notably AbortSignal.timeout() firing, which rejects with a bare
+    // DOMException (name: "TimeoutError", message: "The operation was
+    // aborted due to timeout") that matches neither OpenAiError nor
+    // InvalidAiJsonError above and was found leaking straight into a
+    // user-facing RFQ's process_error column uncaught. Network errors
+    // (DNS failure, connection reset, etc.) land here too. Nothing past
+    // this point should ever reach a caller unsanitized.
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    throw new AiExtractionError(
+      "The AI request took too long or the connection was unreliable. Please try again.",
+      detail
+    );
   });
 
   const meta: RfqMeta = {

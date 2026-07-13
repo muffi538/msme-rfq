@@ -29,8 +29,13 @@ const DOWNLOAD_TIMEOUT_MS = 20_000; // storage.download() has no built-in timeou
 // this still guarantees the job fails cleanly with a real error well before
 // the platform would kill the function outright (maxDuration=120 above),
 // which is the scenario that otherwise leaves a job stuck "processing"
-// forever with no terminal status ever written.
-const JOB_DEADLINE_MS = 100_000;
+// forever with no terminal status ever written. Raised from 100s to 110s
+// alongside the AI extraction call's per-attempt timeout (20s -> 30s,
+// normalize.ts) — a real production failure showed the AI call itself
+// timing out on a legitimately larger RFQ, and the tighter budget had no
+// room to accommodate raising it. Still leaves a 10s buffer before
+// maxDuration.
+const JOB_DEADLINE_MS = 110_000;
 
 class JobTimeoutError extends Error {
   constructor(label: string) { super(`${label} took too long — processing was stopped after its safe time budget to avoid hanging forever.`); }
