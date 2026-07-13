@@ -1,5 +1,6 @@
 export type FetchedEmail = {
   messageId: string;
+  threadId:  string;
   subject:   string;
   from:      string;
   fromEmail: string;
@@ -39,7 +40,7 @@ async function gmailGet(path: string, token: string) {
   const json = await res.json() as Record<string, unknown>;
   if (!res.ok || json.error) {
     const err = json.error as { message?: string; status?: string } | undefined;
-    throw new Error(`Gmail API error: ${err?.message ?? err?.status ?? res.status}`);
+    throw new Error(`Gmail API error (${res.status}): ${err?.message ?? err?.status ?? res.statusText}`);
   }
   return json;
 }
@@ -155,6 +156,41 @@ export async function markAsRead(messageId: string, refreshToken: string): Promi
   });
 }
 
+async function fetchMessageById(id: string, token: string): Promise<FetchedEmail> {
+  const msg = await gmailGet(`/messages/${id}?format=full`, token) as {
+    id: string;
+    threadId: string;
+    payload: GmailPayload;
+    internalDate: string;
+  };
+
+  const headers  = msg.payload.headers ?? [];
+  const subject  = headerVal(headers, "Subject") || "(no subject)";
+  const fromRaw  = headerVal(headers, "From");
+
+  // Parse "Name <email>" or just "email"
+  const emailMatch = fromRaw.match(/<(.+?)>/) ?? fromRaw.match(/(\S+@\S+)/);
+  const nameMatch  = fromRaw.match(/^(.+?)\s*</);
+  const fromEmail  = emailMatch?.[1] ?? fromRaw;
+  const fromName   = nameMatch?.[1]?.replace(/"/g, "") ?? fromEmail;
+
+  const bodyText    = extractBody(msg.payload);
+  const attachments = await extractAttachments(id, msg.payload, token);
+
+  return {
+    // Use Gmail's stable internal id — never the Message-ID header which can
+    // contain angle-brackets and break dedup matching.
+    messageId: msg.id,
+    threadId:  msg.threadId,
+    subject,
+    from:      fromName,
+    fromEmail,
+    date:      new Date(Number(msg.internalDate)),
+    bodyText,
+    attachments,
+  };
+}
+
 export async function fetchUnreadEmails(limit = 20, refreshToken: string): Promise<FetchedEmail[]> {
   const token = await getAccessToken(refreshToken);
 
@@ -173,43 +209,81 @@ export async function fetchUnreadEmails(limit = 20, refreshToken: string): Promi
   if (messageList.length === 0) return [];
 
   const emails: FetchedEmail[] = [];
-
-  for (const { id } of messageList) {
-    const msg = await gmailGet(`/messages/${id}?format=full`, token) as {
-      id: string;
-      payload: GmailPayload;
-      internalDate: string;
-    };
-
-    const headers  = msg.payload.headers ?? [];
-    const subject  = headerVal(headers, "Subject") || "(no subject)";
-    const fromRaw  = headerVal(headers, "From");
-    // Use Gmail's stable internal id — never the Message-ID header which can contain
-    // angle-brackets and break the LIKE dedup check.
-    const msgId    = id;
-
-    // Parse "Name <email>" or just "email"
-    const emailMatch = fromRaw.match(/<(.+?)>/) ?? fromRaw.match(/(\S+@\S+)/);
-    const nameMatch  = fromRaw.match(/^(.+?)\s*</);
-    const fromEmail  = emailMatch?.[1] ?? fromRaw;
-    const fromName   = nameMatch?.[1]?.replace(/"/g, "") ?? fromEmail;
-
-    const bodyText    = extractBody(msg.payload);
-    const attachments = await extractAttachments(id, msg.payload, token);
-
-    emails.push({
-      messageId: msgId,
-      subject,
-      from:      fromName,
-      fromEmail,
-      date:      new Date(Number(msg.internalDate)),
-      bodyText,
-      attachments,
-    });
-  }
+  for (const { id } of messageList) emails.push(await fetchMessageById(id, token));
 
   // Newest first — Gmail's list usually returns this order, but enforce it
   // explicitly so downstream code (and DB inserts) are deterministic.
   emails.sort((a, b) => b.date.getTime() - a.date.getTime());
   return emails;
+}
+
+export async function fetchMessagesByIds(ids: string[], refreshToken: string): Promise<FetchedEmail[]> {
+  if (ids.length === 0) return [];
+  const token = await getAccessToken(refreshToken);
+  const emails: FetchedEmail[] = [];
+  for (const id of ids) {
+    try {
+      emails.push(await fetchMessageById(id, token));
+    } catch (err) {
+      // A message referenced by history.list can have been deleted since
+      // (e.g. the user trashed it seconds later) — 404s on the individual
+      // GET are expected and shouldn't abort the whole sync.
+      if (!(err instanceof Error && /404/.test(err.message))) throw err;
+    }
+  }
+  emails.sort((a, b) => b.date.getTime() - a.date.getTime());
+  return emails;
+}
+
+export async function getGmailProfile(refreshToken: string): Promise<{ historyId: string; emailAddress: string }> {
+  const token = await getAccessToken(refreshToken);
+  const profile = await gmailGet(`/profile`, token) as { historyId?: string; emailAddress?: string };
+  if (!profile.historyId) throw new Error("Gmail profile did not return a historyId");
+  return { historyId: profile.historyId, emailAddress: profile.emailAddress ?? "" };
+}
+
+// Incremental sync via the History API: cheap compared to scanning the
+// whole inbox, since Gmail only returns what changed since startHistoryId.
+// Returns expired:true when Gmail has already garbage-collected that
+// history point (typically after ~7 days) — the caller must fall back to a
+// full scan and re-establish a fresh baseline historyId in that case.
+export async function listNewMessagesSince(
+  startHistoryId: string,
+  refreshToken: string
+): Promise<{ expired: true } | { expired: false; messageIds: string[]; historyId: string }> {
+  const token = await getAccessToken(refreshToken);
+  const messageIds = new Set<string>();
+  let pageToken: string | undefined;
+  let latestHistoryId = startHistoryId;
+
+  do {
+    const qs = new URLSearchParams({
+      startHistoryId,
+      historyTypes: "messageAdded",
+      labelId: "INBOX",
+    });
+    if (pageToken) qs.set("pageToken", pageToken);
+
+    const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/history?${qs}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+
+    if (res.status === 404) return { expired: true };
+    const json = await res.json() as {
+      history?: { messagesAdded?: { message: { id: string } }[] }[];
+      historyId?: string;
+      nextPageToken?: string;
+      error?: { message?: string };
+    };
+    if (!res.ok) throw new Error(`Gmail API error: ${json.error?.message ?? res.status}`);
+
+    for (const h of json.history ?? []) {
+      for (const added of h.messagesAdded ?? []) messageIds.add(added.message.id);
+    }
+    if (json.historyId) latestHistoryId = json.historyId;
+    pageToken = json.nextPageToken;
+  } while (pageToken);
+
+  return { expired: false, messageIds: [...messageIds], historyId: latestHistoryId };
 }

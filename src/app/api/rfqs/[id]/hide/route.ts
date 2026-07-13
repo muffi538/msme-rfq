@@ -4,9 +4,9 @@ import { createClient } from "@/lib/supabase/server";
 
 // "Delete" on a pending RFQ card is dashboard-only — it must never touch
 // Gmail (no trash, no permanent delete, no label changes). The row stays
-// in the database with hidden_from_dashboard=true so future email syncs
-// still recognize it (by its msgid: file_name) and never re-import it;
-// it just stops showing up in the app. See /unhide to reverse this.
+// in the database with hidden_from_dashboard=true so future syncs still
+// recognize it (by its gmail_message_id) and never re-import it; it just
+// stops showing up in the app. See /unhide to reverse this.
 export async function POST(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
