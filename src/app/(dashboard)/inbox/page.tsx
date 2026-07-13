@@ -160,6 +160,10 @@ export default function InboxPage() {
   const [labels,       setLabels]       = useState<Record<string, RfqLabel>>({});
   const [deleteTarget, setDeleteTarget] = useState<PendingRfq | null>(null);
   const [deletingEmail, setDeletingEmail] = useState(false);
+  const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set());
+  const [batchRunning,  setBatchRunning]  = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{ processed: number; total: number } | null>(null);
+  const batchCancelRef = useRef(false);
   // ── Persist filter + view-mode in sessionStorage so navigating away and
   // coming back keeps the user on the tab they left on (no jarring reset).
   const [activeFilter, setActiveFilter] = useState<FilterTab>(() => {
@@ -362,7 +366,14 @@ export default function InboxPage() {
   /* ── Run AI — processes every attachment on the email, not just the
      first one, and merges them into one RFQ. Job-based so the button can
      show real "attachment i of N" progress instead of a blind spinner. ── */
-  async function handleProcess(rfqId: string) {
+  // Core of "process one RFQ" — kicks off the job, polls it, and moves the
+  // row from pending → done in local state. Shared by the single "Process
+  // it" button and batch processing; toasting/navigation is left to each
+  // caller since they want different messaging.
+  async function processOneRfq(rfqId: string): Promise<
+    { ok: true; result: { itemCount: number; foundCount: number; processedCount: number; failedFiles: string[]; warnings: string[] } }
+    | { ok: false; error: string }
+  > {
     setProcessing((p) => ({ ...p, [rfqId]: true }));
     setProcessProgress((p) => ({ ...p, [rfqId]: null }));
     try {
@@ -376,7 +387,6 @@ export default function InboxPage() {
       >(json.jobId, (p) => setProcessProgress((prev) => ({ ...prev, [rfqId]: p })));
 
       setJustDone((p) => ({ ...p, [rfqId]: true }));
-      setProcessing((p) => ({ ...p, [rfqId]: false }));
       const moved = pending.find((r) => r.id === rfqId);
       setPending((p) => p.filter((r) => r.id !== rfqId));
       if (moved) {
@@ -386,18 +396,81 @@ export default function InboxPage() {
           created_at: moved.created_at,
         }, ...prev]);
       }
-
-      if (result.failedFiles.length > 0) {
-        toast.warning(`${result.failedFiles.length} attachment(s) couldn't be read: ${result.failedFiles.join(", ")}`, { duration: 10000 });
-      }
-      toast.success(
-        `Files Processed: ${result.processedCount}/${result.foundCount} — Items Extracted: ${result.itemCount} — Failed Files: ${result.failedFiles.length}. Opening RFQ…`
-      );
-      setTimeout(() => router.push(`/rfqs/${rfqId}`), 800);
+      return { ok: true, result };
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : "Processing failed");
+      return { ok: false, error: err instanceof Error ? err.message : "Processing failed" };
+    } finally {
       setProcessing((p) => ({ ...p, [rfqId]: false }));
     }
+  }
+
+  async function handleProcess(rfqId: string) {
+    const outcome = await processOneRfq(rfqId);
+    if (!outcome.ok) {
+      toast.error(outcome.error);
+      return;
+    }
+    const { result } = outcome;
+    if (result.failedFiles.length > 0) {
+      toast.warning(`${result.failedFiles.length} attachment(s) couldn't be read: ${result.failedFiles.join(", ")}`, { duration: 10000 });
+    }
+    toast.success(
+      `Files Processed: ${result.processedCount}/${result.foundCount} — Items Extracted: ${result.itemCount} — Failed Files: ${result.failedFiles.length}. Opening RFQ…`
+    );
+    setTimeout(() => router.push(`/rfqs/${rfqId}`), 800);
+  }
+
+  /* ── Batch processing — sequential (each RFQ still calls the same
+     background job as a single "Process it"; running them in parallel
+     would just contend for the same OpenAI rate limit budget with worse
+     progress reporting). Continues past individual failures, reports a
+     summary, and can be cancelled between items. ── */
+  async function handleBatchProcess() {
+    const ids = [...batchSelected];
+    if (ids.length === 0) return;
+    setBatchRunning(true);
+    batchCancelRef.current = false;
+    setBatchProgress({ processed: 0, total: ids.length });
+
+    const succeeded: string[] = [];
+    const failed: { id: string; rfqCode: string; error: string }[] = [];
+
+    for (let i = 0; i < ids.length; i++) {
+      if (batchCancelRef.current) break;
+      const rfqId = ids[i];
+      const rfqCode = pending.find((r) => r.id === rfqId)?.rfq_code ?? rfqId;
+      setBatchProgress({ processed: i, total: ids.length });
+
+      const outcome = await processOneRfq(rfqId);
+      if (outcome.ok) succeeded.push(rfqId);
+      else failed.push({ id: rfqId, rfqCode, error: outcome.error });
+      setBatchProgress({ processed: i + 1, total: ids.length });
+    }
+
+    setBatchRunning(false);
+    setBatchSelected(new Set());
+
+    const cancelled = batchCancelRef.current;
+    if (failed.length > 0) {
+      toast.warning(
+        `${failed.length} RFQ(s) failed to process: ${failed.map((f) => f.rfqCode).join(", ")}. ${succeeded.length} succeeded.`,
+        { duration: 12000 }
+      );
+    }
+    if (succeeded.length === 0) {
+      if (!cancelled) toast.error("None of the selected RFQs could be processed.");
+      return;
+    }
+
+    toast.success(
+      `${cancelled ? "Cancelled — " : ""}Completed ${succeeded.length} of ${ids.length}. Opening workspace…`
+    );
+    setTimeout(() => router.push(`/rfqs/workspace?ids=${succeeded.join(",")}`), 600);
+  }
+
+  function cancelBatch() {
+    batchCancelRef.current = true;
+    toast.info("Cancelling after the current RFQ finishes…");
   }
 
   /* ── Remove from dashboard — this is a local hide, never a Gmail action.
@@ -712,6 +785,21 @@ export default function InboxPage() {
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
             <div className="px-5 py-4 border-b border-border flex items-center justify-between">
               <div className="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
+                  checked={visiblePending.length > 0 && visiblePending.every((r) => batchSelected.has(r.id))}
+                  onChange={(e) => {
+                    setBatchSelected((prev) => {
+                      const next = new Set(prev);
+                      if (e.target.checked) visiblePending.forEach((r) => next.add(r.id));
+                      else visiblePending.forEach((r) => next.delete(r.id));
+                      return next;
+                    });
+                  }}
+                  title="Select all"
+                  disabled={batchRunning}
+                />
                 <div className="h-4 w-px bg-orange-400" />
                 <Sparkles className="w-3.5 h-3.5 text-orange-500" />
                 <span className="font-semibold text-card-foreground text-sm tracking-tight">
@@ -734,6 +822,19 @@ export default function InboxPage() {
                     labels[rfq.id] === "spam" && "opacity-60"
                   )}
                 >
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
+                    checked={batchSelected.has(rfq.id)}
+                    disabled={batchRunning || processing[rfq.id]}
+                    onChange={(e) => {
+                      setBatchSelected((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(rfq.id); else next.delete(rfq.id);
+                        return next;
+                      });
+                    }}
+                  />
                   {/* Content */}
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -894,6 +995,39 @@ export default function InboxPage() {
         )}
 
       </main>
+
+      {/* Floating batch action bar */}
+      {(batchSelected.size > 0 || batchRunning) && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-card border border-border shadow-2xl rounded-2xl px-5 py-3 flex items-center gap-4">
+          {batchRunning ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin text-[#1847F5]" />
+              <span className="text-sm font-medium text-card-foreground">
+                {batchProgress ? `Processing ${Math.min(batchProgress.processed + 1, batchProgress.total)} of ${batchProgress.total}…` : "Starting…"}
+              </span>
+              <Button size="sm" variant="outline" onClick={cancelBatch} className="h-8 text-xs">
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <>
+              <span className="text-sm font-medium text-card-foreground">
+                {batchSelected.size} RFQ{batchSelected.size > 1 ? "s" : ""} selected
+              </span>
+              <Button
+                size="sm"
+                onClick={handleBatchProcess}
+                className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full"
+              >
+                <Sparkles className="w-3 h-3" /> Process Selected ({batchSelected.size})
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setBatchSelected(new Set())} className="h-8 text-xs">
+                Clear Selection
+              </Button>
+            </>
+          )}
+        </div>
+      )}
     </>
   );
 }

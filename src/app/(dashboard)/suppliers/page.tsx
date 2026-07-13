@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Plus, Trash2, Users, Pencil, X, AlertTriangle, Check } from "lucide-react";
 import { toast } from "sonner";
+import { isValidWhatsappGroupLink } from "@/lib/whatsapp";
 
 const BUILT_IN_CATEGORIES = [
   "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
@@ -178,6 +179,10 @@ export default function SuppliersPage() {
 
   async function handleSave() {
     if (!form.name.trim()) return;
+    if (form.whatsapp_group_link.trim() && !isValidWhatsappGroupLink(form.whatsapp_group_link.trim())) {
+      toast.error("WhatsApp group link should look like https://chat.whatsapp.com/xxxxx");
+      return;
+    }
     setSaving(true);
     const { data: { user } } = await supabase.auth.getUser();
 
