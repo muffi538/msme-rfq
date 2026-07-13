@@ -22,10 +22,10 @@ export default async function DashboardPage() {
     { data: recentRfqs },
   ] = await Promise.all([
     // Total = only RFQs that have been processed (pending stay in inbox only)
-    supabase.from("rfqs").select("*", { count: "exact", head: true }).not("status", "in", "(pending,needs_processing)"),
-    supabase.from("rfqs").select("*", { count: "exact", head: true }).eq("status", "processed"),
-    supabase.from("outgoing_rfqs").select("*", { count: "exact", head: true }).eq("status", "sent"),
-    supabase.from("suppliers").select("*", { count: "exact", head: true }),
+    supabase.from("rfqs").select("*", { count: "exact", head: true }).eq("user_id", user.id).not("status", "in", "(pending,needs_processing)"),
+    supabase.from("rfqs").select("*", { count: "exact", head: true }).eq("user_id", user.id).eq("status", "processed"),
+    supabase.from("outgoing_rfqs").select("*", { count: "exact", head: true }).eq("user_id", user.id).eq("status", "sent"),
+    supabase.from("suppliers").select("*", { count: "exact", head: true }).eq("user_id", user.id),
     // Setup checklist state — drives the onboarding banner.
     // .limit(1) instead of .single() — a duplicate row for this user_id+key
     // would make .single() error out and look like "not connected".
@@ -36,16 +36,18 @@ export default async function DashboardPage() {
       .eq("key", "gmail_refresh_token")
       .order("created_at", { ascending: false })
       .limit(1),
-    supabase.from("suppliers").select("*", { count: "exact", head: true }),
+    supabase.from("suppliers").select("*", { count: "exact", head: true }).eq("user_id", user.id),
     supabase
       .from("rfqs")
       .select("*", { count: "exact", head: true })
+      .eq("user_id", user.id)
       .in("status", ["processed", "approved", "sent"]),
     // Recent RFQs widget — also excludes pending/needs_processing so unprocessed
     // emails don't leak out of the inbox into the main dashboard view
     supabase
       .from("rfqs")
       .select("id, rfq_code, buyer_name, status, priority, created_at")
+      .eq("user_id", user.id)
       .not("status", "in", "(pending,needs_processing)")
       .order("created_at", { ascending: false })
       .limit(5),

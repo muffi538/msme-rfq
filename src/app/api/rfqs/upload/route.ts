@@ -84,7 +84,7 @@ async function runUploadJob(
       return;
     }
 
-    const rfqCode = await generateRfqCode(supabase);
+    const rfqCode = await generateRfqCode(supabase, userId);
     const first = parsed[0];
     const { data: rfq, error: rfqError } = await supabase
       .from("rfqs")

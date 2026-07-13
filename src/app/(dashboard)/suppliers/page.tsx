@@ -77,12 +77,15 @@ export default function SuppliersPage() {
 
   useEffect(() => { fetchSuppliers(); fetchCustomCategories(); }, []);
 
-  // Custom categories are a shared company-wide taxonomy, not a personal
-  // preference — stored in company_settings so every user sees the same list.
+  // Custom categories are per-account, not shared with any other account —
+  // stored in user_settings, scoped to the calling user.
   async function fetchCustomCategories() {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
     const { data } = await supabase
-      .from("company_settings")
+      .from("user_settings")
       .select("value")
+      .eq("user_id", user.id)
       .eq("key", "custom_categories")
       .maybeSingle();
     if (data?.value) {
@@ -93,9 +96,9 @@ export default function SuppliersPage() {
   async function saveCustomCategories(next: string[]) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    const { error } = await supabase.from("company_settings").upsert(
-      { key: "custom_categories", value: JSON.stringify(next), updated_by: user.id },
-      { onConflict: "key" }
+    const { error } = await supabase.from("user_settings").upsert(
+      { user_id: user.id, key: "custom_categories", value: JSON.stringify(next) },
+      { onConflict: "user_id,key" }
     );
     if (error) {
       console.error("[suppliers] custom category save failed", error);
@@ -136,10 +139,9 @@ export default function SuppliersPage() {
 
   async function fetchSuppliers() {
     setLoading(true);
-    // Shared across every signed-in user at the company — always re-fetched
-    // fresh (no client cache), so edits/deletes from other users show up as
-    // soon as this page loads or refetches.
-    const { data } = await supabase.from("suppliers").select("*").order("name");
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { setLoading(false); return; }
+    const { data } = await supabase.from("suppliers").select("*").eq("user_id", user.id).order("name");
     setSuppliers(data ?? []);
     setLoading(false);
   }

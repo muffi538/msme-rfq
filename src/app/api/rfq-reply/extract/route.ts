@@ -128,8 +128,9 @@ export async function POST(request: NextRequest) {
   }
 
   const { data: settingRows } = await supabase
-    .from("company_settings")
+    .from("user_settings")
     .select("key, value")
+    .eq("user_id", user.id)
     .in("key", ["company_name", "buyer_reply_template"]);
   const companyName        = settingRows?.find((r) => r.key === "company_name")?.value         ?? "Procur.AI";
   const buyerReplyTemplate = settingRows?.find((r) => r.key === "buyer_reply_template")?.value ?? null;

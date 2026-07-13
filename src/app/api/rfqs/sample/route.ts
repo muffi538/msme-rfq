@@ -12,7 +12,7 @@ export async function POST() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
-  const rfqCode = await generateRfqCode(supabase);
+  const rfqCode = await generateRfqCode(supabase, user.id);
 
   const sampleText = `
 Subject: Quotation Required — Site Hardware Order

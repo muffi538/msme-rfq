@@ -56,17 +56,19 @@ export async function POST(
 
   if (!rfq || !items) return NextResponse.json({ error: "RFQ not found" }, { status: 404 });
 
-  // Load message template from shared company settings
+  // Load this user's own message template
   const { data: settingRows } = await supabase
-    .from("company_settings")
+    .from("user_settings")
     .select("key, value")
+    .eq("user_id", user.id)
     .eq("key", "message_template");
   const messageTemplate = settingRows?.[0]?.value ?? DEFAULT_TEMPLATE;
 
-  // Load all company suppliers
+  // Load this user's own suppliers
   const { data: suppliers } = await supabase
     .from("suppliers")
     .select("id, name, whatsapp_number, email, categories")
+    .eq("user_id", user.id)
     .eq("active", true);
 
   // Delete existing outgoing RFQs for this parent (re-split)
