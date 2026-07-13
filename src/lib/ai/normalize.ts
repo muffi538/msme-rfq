@@ -193,6 +193,58 @@ export class AiExtractionError extends Error {
 
 type RawExtractionResponse = { rfq_number?: unknown; supplier?: unknown; date?: unknown; items?: unknown[] };
 
+// Root-cause fix for "AI returned invalid JSON" / "response wasn't the
+// expected shape" on inputs that AREN'T truncated (ruled that out — this
+// schema is stricter than what response_format: json_object could ever
+// guarantee). json_object mode only guarantees *some* well-formed JSON; it
+// does not constrain WHICH shape, so the model is still free to omit
+// "items", nest it differently, or return a bare array despite the prompt
+// instructions — any of those already-valid-JSON deviations were
+// previously reaching JSON.parse() successfully and only failing at the
+// separate manual shape-validation step afterward, indistinguishable from
+// a genuine parse failure. OpenAI's Structured Outputs (json_schema,
+// strict: true) constrains the model's token-level generation itself, so
+// it is structurally incapable of producing anything but this exact
+// shape — eliminating this whole class of failure at the source instead
+// of reactively validating/repairing after the fact. Every field must be
+// listed in "required" per strict mode's rules (nullability is expressed
+// via a ["type","null"] union, not by omitting the key).
+const EXTRACTION_JSON_SCHEMA = {
+  name: "rfq_extraction",
+  strict: true,
+  schema: {
+    type: "object",
+    properties: {
+      rfq_number: { type: ["string", "null"] },
+      supplier:   { type: ["string", "null"] },
+      date:       { type: ["string", "null"] },
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            n:        { type: "integer" },
+            name:     { type: "string" },
+            qty:      { type: ["number", "null"] },
+            unit:     { type: ["string", "null"] },
+            brand:    { type: ["string", "null"] },
+            spec:     { type: ["string", "null"] },
+            part:     { type: ["string", "null"] },
+            delivery: { type: ["string", "null"] },
+            cat:      { type: "string", enum: [...CATEGORIES] },
+            conf:     { type: "number" },
+            file:     { type: "string" },
+          },
+          required: ["n", "name", "qty", "unit", "brand", "spec", "part", "delivery", "cat", "conf", "file"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["rfq_number", "supplier", "date", "items"],
+    additionalProperties: false,
+  },
+} as const;
+
 // Scans a JSON array's inner content and returns the source text of every
 // TOP-LEVEL object that closed cleanly, ignoring braces/brackets/commas
 // that appear inside string values (tracked via a proper in-string/escape
@@ -277,7 +329,11 @@ async function callAndParseOnce(labeled: string): Promise<{ data: RawExtractionR
         model: "gpt-4o-mini",
         temperature: 0,
         max_tokens: 8000, // bumped from 4000 — a large multi-file RFQ (many line items) could hit the old cap mid-object, producing truncated/invalid JSON
-        response_format: { type: "json_object" },
+        // json_schema + strict:true (Structured Outputs) instead of the
+        // weaker json_object mode — constrains generation itself so the
+        // model cannot produce a malformed or wrong-shaped response, not
+        // just "some valid JSON" that still needs shape-validating after.
+        response_format: { type: "json_schema", json_schema: EXTRACTION_JSON_SCHEMA },
         messages: [
           {
             role: "system",
