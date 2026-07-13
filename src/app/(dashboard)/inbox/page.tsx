@@ -216,6 +216,23 @@ export default function InboxPage() {
   const [gmailLoading, setGmailLoading] = useState(true);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const lastSyncedAtRef = useRef<string | null>(null);
+  const [onboardOpen,     setOnboardOpen]     = useState(false);
+  const [onboardDismissed, setOnboardDismissed] = useState(false);
+  const [onboarding,      setOnboarding]      = useState(false);
+  const [onboardProgress, setOnboardProgress] = useState<{ processed: number; total: number } | null>(null);
+  const [fetchMoreOpen,     setFetchMoreOpen]     = useState(false);
+  const [fetchingMore,      setFetchingMore]      = useState(false);
+  const [fetchMoreProgress, setFetchMoreProgress] = useState<{ processed: number; total: number } | null>(null);
+  const fetchMoreMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!fetchMoreOpen) return;
+    function handle(e: MouseEvent) {
+      if (fetchMoreMenuRef.current && !fetchMoreMenuRef.current.contains(e.target as Node)) setFetchMoreOpen(false);
+    }
+    document.addEventListener("mousedown", handle);
+    return () => document.removeEventListener("mousedown", handle);
+  }, [fetchMoreOpen]);
 
   useEffect(() => { loadAll(); loadLabels(); loadGmailStatus(); }, []);
 
@@ -228,14 +245,86 @@ export default function InboxPage() {
     try {
       const res = await fetch("/api/email/sync-status");
       if (!res.ok) return;
-      const data: { lastSyncedAt: string | null; connected: boolean } = await res.json();
+      const data: { lastSyncedAt: string | null; connected: boolean; onboarded: boolean } = await res.json();
       if (data.lastSyncedAt !== lastSyncedAtRef.current) {
         const isFirstLoad = lastSyncedAtRef.current === null;
         lastSyncedAtRef.current = data.lastSyncedAt;
         setLastSyncedAt(data.lastSyncedAt);
         if (!isFirstLoad) loadPending();
       }
+      // Connected but hasn't picked an import size yet (first connect, or
+      // they reloaded before answering) — auto-sync stays off until they
+      // do, so surface the picker instead of silently doing nothing.
+      if (data.connected && !data.onboarded && !onboardDismissed) setOnboardOpen(true);
     } catch { /* best-effort — next poll will retry */ }
+  }
+
+  /* ── First-connect onboarding: how much history to import ─ */
+  async function handleOnboard(count: 0 | 25 | 50 | 100) {
+    setOnboarding(true);
+    setOnboardProgress(null);
+    try {
+      const res  = await fetch("/api/email/onboard", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ count }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Import failed");
+
+      const result = await pollJob<
+        { processed: number; total: number },
+        { created: number; fetched: number; deduped: number; insertFailed: number }
+      >(json.jobId, setOnboardProgress, unmountControllerRef.current.signal);
+
+      if (count === 0) toast.success("Auto-sync is on — new mail will import automatically.");
+      else if (result.created > 0) toast.success(`Imported ${result.created} email${result.created > 1 ? "s" : ""}. Auto-sync is now on.`);
+      else toast.info("No importable emails found — auto-sync is now on.");
+
+      setOnboardOpen(false);
+      await loadAll();
+      pollSyncStatus();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Something went wrong";
+      toast.error(msg);
+    } finally {
+      setOnboarding(false);
+      setOnboardProgress(null);
+    }
+  }
+
+  /* ── "Fetch More History" — on-demand backfill, separate from the
+     regular incremental sync cursor ─────────────────────────── */
+  async function handleFetchMore(mode: "50" | "100" | "30days") {
+    setFetchMoreOpen(false);
+    setFetchingMore(true);
+    setFetchMoreProgress(null);
+    try {
+      const res  = await fetch("/api/email/fetch-more", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Fetch failed");
+
+      const result = await pollJob<
+        { processed: number; total: number },
+        { created: number; fetched: number; deduped: number; insertFailed: number }
+      >(json.jobId, setFetchMoreProgress, unmountControllerRef.current.signal);
+
+      if (result.created > 0) toast.success(`Imported ${result.created} older email${result.created > 1 ? "s" : ""}.`);
+      else toast.info("No new emails found in that range — everything was already imported.");
+
+      await loadAll();
+      pollSyncStatus();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Something went wrong";
+      toast.error(msg);
+    } finally {
+      setFetchingMore(false);
+      setFetchMoreProgress(null);
+    }
   }
 
   useEffect(() => {
@@ -844,18 +933,44 @@ export default function InboxPage() {
             </a>
           )}
 
-          {/* Connected — show fetch button */}
+          {/* Connected — show fetch button + fetch-more-history dropdown */}
           {!gmailLoading && gmailEmail && (
-            <Button onClick={handleFetch} disabled={fetching}
-              className="w-full h-11 bg-[#1847F5] hover:bg-[#0f35d4] text-white font-semibold gap-2 rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.35)]">
-              {fetching
-                ? <><Loader2 className="w-4 h-4 animate-spin" />
-                    {fetchProgress && fetchProgress.total > 0
-                      ? `Processing ${fetchProgress.processed} of ${fetchProgress.total}…`
-                      : "Scanning Gmail…"}
-                  </>
-                : <><Mail className="w-4 h-4" />Fetch Now</>}
-            </Button>
+            <div className="flex gap-2">
+              <Button onClick={handleFetch} disabled={fetching}
+                className="flex-1 h-11 bg-[#1847F5] hover:bg-[#0f35d4] text-white font-semibold gap-2 rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.35)]">
+                {fetching
+                  ? <><Loader2 className="w-4 h-4 animate-spin" />
+                      {fetchProgress && fetchProgress.total > 0
+                        ? `Processing ${fetchProgress.processed} of ${fetchProgress.total}…`
+                        : "Scanning Gmail…"}
+                    </>
+                  : <><Mail className="w-4 h-4" />Fetch Now</>}
+              </Button>
+
+              <div className="relative" ref={fetchMoreMenuRef}>
+                <Button
+                  variant="outline"
+                  onClick={() => setFetchMoreOpen((o) => !o)}
+                  disabled={fetchingMore}
+                  className="h-11 rounded-full px-4 gap-1.5 whitespace-nowrap"
+                >
+                  {fetchingMore
+                    ? <><Loader2 className="w-4 h-4 animate-spin" />
+                        {fetchMoreProgress && fetchMoreProgress.total > 0
+                          ? `${fetchMoreProgress.processed}/${fetchMoreProgress.total}…`
+                          : "Fetching…"}
+                      </>
+                    : <>Fetch More History <ChevronDown className="w-3.5 h-3.5" /></>}
+                </Button>
+                {fetchMoreOpen && (
+                  <div className="absolute right-0 top-full mt-1.5 bg-card border border-border rounded-xl shadow-xl p-1.5 w-44 z-50">
+                    <button onClick={() => handleFetchMore("50")} className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-muted transition-colors">Last 50</button>
+                    <button onClick={() => handleFetchMore("100")} className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-muted transition-colors">Last 100</button>
+                    <button onClick={() => handleFetchMore("30days")} className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-muted transition-colors">Last 30 Days</button>
+                  </div>
+                )}
+              </div>
+            </div>
           )}
 
           {fetchError && (
@@ -1331,6 +1446,49 @@ export default function InboxPage() {
                 Cancel
               </Button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* First-connect onboarding: pick how much history to import */}
+      {onboardOpen && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-card border border-border rounded-2xl shadow-xl p-6 max-w-sm w-full space-y-4 relative">
+            {!onboarding && (
+              <button
+                onClick={() => { setOnboardOpen(false); setOnboardDismissed(true); }}
+                aria-label="Close"
+                className="absolute top-4 right-4 text-muted-foreground hover:text-foreground"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+            <div className="flex items-center gap-3 pr-6">
+              <div className="w-10 h-10 bg-[#1847F5]/8 rounded-full flex items-center justify-center flex-shrink-0">
+                <Mail className="w-5 h-5 text-[#1847F5]" />
+              </div>
+              <div>
+                <p className="font-semibold text-card-foreground">Import your past RFQ emails?</p>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  Choose how many recent emails to pull in now. After this, new mail imports automatically every couple of minutes.
+                </p>
+              </div>
+            </div>
+
+            {onboarding ? (
+              <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                {onboardProgress && onboardProgress.total > 0
+                  ? `Importing ${onboardProgress.processed} of ${onboardProgress.total}…`
+                  : "Importing…"}
+              </div>
+            ) : (
+              <div className="grid grid-cols-3 gap-2">
+                <Button variant="outline" onClick={() => handleOnboard(25)} className="rounded-full">Last 25</Button>
+                <Button variant="outline" onClick={() => handleOnboard(50)} className="rounded-full">Last 50</Button>
+                <Button variant="outline" onClick={() => handleOnboard(100)} className="rounded-full">Last 100</Button>
+              </div>
+            )}
           </div>
         </div>
       )}
