@@ -1,5 +1,6 @@
 import { withRetry } from "@/lib/retry";
 import { logError } from "@/lib/logError";
+import { mapWithConcurrency } from "@/lib/concurrency";
 
 export type RawItem = {
   line_number: number;
@@ -262,25 +263,29 @@ function tryRepairTruncatedJson(content: string): RawExtractionResponse | null {
 }
 
 async function callAndParseOnce(labeled: string): Promise<{ data: RawExtractionResponse; truncated: boolean }> {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      max_tokens: 8000, // bumped from 4000 — a large multi-file RFQ (many line items) could hit the old cap mid-object, producing truncated/invalid JSON
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: "You are a procurement assistant. Multiple source files (possibly duplicating each other) describe ONE request for quotation. Extract RFQ-level metadata plus every line item and return ONLY valid JSON.",
-        },
-        {
-          role: "user",
-          content: `Return JSON:
+  const callStartedAt = Date.now();
+  console.log(`[normalize] START AI chars=${labeled.length}`);
+  let res: Response;
+  try {
+    res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        max_tokens: 8000, // bumped from 4000 — a large multi-file RFQ (many line items) could hit the old cap mid-object, producing truncated/invalid JSON
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: "You are a procurement assistant. Multiple source files (possibly duplicating each other) describe ONE request for quotation. Extract RFQ-level metadata plus every line item and return ONLY valid JSON.",
+          },
+          {
+            role: "user",
+            content: `Return JSON:
 {"rfq_number": "..." or null, "supplier": "..." or null, "date": "..." or null,
  "items": [{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"part":null,"delivery":null,"cat":"POWER_TOOLS","conf":0.9,"file":"exact FILE name this item came from"},...]}
 
@@ -292,22 +297,27 @@ Rules: skip headers/totals/page numbers. If the same item is described in more t
 
 SOURCE FILES:
 ${labeled}`,
-        },
-      ],
-    }),
-    // Was tightened to 20s to keep a 3-attempt budget safely inside
-    // JOB_DEADLINE_MS — found (via a real production failure, RFQ-0035:
-    // process_error = "The operation was aborted due to timeout") to be
-    // too tight for a legitimately larger multi-file RFQ, where
-    // gpt-4o-mini genuinely needs more than 20s to generate a full
-    // response at max_tokens: 8000. Raised back up; JOB_DEADLINE_MS in the
-    // process route was raised alongside it to keep the worst case
-    // (3 attempts) safely inside the job's shared deadline.
-    signal: AbortSignal.timeout(30000),
-  });
+          },
+        ],
+      }),
+      // Chunking (see chunkLabeledText below) keeps any single call's
+      // expected output small, so this budget is now sized for a normal
+      // chunk-sized response rather than a whole large RFQ at once.
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch (err) {
+    // Covers AbortSignal.timeout() firing (a bare DOMException, not an
+    // HTTP response) and genuine network failures (DNS, connection reset)
+    // — neither reaches the res.ok check below, so without this the
+    // duration/size context would be lost the moment this throws.
+    const name = err instanceof Error ? err.name : "Error";
+    console.log(`[normalize] AI FAILED (${name}) chars=${labeled.length} after ${Date.now() - callStartedAt}ms`);
+    throw err;
+  }
 
   if (!res.ok) {
     const body = await res.text();
+    console.log(`[normalize] AI FAILED chars=${labeled.length} status=${res.status} after ${Date.now() - callStartedAt}ms`);
     if (res.status === 429 || res.status >= 500) throw new OpenAiError(body, res.status);
     // Non-retryable — surface immediately instead of burning retries.
     throw Object.assign(new Error(`OpenAI error: ${body}`), { nonRetryable: true });
@@ -323,6 +333,7 @@ ${labeled}`,
   // path below and the truncation warning surfaced to the user are both
   // acting on a confirmed cause, not a guess.
   const truncatedByModel = choice?.finish_reason === "length";
+  console.log(`[normalize] AI COMPLETE chars_in=${labeled.length} chars_out=${content.length} truncated=${truncatedByModel} in ${Date.now() - callStartedAt}ms`);
 
   let parsed: unknown;
   try {
@@ -370,72 +381,151 @@ ${labeled}`,
   return { data: obj, truncated: truncatedByModel };
 }
 
-export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean }> {
-  const labeled = files
-    .map((f) => `--- FILE: ${f.fileName} ---\n${f.text}`)
-    .join("\n\n")
-    .slice(0, MAX_COMBINED_CHARS);
+const CHUNK_CHAR_LIMIT = 6000; // per-AI-call cap — keeps each call's expected item count (and output tokens) small enough to generate comfortably inside one attempt's timeout. This is what actually bounds latency for a large RFQ, not a bigger timeout number: a single call asked to extract everything from a big multi-file RFQ has to generate a proportionally huge JSON response, and token generation time scales with how much the model actually has to write.
+const CHUNK_CONCURRENCY = 3; // parallel AI calls per RFQ — bounded so a many-chunk RFQ doesn't fire dozens of simultaneous OpenAI requests
 
-  const { data: parsed, truncated } = await withRetry(
-    () => callAndParseOnce(labeled),
-    {
-      // Worst case here (every attempt times out) is 3 * 30s = 90s — this
-      // single call already eats a large share of the process route's
-      // overall time budget (see JOB_DEADLINE_MS there, raised to 110s
-      // alongside this), so it can't afford an unbounded retry budget on
-      // top of that. The caller does NOT
-      // double-wrap this in another retry — an earlier version did, and
-      // that compounding could exceed the route's maxDuration and get the
-      // serverless function killed mid-flight, leaving the job stuck
-      // "processing" forever with no terminal status ever written. This
-      // budget alone must stay safe.
-      retries: 2,
-      label: "RFQ item extraction",
-      // Retry OpenAI's own transient failures (429/5xx), genuine network
-      // errors (timeouts, connection resets), and invalid/malformed JSON
-      // (a fresh generation often doesn't truncate at the same point) —
-      // everything except the explicitly-tagged non-retryable 4xx case,
-      // which fails the same way every time.
-      isRetryable: (err) => !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
+// Splits the source text into per-call chunks small enough that no single
+// AI call has to generate a huge JSON response. File boundaries are kept
+// intact where possible (each chunk holds one or more WHOLE files) so the
+// "file" field the model echoes back stays accurate; only a genuinely
+// oversized single file is further sub-split by raw character count. Total
+// content is still capped at MAX_COMBINED_CHARS, same bound as before —
+// this only changes HOW that budget is sent to the AI (parallel small
+// calls instead of one large serial one), not how much content is used.
+function chunkLabeledFiles(files: MultiFileInput[]): string[] {
+  const chunks: string[] = [];
+  let current = "";
+  let usedChars = 0;
+  for (const f of files) {
+    if (usedChars >= MAX_COMBINED_CHARS) break;
+    const labeled = `--- FILE: ${f.fileName} ---\n${f.text}`.slice(0, MAX_COMBINED_CHARS - usedChars);
+    if (labeled.length === 0) break;
+
+    if (labeled.length > CHUNK_CHAR_LIMIT) {
+      if (current) { chunks.push(current); current = ""; }
+      for (let i = 0; i < labeled.length; i += CHUNK_CHAR_LIMIT) chunks.push(labeled.slice(i, i + CHUNK_CHAR_LIMIT));
+      usedChars += labeled.length;
+      continue;
     }
-  ).catch((err) => {
-    // Never let a raw OpenAI error body or internal exception detail reach
-    // an end user — only AiExtractionError's generic `message` is safe for
-    // that; everything technical goes to `detail`, which callers must log,
-    // not display.
-    if (err instanceof OpenAiError) {
-      logError("[normalize] OpenAI API error", { status: err.status, body: err.message.slice(0, 2000) });
-      throw new AiExtractionError(
-        "The AI service is temporarily unavailable. Please try again in a few minutes.",
-        `OpenAI error (status ${err.status}): ${err.message}`
-      );
+    const sepLen = current ? 2 : 0;
+    if (current && current.length + sepLen + labeled.length > CHUNK_CHAR_LIMIT) {
+      chunks.push(current);
+      current = labeled;
+      usedChars += labeled.length;
+    } else {
+      current = current ? `${current}\n\n${labeled}` : labeled;
+      usedChars += sepLen + labeled.length;
     }
-    if (err instanceof InvalidAiJsonError) {
-      throw new AiExtractionError(
-        "We couldn't reliably read this document — please try again, or upload the file manually.",
-        err.message
-      );
-    }
-    // Catch-all for everything else that can come out of fetch() — most
-    // notably AbortSignal.timeout() firing, which rejects with a bare
-    // DOMException (name: "TimeoutError", message: "The operation was
-    // aborted due to timeout") that matches neither OpenAiError nor
-    // InvalidAiJsonError above and was found leaking straight into a
-    // user-facing RFQ's process_error column uncaught. Network errors
-    // (DNS failure, connection reset, etc.) land here too. Nothing past
-    // this point should ever reach a caller unsanitized.
-    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    throw new AiExtractionError(
-      "The AI request took too long or the connection was unreliable. Please try again.",
-      detail
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+// Sanitizes any error from a single chunk's extraction attempt into a safe
+// public message + a logged technical detail — shared between the
+// per-chunk fault-isolation path below (one bad chunk can't take the
+// others down) and, if every chunk ultimately fails, the final thrown
+// error the caller sees.
+function sanitizeAiError(err: unknown): AiExtractionError {
+  if (err instanceof OpenAiError) {
+    logError("[normalize] OpenAI API error", { status: err.status, body: err.message.slice(0, 2000) });
+    return new AiExtractionError(
+      "The AI service is temporarily unavailable. Please try again in a few minutes.",
+      `OpenAI error (status ${err.status}): ${err.message}`
     );
-  });
+  }
+  if (err instanceof InvalidAiJsonError) {
+    return new AiExtractionError(
+      "We couldn't reliably read this document — please try again, or upload the file manually.",
+      err.message
+    );
+  }
+  // Catch-all for everything else that can come out of fetch() — most
+  // notably AbortSignal.timeout() firing, which rejects with a bare
+  // DOMException (name: "TimeoutError", message: "The operation was
+  // aborted due to timeout") that matches neither OpenAiError nor
+  // InvalidAiJsonError above and was found leaking straight into a
+  // user-facing RFQ's process_error column uncaught. Network errors (DNS
+  // failure, connection reset, etc.) land here too. Nothing past this
+  // point should ever reach a caller unsanitized.
+  const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  return new AiExtractionError(
+    "The AI request took too long or the connection was unreliable. Please try again.",
+    detail
+  );
+}
 
+type ChunkOutcome = { data: RawExtractionResponse; truncated: boolean; failed: false } | { data: null; truncated: false; failed: true };
+
+async function runChunk(labeled: string): Promise<ChunkOutcome> {
+  try {
+    const { data, truncated } = await withRetry(
+      () => callAndParseOnce(labeled),
+      {
+        // Worst case here (every attempt times out) is 3 * 30s = 90s — a
+        // single chunk's call already eats a large share of the process
+        // route's overall time budget (see JOB_DEADLINE_MS there), so it
+        // can't afford an unbounded retry budget on top of that. Callers
+        // do NOT double-wrap this in another retry — an earlier version
+        // did, and that compounding could exceed the route's maxDuration
+        // and get the serverless function killed mid-flight, leaving the
+        // job stuck "processing" forever with no terminal status ever
+        // written. This budget alone must stay safe.
+        retries: 2,
+        label: "RFQ item extraction chunk",
+        // Retry OpenAI's own transient failures (429/5xx), genuine network
+        // errors (timeouts, connection resets), and invalid/malformed JSON
+        // (a fresh generation often doesn't truncate at the same point) —
+        // everything except the explicitly-tagged non-retryable 4xx case,
+        // which fails the same way every time.
+        isRetryable: (err) => !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
+      }
+    );
+    return { data, truncated, failed: false };
+  } catch (err) {
+    // One chunk failing (after its own retries) must never take the whole
+    // RFQ down with it — same fault-isolation principle as one bad
+    // attachment never freezing the whole RFQ. Log it (sanitized detail,
+    // not raw) and let the caller salvage whatever the OTHER chunks
+    // recovered; only if every chunk fails does the RFQ actually fail.
+    const sanitized = sanitizeAiError(err);
+    logError("[normalize] one extraction chunk failed (continuing with the rest)", sanitized.detail);
+    return { data: null, truncated: false, failed: true };
+  }
+}
+
+export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean }> {
+  const chunks = chunkLabeledFiles(files);
+  console.log(`[normalize] split ${files.length} file(s) into ${chunks.length} AI extraction chunk(s)`);
+
+  const results = await mapWithConcurrency(chunks, CHUNK_CONCURRENCY, runChunk);
+  const succeeded = results.filter((r): r is ChunkOutcome & { failed: false } => !r.failed);
+
+  if (succeeded.length === 0) {
+    throw new AiExtractionError(
+      "We couldn't reliably read this document — please try again, or upload the file manually.",
+      `All ${chunks.length} extraction chunk(s) failed`
+    );
+  }
+
+  // A chunk that failed outright is treated the same as a truncated one
+  // for warning purposes — either way, some items may be missing from
+  // what was actually in the source document.
+  const truncated = results.some((r) => r.failed || r.truncated);
+
+  // Merge header metadata from whichever chunk actually has it — these
+  // fields describe the RFQ as a whole, so the first chunk with a
+  // non-null value for each wins rather than only trusting one chunk.
   const meta: RfqMeta = {
-    source_rfq_number: parsed.rfq_number ? String(parsed.rfq_number) : null,
-    buyer_name:        parsed.supplier   ? String(parsed.supplier)   : null,
-    source_date:       parsed.date       ? String(parsed.date)       : null,
+    source_rfq_number: null,
+    buyer_name:        null,
+    source_date:       null,
   };
+  for (const r of succeeded) {
+    if (meta.source_rfq_number === null && r.data.rfq_number) meta.source_rfq_number = String(r.data.rfq_number);
+    if (meta.buyer_name        === null && r.data.supplier)   meta.buyer_name        = String(r.data.supplier);
+    if (meta.source_date       === null && r.data.date)       meta.source_date       = String(r.data.date);
+  }
 
   // The model is asked to echo the exact FILE label back, but LLMs
   // paraphrase — resolve to a known filename by substring match either
@@ -450,33 +540,41 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
     return match ? [match] : [];
   }
 
-  const raw = parsed.items ?? [];
-  const items: MergedItem[] = (raw as Record<string, unknown>[]).map((item, i) => {
-    const conf = Number(item.conf ?? 0.8);
-    const warnings: string[] = [];
-    if (!item.name) warnings.push("Item name could not be confidently extracted.");
-    if (item.qty == null) warnings.push("Quantity was not found — please confirm with the source document.");
-    if (conf < 0.6) warnings.push("Low overall extraction confidence — please double-check this row.");
+  // A running counter across ALL chunks (not reset per chunk) — using a
+  // per-chunk index as the line_number fallback would produce duplicate
+  // line numbers across chunks whenever the model didn't supply "n"
+  // itself.
+  let globalIndex = 0;
+  const items: MergedItem[] = succeeded.flatMap((r) => {
+    const raw = r.data.items ?? [];
+    return (raw as Record<string, unknown>[]).map((item) => {
+      const i = globalIndex++;
+      const conf = Number(item.conf ?? 0.8);
+      const warnings: string[] = [];
+      if (!item.name) warnings.push("Item name could not be confidently extracted.");
+      if (item.qty == null) warnings.push("Quantity was not found — please confirm with the source document.");
+      if (conf < 0.6) warnings.push("Low overall extraction confidence — please double-check this row.");
 
-    return {
-      line_number:         Number(item.n ?? item.line_number ?? i + 1),
-      raw_text:            String(item.name ?? ""),
-      name:                String(item.name ?? ""),
-      qty:                 item.qty != null ? Number(item.qty) : null,
-      unit:                item.unit ? String(item.unit) : null,
-      brand:               item.brand ? String(item.brand) : null,
-      spec:                item.spec ? String(item.spec) : null,
-      notes:               null,
-      part_number:         item.part ? String(item.part) : null,
-      delivery_details:    item.delivery ? String(item.delivery) : null,
-      category:            (CATEGORIES.includes(item.cat as Category) ? item.cat : "GENERAL_HARDWARE") as Category,
-      category_source:     "llm" as const,
-      category_confidence: Number(item.conf ?? 0.8),
-      confidence:          conf,
-      source_files:        resolveSourceFile(item.file),
-      warnings,
-      merged_from_count:   1,
-    };
+      return {
+        line_number:         Number(item.n ?? item.line_number ?? i + 1),
+        raw_text:            String(item.name ?? ""),
+        name:                String(item.name ?? ""),
+        qty:                 item.qty != null ? Number(item.qty) : null,
+        unit:                item.unit ? String(item.unit) : null,
+        brand:               item.brand ? String(item.brand) : null,
+        spec:                item.spec ? String(item.spec) : null,
+        notes:               null,
+        part_number:         item.part ? String(item.part) : null,
+        delivery_details:    item.delivery ? String(item.delivery) : null,
+        category:            (CATEGORIES.includes(item.cat as Category) ? item.cat : "GENERAL_HARDWARE") as Category,
+        category_source:     "llm" as const,
+        category_confidence: Number(item.conf ?? 0.8),
+        confidence:          conf,
+        source_files:        resolveSourceFile(item.file),
+        warnings,
+        merged_from_count:   1,
+      };
+    });
   }).filter((item) => item.name.trim().length > 0);
 
   return { meta, items: dedupeItems(items), truncated };
