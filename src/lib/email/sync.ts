@@ -5,7 +5,7 @@
 // one createGmailSession per call so the OAuth token is only exchanged once.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logError } from "@/lib/logError";
-import { createGmailSession, type FetchedEmail, type GmailSession } from "@/lib/email/gmail";
+import { createGmailSession, GmailApiError, type FetchedEmail, type GmailSession } from "@/lib/email/gmail";
 import { detectFileType } from "@/lib/parsers/parseFile";
 import { generateRfqCode } from "@/lib/rfq";
 import { withRetry } from "@/lib/retry";
@@ -20,7 +20,26 @@ export type SyncResult = {
   results: { rfqCode: string; subject: string; from: string; hasAttachment: boolean }[];
   usedFallback: boolean;
   needsOnboarding?: boolean;
+  needsReconnect?: boolean;
 };
+
+const GMAIL_NEEDS_RECONNECT_KEY = "gmail_needs_reconnect";
+
+// A "disconnected"/"permission_revoked" GmailApiError means no amount of
+// retrying will ever succeed until the user goes through OAuth again — so
+// this flag is what lets the cron stop wasting cycles hitting a known-dead
+// connection every 2 minutes, and what lets the UI show a persistent
+// "Reconnect Gmail" prompt instead of a one-off toast that disappears.
+// Cleared automatically the moment a sync actually succeeds again (either
+// because the user reconnected, or the failure turns out to have been
+// transient after all) — see the OAuth callback route for the other place
+// it's cleared, right after a fresh successful connect.
+async function markGmailAuthOutcome(supabase: SupabaseClient, userId: string, err: unknown): Promise<never> {
+  if (err instanceof GmailApiError && (err.kind === "disconnected" || err.kind === "permission_revoked")) {
+    await saveSettings(supabase, userId, [{ key: GMAIL_NEEDS_RECONNECT_KEY, value: "true" }]);
+  }
+  throw err;
+}
 
 const UNIQUE_VIOLATION = "23505";
 const EMPTY: Omit<SyncResult, "usedFallback"> = {
@@ -267,6 +286,15 @@ export async function syncGmailForUser(
 ): Promise<SyncResult> {
   const { onProgress, isManual = false } = opts;
 
+  const needsReconnect = (await getSetting(supabase, userId, GMAIL_NEEDS_RECONNECT_KEY)) === "true";
+  if (needsReconnect && !isManual) {
+    // Known-dead connection (refresh token revoked/expired, or permission
+    // pulled) — don't burn a cron cycle hitting the Gmail API again with
+    // credentials that will fail identically every time. Only a fresh OAuth
+    // reconnect, or an explicit manual retry, gets past this.
+    return { ...EMPTY, usedFallback: false, needsReconnect: true };
+  }
+
   const onboarded = (await getSetting(supabase, userId, "gmail_onboarded")) === "true";
   if (!onboarded && !isManual) {
     // Background cron shouldn't silently import anything before the user
@@ -275,6 +303,26 @@ export async function syncGmailForUser(
     return { ...EMPTY, usedFallback: false, needsOnboarding: true };
   }
 
+  try {
+    const result = await syncGmailForUserInner(supabase, userId, refreshToken, onProgress);
+    // A manual retry that actually succeeds proves the connection works
+    // again — clear the stale flag instead of leaving a "Reconnect Gmail"
+    // prompt showing after the problem is already resolved.
+    if (needsReconnect) {
+      await supabase.from("user_settings").delete().eq("user_id", userId).eq("key", GMAIL_NEEDS_RECONNECT_KEY);
+    }
+    return result;
+  } catch (err) {
+    return markGmailAuthOutcome(supabase, userId, err);
+  }
+}
+
+async function syncGmailForUserInner(
+  supabase: SupabaseClient,
+  userId: string,
+  refreshToken: string,
+  onProgress?: (processed: number, total: number) => void
+): Promise<SyncResult> {
   const session = await createGmailSession(refreshToken);
   const lastHistoryId = await getSetting(supabase, userId, "gmail_last_history_id");
 
@@ -315,8 +363,13 @@ export async function syncGmailForUser(
         checkpointed = true;
       }
     } catch (err) {
-      // Transient History API failure — fall back to a full scan rather
-      // than losing this sync cycle entirely.
+      // A permanently-dead token (disconnected/permission_revoked) will
+      // fail the fallback scan below identically — don't waste a second
+      // Gmail API round trip finding that out again, just surface it now.
+      if (err instanceof GmailApiError && !err.retryable) throw err;
+      // Anything else (rate limit, network blip, unexpected error) is
+      // worth trying the fallback scan for rather than losing this sync
+      // cycle entirely.
       logError("[gmail-sync] history lookup failed, falling back", err);
     }
   }
@@ -371,12 +424,15 @@ export async function bootstrapGmailSync(
   count: 0 | 25 | 50 | 100,
   onProgress?: (processed: number, total: number) => void
 ): Promise<SyncResult> {
-  const session = await createGmailSession(refreshToken);
-
-  const ids = count > 0 ? await session.listMessageIds("in:inbox", { maxResults: count }) : [];
-  const imported = await fetchAndImport(supabase, userId, session, ids, onProgress);
-  await checkpoint(supabase, userId, session, true);
-  return { ...imported, usedFallback: false };
+  try {
+    const session = await createGmailSession(refreshToken);
+    const ids = count > 0 ? await session.listMessageIds("in:inbox", { maxResults: count }) : [];
+    const imported = await fetchAndImport(supabase, userId, session, ids, onProgress);
+    await checkpoint(supabase, userId, session, true);
+    return { ...imported, usedFallback: false };
+  } catch (err) {
+    return markGmailAuthOutcome(supabase, userId, err);
+  }
 }
 
 export type FetchMoreMode = "50" | "100" | "30days";
@@ -392,30 +448,34 @@ export async function fetchMoreHistory(
   mode: FetchMoreMode,
   onProgress?: (processed: number, total: number) => void
 ): Promise<SyncResult> {
-  const session = await createGmailSession(refreshToken);
+  try {
+    const session = await createGmailSession(refreshToken);
 
-  let query = "in:inbox";
-  let maxResults = 50;
-  let maxPages = 1;
-  if (mode === "100") {
-    maxResults = 100;
-    maxPages = 1;
-  } else if (mode === "30days") {
-    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const y = since.getFullYear();
-    const m = String(since.getMonth() + 1).padStart(2, "0");
-    const d = String(since.getDate()).padStart(2, "0");
-    query = `in:inbox after:${y}/${m}/${d}`;
-    maxResults = 300; // bounded — a runaway 30-day backfill on a busy inbox shouldn't take down the request
-    maxPages = 3;
+    let query = "in:inbox";
+    let maxResults = 50;
+    let maxPages = 1;
+    if (mode === "100") {
+      maxResults = 100;
+      maxPages = 1;
+    } else if (mode === "30days") {
+      const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const y = since.getFullYear();
+      const m = String(since.getMonth() + 1).padStart(2, "0");
+      const d = String(since.getDate()).padStart(2, "0");
+      query = `in:inbox after:${y}/${m}/${d}`;
+      maxResults = 300; // bounded — a runaway 30-day backfill on a busy inbox shouldn't take down the request
+      maxPages = 3;
+    }
+
+    const ids = await session.listMessageIds(query, { maxResults, maxPages });
+    const imported = await fetchAndImport(supabase, userId, session, ids, onProgress);
+
+    // Still worth bumping last_synced_at — this was a real sync from the
+    // user's point of view — but the historyId checkpoint stays untouched.
+    await saveSettings(supabase, userId, [{ key: "gmail_last_synced_at", value: new Date().toISOString() }]);
+
+    return { ...imported, usedFallback: false };
+  } catch (err) {
+    return markGmailAuthOutcome(supabase, userId, err);
   }
-
-  const ids = await session.listMessageIds(query, { maxResults, maxPages });
-  const imported = await fetchAndImport(supabase, userId, session, ids, onProgress);
-
-  // Still worth bumping last_synced_at — this was a real sync from the
-  // user's point of view — but the historyId checkpoint stays untouched.
-  await saveSettings(supabase, userId, [{ key: "gmail_last_synced_at", value: new Date().toISOString() }]);
-
-  return { ...imported, usedFallback: false };
 }

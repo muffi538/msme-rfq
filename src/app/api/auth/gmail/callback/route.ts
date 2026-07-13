@@ -15,6 +15,14 @@ function fail(origin: string, code: string, detail?: string) {
 
 type HealthCheckResult = { ok: true } | { ok: false; step: string; detail: string };
 
+// gmail.ts tags classified errors with a bracketed kind prefix (e.g.
+// "[disconnected] ..."); the health check's own `step` field already says
+// which check failed, so strip the redundant bracket for a cleaner detail
+// string here.
+function stripErrorTag(message: string): string {
+  return message.replace(/^\[\w+\]\s*/, "");
+}
+
 // Runs once, right after a Gmail account is connected — every step a real
 // sync will later depend on, exercised up front instead of waiting for the
 // first automatic sync (or worse, the user's first "Process it" click) to
@@ -30,7 +38,7 @@ async function runGmailHealthCheck(supabase: SupabaseClient, userId: string, ref
     session = await createGmailSession(refreshToken);
     await session.getProfile();
   } catch (err) {
-    return { ok: false, step: "gmail_api", detail: err instanceof Error ? err.message : "Could not reach the Gmail API with this account's token." };
+    return { ok: false, step: "gmail_api", detail: err instanceof Error ? stripErrorTag(err.message) : "Could not reach the Gmail API with this account's token." };
   }
 
   // 3: read permission + message/attachment access — list+fetch one real
@@ -39,7 +47,7 @@ async function runGmailHealthCheck(supabase: SupabaseClient, userId: string, ref
     const ids = await session.listMessageIds("in:inbox", { maxResults: 1 });
     if (ids.length > 0) await session.fetchMessages(ids);
   } catch (err) {
-    return { ok: false, step: "gmail_read", detail: err instanceof Error ? err.message : "Could not read messages from this Gmail account." };
+    return { ok: false, step: "gmail_read", detail: err instanceof Error ? stripErrorTag(err.message) : "Could not read messages from this Gmail account." };
   }
 
   // 4: DB write/read — read back the credentials just written, under this
@@ -173,6 +181,10 @@ export async function GET(request: NextRequest) {
     logError("[gmail-oauth] health check failed, rolled back credentials", health);
     return fail(origin, `health_check_failed_${health.step}`, health.detail);
   }
+
+  // Fresh, validated credentials — any earlier "needs reconnect" flag from
+  // a prior dead connection no longer applies.
+  await supabase.from("user_settings").delete().eq("user_id", user.id).eq("key", "gmail_needs_reconnect");
 
   console.log("[gmail-oauth] success", { userId: user.id, email: profile.email });
   return NextResponse.redirect(`${origin}/inbox?gmail_connected=1`);

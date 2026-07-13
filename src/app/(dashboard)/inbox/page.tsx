@@ -14,6 +14,7 @@ import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 import { pollJob } from "@/lib/pollJob";
 import { mapWithConcurrency } from "@/lib/concurrency";
+import { apiFetch } from "@/lib/apiFetch";
 
 /* ── Types ─────────────────────────────────────────────── */
 type FetchResult = { rfqCode: string; subject: string; from: string; hasAttachment: boolean };
@@ -62,6 +63,18 @@ function fmtEta(seconds: number): string {
   if (seconds < 60) return `~${seconds}s left`;
   const mins = Math.round(seconds / 60);
   return `~${mins}m left`;
+}
+
+// Backend Gmail errors are tagged with a bracketed kind prefix (e.g.
+// "[disconnected] Gmail disconnected — ...") so the classification
+// survives being passed around as a plain string. This strips it for
+// display and flags whether the error means the user needs to reconnect
+// rather than just retry.
+function parseGmailErrorMessage(raw: string): { text: string; needsReconnect: boolean } {
+  const match = raw.match(/^\[(\w+)\]\s*(.*)$/);
+  if (!match) return { text: raw, needsReconnect: false };
+  const [, kind, text] = match;
+  return { text, needsReconnect: kind === "disconnected" || kind === "permission_revoked" };
 }
 
 // Compact 0–100% ring — replaces the indefinite spinner so the button shows
@@ -282,6 +295,12 @@ export default function InboxPage() {
   const [gmailLoading, setGmailLoading] = useState(true);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const lastSyncedAtRef = useRef<string | null>(null);
+  // True once the backend has classified this account's Gmail connection as
+  // permanently dead (token revoked/expired, or permission pulled) — set by
+  // the cron/sync backend, cleared automatically on a fresh reconnect. This
+  // drives a persistent banner instead of a one-off toast, since the
+  // underlying problem doesn't go away just because the toast faded out.
+  const [needsReconnect, setNeedsReconnect] = useState(false);
   const [onboardOpen,     setOnboardOpen]     = useState(false);
   const [onboardDismissed, setOnboardDismissed] = useState(false);
   const [onboarding,      setOnboarding]      = useState(false);
@@ -309,9 +328,9 @@ export default function InboxPage() {
      sync has landed new mail — no manual refresh needed. ── */
   async function pollSyncStatus() {
     try {
-      const res = await fetch("/api/email/sync-status");
+      const res = await apiFetch("/api/email/sync-status");
       if (!res.ok) return;
-      const data: { lastSyncedAt: string | null; connected: boolean; onboarded: boolean } = await res.json();
+      const data: { lastSyncedAt: string | null; connected: boolean; onboarded: boolean; needsReconnect: boolean } = await res.json();
       if (data.lastSyncedAt !== lastSyncedAtRef.current) {
         const isFirstLoad = lastSyncedAtRef.current === null;
         lastSyncedAtRef.current = data.lastSyncedAt;
@@ -322,6 +341,7 @@ export default function InboxPage() {
       // they reloaded before answering) — auto-sync stays off until they
       // do, so surface the picker instead of silently doing nothing.
       if (data.connected && !data.onboarded && !onboardDismissed) setOnboardOpen(true);
+      setNeedsReconnect(data.needsReconnect);
     } catch { /* best-effort — next poll will retry */ }
   }
 
@@ -330,7 +350,7 @@ export default function InboxPage() {
     setOnboarding(true);
     setOnboardProgress(null);
     try {
-      const res  = await fetch("/api/email/onboard", {
+      const res  = await apiFetch("/api/email/onboard", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ count }),
@@ -366,7 +386,7 @@ export default function InboxPage() {
     setFetchingMore(true);
     setFetchMoreProgress(null);
     try {
-      const res  = await fetch("/api/email/fetch-more", {
+      const res  = await apiFetch("/api/email/fetch-more", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode }),
@@ -480,7 +500,7 @@ export default function InboxPage() {
   async function loadAll() { await Promise.all([loadPending(), loadDone()]); }
 
   async function loadPending() {
-    const res  = await fetch("/api/rfqs/pending");
+    const res  = await apiFetch("/api/rfqs/pending");
     if (!res.ok) return;
     const data = await res.json();
     // Newest first — guard against null/invalid timestamps
@@ -594,7 +614,7 @@ export default function InboxPage() {
     setFetchResults(null);
     setFetchProgress(null);
     try {
-      const res  = await fetch("/api/email/fetch", { method: "POST" });
+      const res  = await apiFetch("/api/email/fetch", { method: "POST" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Fetch failed");
 
@@ -616,9 +636,11 @@ export default function InboxPage() {
       await loadAll();
       pollSyncStatus();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Something went wrong";
-      setFetchError(msg);
-      toast.error(msg);
+      const raw = err instanceof Error ? err.message : "Something went wrong";
+      const { text, needsReconnect: shouldReconnect } = parseGmailErrorMessage(raw);
+      setFetchError(text);
+      toast.error(text, shouldReconnect ? { duration: 15000 } : undefined);
+      if (shouldReconnect) { setNeedsReconnect(true); pollSyncStatus(); }
     } finally {
       setFetching(false);
       setFetchProgress(null);
@@ -629,7 +651,7 @@ export default function InboxPage() {
   async function handleSampleRfq() {
     setCreatingSample(true);
     try {
-      const res  = await fetch("/api/rfqs/sample", { method: "POST" });
+      const res  = await apiFetch("/api/rfqs/sample", { method: "POST" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Could not create sample");
       toast.success(`Sample RFQ created — click "Process it" to try it out.`);
@@ -657,7 +679,7 @@ export default function InboxPage() {
     setProcessProgress((p) => ({ ...p, [rfqId]: null }));
     processStartedAtRef.current[rfqId] = Date.now();
     try {
-      const res  = await fetch(`/api/rfqs/${rfqId}/process`, { method: "POST" });
+      const res  = await apiFetch(`/api/rfqs/${rfqId}/process`, { method: "POST" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Processing failed");
 
@@ -781,7 +803,7 @@ export default function InboxPage() {
     const rfq = deleteTarget;
     setDeletingEmail(true);
     try {
-      const res  = await fetch(`/api/rfqs/${rfq.id}/hide`, { method: "POST" });
+      const res  = await apiFetch(`/api/rfqs/${rfq.id}/hide`, { method: "POST" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Could not remove this RFQ");
 
@@ -794,7 +816,7 @@ export default function InboxPage() {
           label: "Undo",
           onClick: async () => {
             try {
-              const undoRes = await fetch(`/api/rfqs/${rfq.id}/unhide`, { method: "POST" });
+              const undoRes = await apiFetch(`/api/rfqs/${rfq.id}/unhide`, { method: "POST" });
               if (!undoRes.ok) throw new Error();
               const ts = (r: PendingRfq) => (r.created_at ? new Date(r.created_at).getTime() : 0) || 0;
               setPending((prev) => [...prev, rfq].sort((a, b) => ts(b) - ts(a)));
@@ -821,7 +843,7 @@ export default function InboxPage() {
     if (ids.length === 0) return;
     setBulkDeleting(true);
     try {
-      const res  = await fetch("/api/rfqs/bulk-hide", {
+      const res  = await apiFetch("/api/rfqs/bulk-hide", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids }),
@@ -997,7 +1019,25 @@ export default function InboxPage() {
             )}
           </div>
 
-          {gmailEmail && !gmailLoading && (
+          {gmailEmail && !gmailLoading && needsReconnect && (
+            <div className="flex items-center gap-3 bg-red-50 text-red-700 rounded-xl px-4 py-3 mb-4 text-sm">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="font-medium">Gmail disconnected</p>
+                <p className="text-red-600/80 text-xs mt-0.5">
+                  Access was revoked or has expired — auto-sync is paused until you reconnect.
+                </p>
+              </div>
+              <a
+                href="/api/auth/gmail/connect"
+                className="flex-shrink-0 text-xs font-semibold text-red-700 underline underline-offset-2 hover:text-red-800"
+              >
+                Reconnect
+              </a>
+            </div>
+          )}
+
+          {gmailEmail && !gmailLoading && !needsReconnect && (
             <div className="flex items-center gap-2 mb-4 text-xs">
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-50 text-green-700 border border-green-200 font-medium">
                 <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
