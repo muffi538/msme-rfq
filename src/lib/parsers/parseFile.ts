@@ -45,8 +45,12 @@ export async function parseOneFile(name: string, type: FileType, buffer: Buffer,
         } catch {
           // Malformed/scanned PDF — fall back to OpenAI, which handles any PDF
           // via base64. Vision/OCR calls are network-dependent and prone to
-          // transient timeouts/429s, so retry a couple of times before giving up.
-          const text = await withRetry(() => extractTextViaOpenAI(buffer, "application/pdf"), { retries: 2, label: `PDF OCR for "${name}"` });
+          // transient timeouts/429s, so retry once before giving up. Only
+          // one retry (not two) deliberately — this runs per-file inside a
+          // job with its own overall deadline (see JOB_DEADLINE_MS in the
+          // process route), and OCR's own 45s-per-attempt timeout means two
+          // retries alone could eat ~135s, more than the whole job's budget.
+          const text = await withRetry(() => extractTextViaOpenAI(buffer, "application/pdf"), { retries: 1, label: `PDF OCR for "${name}"` });
           return { ...base, text, usedOcr: true };
         }
       }
@@ -55,7 +59,9 @@ export async function parseOneFile(name: string, type: FileType, buffer: Buffer,
       case "docx":  return { ...base, text: await parseDocx(buffer) };
       case "text":  return { ...base, text: buffer.toString("utf-8") };
       case "image": {
-        const text = await withRetry(() => extractTextViaOpenAI(buffer, mime || "image/jpeg"), { retries: 2, label: `image OCR for "${name}"` });
+        // See the PDF-fallback comment above — one retry, not two, to stay
+        // within the process job's overall deadline.
+        const text = await withRetry(() => extractTextViaOpenAI(buffer, mime || "image/jpeg"), { retries: 1, label: `image OCR for "${name}"` });
         return { ...base, text, usedOcr: true };
       }
     }
