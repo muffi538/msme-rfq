@@ -191,7 +191,7 @@ async function listMessageIds(
   query: string,
   opts: { maxResults?: number; maxPages?: number } = {}
 ): Promise<string[]> {
-  const maxResults = opts.maxResults ?? 20;
+  const maxResults = opts.maxResults ?? 5;
   const maxPages    = opts.maxPages ?? 5;
   const ids: string[] = [];
   let pageToken: string | undefined;
