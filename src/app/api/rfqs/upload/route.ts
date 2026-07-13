@@ -124,7 +124,7 @@ async function runUploadJob(
     // Merge + extract across every successfully-parsed file
     await report("parsing", files.length);
     const multiInput: MultiFileInput[] = usable.map((f) => ({ fileName: f.name, text: f.text }));
-    const { meta, items } = await normalizeAndCategorizeMulti(multiInput);
+    const { meta, items, truncated } = await normalizeAndCategorizeMulti(multiInput);
 
     const rfqWarnings: string[] = failed.map((f) => f.error!).filter(Boolean);
     if (!meta.source_rfq_number) rfqWarnings.push("No RFQ number was found in the uploaded document(s).");
@@ -132,6 +132,7 @@ async function runUploadJob(
       rfqWarnings.push(`The document appears to be from "${meta.buyer_name}", but the buyer name entered was "${buyerName}" — please double-check.`);
     }
     if (items.length === 0) rfqWarnings.push("No line items could be extracted — please review the source file(s) manually.");
+    if (truncated) rfqWarnings.push("The AI response was very large and got cut off — some items near the end may be missing. Consider splitting this RFQ into smaller uploads.");
 
     let insertedItems: { id: string; name: string; brand: string | null; spec: string | null }[] = [];
     if (items.length > 0) {

@@ -182,7 +182,76 @@ class InvalidAiJsonError extends Error {}
 
 type RawExtractionResponse = { rfq_number?: unknown; supplier?: unknown; date?: unknown; items?: unknown[] };
 
-async function callAndParseOnce(labeled: string): Promise<RawExtractionResponse> {
+// Scans a JSON array's inner content and returns the source text of every
+// TOP-LEVEL object that closed cleanly, ignoring braces/brackets/commas
+// that appear inside string values (tracked via a proper in-string/escape
+// state machine, not a naive bracket count). A trailing partial object —
+// the one the model was still writing when it got cut off — is simply
+// never pushed, since its closing "}" never arrives.
+function extractBalancedObjects(arrayContent: string): string[] {
+  const objects: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let start = -1;
+  for (let i = 0; i < arrayContent.length; i++) {
+    const c = arrayContent[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (c === "\\") escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === "{") { if (depth === 0) start = i; depth++; }
+    else if (c === "}") {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        objects.push(arrayContent.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return objects;
+}
+
+// Root-cause fix for "AI returned invalid JSON": the dominant real cause
+// (confirmed via production logs of the raw content) is the model hitting
+// max_tokens mid-object on a large multi-file RFQ — response_format:
+// json_object guarantees well-formed JSON only when generation completes
+// normally, not when it's truncated. Rather than discarding an otherwise
+// mostly-complete extraction, salvage every fully-closed item object plus
+// whatever header fields (rfq_number/supplier/date) are recoverable, and
+// drop only the one partial item that was mid-flight when the cutoff hit.
+// Returns null (never a fabricated empty success) when nothing is
+// salvageable, so the caller still fails cleanly in that case.
+function tryRepairTruncatedJson(content: string): RawExtractionResponse | null {
+  const itemsKeyMatch = content.match(/"items"\s*:\s*\[/);
+  if (!itemsKeyMatch || itemsKeyMatch.index === undefined) return null;
+
+  const arrayStart = itemsKeyMatch.index + itemsKeyMatch[0].length;
+  const objectStrings = extractBalancedObjects(content.slice(arrayStart));
+  if (objectStrings.length === 0) return null;
+
+  const items: unknown[] = [];
+  for (const objStr of objectStrings) {
+    try { items.push(JSON.parse(objStr)); } catch { /* skip the one malformed/truncated object */ }
+  }
+  if (items.length === 0) return null;
+
+  const safeParse = (s: string | undefined): unknown => {
+    if (!s) return null;
+    try { return JSON.parse(s); } catch { return null; }
+  };
+  return {
+    rfq_number: safeParse(content.match(/"rfq_number"\s*:\s*("(?:[^"\\]|\\.)*"|null)/)?.[1]),
+    supplier:   safeParse(content.match(/"supplier"\s*:\s*("(?:[^"\\]|\\.)*"|null)/)?.[1]),
+    date:       safeParse(content.match(/"date"\s*:\s*("(?:[^"\\]|\\.)*"|null)/)?.[1]),
+    items,
+  };
+}
+
+async function callAndParseOnce(labeled: string): Promise<{ data: RawExtractionResponse; truncated: boolean }> {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -226,9 +295,16 @@ ${labeled}`,
     throw Object.assign(new Error(`OpenAI error: ${body}`), { nonRetryable: true });
   }
 
-  const json = await res.json() as { choices?: { message: { content: string } }[] };
-  const content = json.choices?.[0]?.message?.content;
+  const json = await res.json() as { choices?: { message: { content: string }; finish_reason?: string }[] };
+  const choice = json.choices?.[0];
+  const content = choice?.message?.content;
   if (!content) throw new Error("OpenAI returned no content");
+  // "length" = the model hit max_tokens and got cut off mid-generation —
+  // the single biggest real cause of "invalid JSON" on large multi-file
+  // RFQs. Known upfront (not inferred from the parse failure) so the repair
+  // path below and the truncation warning surfaced to the user are both
+  // acting on a confirmed cause, not a guess.
+  const truncatedByModel = choice?.finish_reason === "length";
 
   let parsed: unknown;
   try {
@@ -237,7 +313,24 @@ ${labeled}`,
     // Log the raw content — this is the one thing that's actually useful
     // for debugging a bad extraction after the fact, and it's otherwise
     // lost the moment this throws.
-    logError("[normalize] AI returned invalid JSON", { rawContent: content.slice(0, 4000), parseError: err });
+    logError("[normalize] AI returned invalid JSON", { rawContent: content.slice(0, 4000), parseError: err, truncatedByModel });
+
+    // Only repair a CONFIRMED truncation. A fresh retry (the normal path,
+    // one level up) is likelier to just work for a one-off malformation
+    // unrelated to length — repairing immediately here would spend that
+    // retry attempt for no reason. But a genuine max_tokens cutoff on
+    // deterministic (temperature: 0) input is likely to truncate at nearly
+    // the same point again, so salvaging what's already recovered here beats
+    // gambling a full retry on an outcome that's probably the same.
+    if (truncatedByModel) {
+      const repaired = tryRepairTruncatedJson(content);
+      if (repaired) {
+        logError("[normalize] recovered a truncated AI response via JSON repair", {
+          recoveredItemCount: repaired.items?.length ?? 0,
+        });
+        return { data: repaired, truncated: true };
+      }
+    }
     throw new InvalidAiJsonError("AI returned invalid JSON");
   }
 
@@ -255,16 +348,16 @@ ${labeled}`,
     throw new InvalidAiJsonError("AI response's item list was not in the expected format");
   }
 
-  return obj;
+  return { data: obj, truncated: truncatedByModel };
 }
 
-export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[] }> {
+export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean }> {
   const labeled = files
     .map((f) => `--- FILE: ${f.fileName} ---\n${f.text}`)
     .join("\n\n")
     .slice(0, MAX_COMBINED_CHARS);
 
-  const parsed = await withRetry(
+  const { data: parsed, truncated } = await withRetry(
     () => callAndParseOnce(labeled),
     {
       // Worst case here (all attempts time out) is retries+1 * 35s ≈ 70s —
@@ -339,5 +432,5 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
     };
   }).filter((item) => item.name.trim().length > 0);
 
-  return { meta, items: dedupeItems(items) };
+  return { meta, items: dedupeItems(items), truncated };
 }
