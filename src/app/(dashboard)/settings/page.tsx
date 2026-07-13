@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -177,6 +178,22 @@ export default function SettingsPage() {
             >
               {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : <><Save className="w-4 h-4" /> Save Settings</>}
             </Button>
+
+            {/* Hidden emails */}
+            <div className="bg-white rounded-2xl border border-gray-100 p-6 flex items-center justify-between gap-4">
+              <div>
+                <h2 className="font-semibold text-gray-900">Restore Hidden Emails</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  RFQs you removed from the dashboard (their emails are untouched in Gmail) show up here so you can bring them back.
+                </p>
+              </div>
+              <Link
+                href="/settings/hidden-emails"
+                className="flex-shrink-0 h-10 px-4 flex items-center rounded-lg border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                Manage
+              </Link>
+            </div>
           </div>
         )}
       </main>
