@@ -13,12 +13,13 @@ export async function GET() {
     .from("user_settings")
     .select("key, value")
     .eq("user_id", user.id)
-    .in("key", ["gmail_last_synced_at", "gmail_refresh_token", "gmail_onboarded"])
+    .in("key", ["gmail_last_synced_at", "gmail_refresh_token", "gmail_onboarded", "gmail_needs_reconnect"])
     .order("created_at", { ascending: false });
 
   const lastSyncedAt = data?.find((r) => r.key === "gmail_last_synced_at")?.value ?? null;
   const connected = !!data?.find((r) => r.key === "gmail_refresh_token")?.value;
   const onboarded = data?.find((r) => r.key === "gmail_onboarded")?.value === "true";
+  const needsReconnect = data?.find((r) => r.key === "gmail_needs_reconnect")?.value === "true";
 
-  return NextResponse.json({ lastSyncedAt, connected, onboarded });
+  return NextResponse.json({ lastSyncedAt, connected, onboarded, needsReconnect });
 }

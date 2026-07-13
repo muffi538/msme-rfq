@@ -1,3 +1,5 @@
+import { apiFetch } from "@/lib/apiFetch";
+
 // Polls /api/jobs/[id] until the background job finishes. Shared by any
 // feature that kicks off a job via after() and needs to report progress
 // back to the UI (email fetch, RFQ upload). Accepts an optional AbortSignal
@@ -17,7 +19,11 @@ export async function pollJob<TProgress = unknown, TResult = unknown>(
     if (signal?.aborted) throw new DOMException("Polling cancelled", "AbortError");
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     if (signal?.aborted) throw new DOMException("Polling cancelled", "AbortError");
-    const res = await fetch(`/api/jobs/${jobId}`, { signal });
+    // A multi-minute poll loop is exactly the kind of long-lived, often
+    // backgrounded request that can outlive the session cookie's freshness
+    // — apiFetch recovers from that with one session-refresh-and-retry
+    // instead of the whole poll dying on a stale "Unauthorised".
+    const res = await apiFetch(`/api/jobs/${jobId}`, { signal });
     if (!res.ok) throw new Error("Lost track of the job. Please try again.");
     const { job } = await res.json();
 
