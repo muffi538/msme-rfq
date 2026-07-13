@@ -24,13 +24,76 @@ type PendingRfq  = {
 };
 type DoneRfq     = { id: string; rfq_code: string; buyer_name: string | null; status: string; created_at: string };
 
-function processStageLabel(p: { stage: string; processed: number; total: number } | null | undefined): string {
-  if (!p) return "Processing…";
-  if (p.stage === "found")    return `Found ${p.total} attachment${p.total === 1 ? "" : "s"}…`;
-  if (p.stage === "matching") return "Matching images…";
-  if (p.stage === "complete") return "Done";
-  if (p.processed >= p.total) return "Merging items…";
-  return `Attachment ${p.processed + 1} of ${p.total}…`;
+type ProcessProgress = {
+  stage: string; label?: string; processed: number; total: number;
+  currentFile?: string; percent?: number;
+};
+
+// Every stage/percent value here comes straight from the server, which only
+// reports it when the corresponding real work actually happens (see
+// STAGE_LABEL/makePercentCalculator in the process route) — no client-side
+// guessing or fake ticking, just formatting what already reflects real
+// completion.
+function processStageText(p: ProcessProgress | null | undefined): string {
+  if (!p) return "Starting…";
+  const label = p.label ?? p.stage;
+  if (p.stage === "download" || p.stage === "parse" || p.stage === "ocr") {
+    return `${label} — attachment ${Math.min(p.processed + 1, p.total)} of ${p.total}`;
+  }
+  if (p.stage === "save")         return `${label} — item ${p.processed} of ${p.total}`;
+  if (p.stage === "match_images") return `${label} — image ${p.processed} of ${p.total}`;
+  if (p.stage === "complete")     return "Done";
+  return `${label}…`;
+}
+
+// Real elapsed-time-based estimate (not a fake countdown): given how long
+// it took to reach the current real percent, linearly project how long the
+// remaining percent should take. Standard technique, and it only ever uses
+// numbers that already happened.
+function estimateEtaSeconds(startedAt: number, percent: number): number | null {
+  if (percent <= 2 || percent >= 100) return null; // too little signal yet, or already done
+  const elapsedMs = Date.now() - startedAt;
+  const totalMs = (elapsedMs / percent) * 100;
+  const remainingMs = totalMs - elapsedMs;
+  return Math.max(0, Math.round(remainingMs / 1000));
+}
+
+function fmtEta(seconds: number): string {
+  if (seconds < 60) return `~${seconds}s left`;
+  const mins = Math.round(seconds / 60);
+  return `~${mins}m left`;
+}
+
+// Compact 0–100% ring — replaces the indefinite spinner so the button shows
+// real progress instead of an animation that never actually says anything.
+function CircularProgress({ percent, size = 16, strokeWidth = 2.5 }: { percent: number; size?: number; strokeWidth?: number }) {
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const clamped = Math.min(100, Math.max(0, percent));
+  const offset = circumference * (1 - clamped / 100);
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="flex-shrink-0 -rotate-90">
+      <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="currentColor" strokeOpacity={0.3} strokeWidth={strokeWidth} />
+      <circle
+        cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="currentColor" strokeWidth={strokeWidth}
+        strokeDasharray={circumference} strokeDashoffset={offset} strokeLinecap="round"
+        style={{ transition: "stroke-dashoffset 250ms ease" }}
+      />
+    </svg>
+  );
+}
+
+function ProcessingIndicator({ progress, startedAt }: { progress: ProcessProgress | null | undefined; startedAt: number | undefined }) {
+  const percent = progress?.percent ?? 0;
+  const eta = startedAt ? estimateEtaSeconds(startedAt, percent) : null;
+  return (
+    <>
+      <CircularProgress percent={percent} />
+      <span className="whitespace-nowrap">
+        {percent}% · {processStageText(progress)}{eta != null ? ` · ${fmtEta(eta)}` : ""}
+      </span>
+    </>
+  );
 }
 type RfqLabel    = "important" | "waiting_reply" | "in_progress" | "spam";
 type FilterTab   = "all" | RfqLabel;
@@ -160,7 +223,10 @@ export default function InboxPage() {
   const [pending,      setPending]      = useState<PendingRfq[]>([]);
   const [done,         setDone]         = useState<DoneRfq[]>([]);
   const [processing,   setProcessing]   = useState<Record<string, boolean>>({});
-  const [processProgress, setProcessProgress] = useState<Record<string, { stage: string; processed: number; total: number } | null>>({});
+  const [processProgress, setProcessProgress] = useState<Record<string, ProcessProgress | null>>({});
+  // Wall-clock start time per in-flight RFQ, used only to compute a real
+  // elapsed-time-based ETA — never to fake progress itself.
+  const processStartedAtRef = useRef<Record<string, number>>({});
   const [justDone,     setJustDone]     = useState<Record<string, boolean>>({});
   const [labels,       setLabels]       = useState<Record<string, RfqLabel>>({});
   const [deleteTarget, setDeleteTarget] = useState<PendingRfq | null>(null);
@@ -574,13 +640,14 @@ export default function InboxPage() {
   > {
     setProcessing((p) => ({ ...p, [rfqId]: true }));
     setProcessProgress((p) => ({ ...p, [rfqId]: null }));
+    processStartedAtRef.current[rfqId] = Date.now();
     try {
       const res  = await fetch(`/api/rfqs/${rfqId}/process`, { method: "POST" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Processing failed");
 
       const result = await pollJob<
-        { stage: string; processed: number; total: number; currentFile?: string },
+        ProcessProgress,
         { itemCount: number; foundCount: number; processedCount: number; failedFiles: string[]; warnings: string[] }
       >(json.jobId, (p) => setProcessProgress((prev) => ({ ...prev, [rfqId]: p })), unmountControllerRef.current.signal);
 
@@ -599,6 +666,7 @@ export default function InboxPage() {
       return { ok: false, error: err instanceof Error ? err.message : "Processing failed" };
     } finally {
       setProcessing((p) => ({ ...p, [rfqId]: false }));
+      delete processStartedAtRef.current[rfqId];
     }
   }
 
@@ -1227,7 +1295,7 @@ export default function InboxPage() {
                           className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.3)]"
                         >
                           {processing[rfq.id]
-                            ? <><Loader2 className="w-3 h-3 animate-spin" />{processStageLabel(processProgress[rfq.id])}</>
+                            ? <ProcessingIndicator progress={processProgress[rfq.id]} startedAt={processStartedAtRef.current[rfq.id]} />
                             : <><Sparkles className="w-3 h-3" />Process it<ArrowRight className="w-3 h-3" /></>}
                         </Button>
                       </>
@@ -1354,7 +1422,7 @@ export default function InboxPage() {
             <>
               <Loader2 className="w-4 h-4 animate-spin text-[#1847F5]" />
               <span className="text-sm font-medium text-card-foreground">
-                {batchProgress ? `Processing ${Math.min(batchProgress.processed + 1, batchProgress.total)} of ${batchProgress.total}…` : "Starting…"}
+                {batchProgress ? `Email ${Math.min(batchProgress.processed + 1, batchProgress.total)} of ${batchProgress.total}…` : "Starting…"}
               </span>
               <Button size="sm" variant="outline" onClick={cancelBatch} className="h-8 text-xs">
                 Cancel
