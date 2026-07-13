@@ -37,12 +37,16 @@ export type ParsedFile = {
 // processing remaining files/attachments if one fails").
 export async function parseOneFile(name: string, type: FileType, buffer: Buffer, mime: string): Promise<ParsedFile> {
   const base = { name, type, buffer, mime, text: "", error: null as string | null, usedOcr: false };
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "(none)";
+  console.log(`[parseOneFile] START PARSE file="${name}" type=${type} mime=${mime || "(none)"} ext=${ext} bytes=${buffer.length}`);
   try {
     switch (type) {
       case "pdf": {
         try {
-          return { ...base, text: await parsePdf(buffer) };
-        } catch {
+          const text = await parsePdf(buffer);
+          console.log(`[parseOneFile] PARSE COMPLETE file="${name}"`);
+          return { ...base, text };
+        } catch (err) {
           // Malformed/scanned PDF — fall back to OpenAI, which handles any PDF
           // via base64. Vision/OCR calls are network-dependent and prone to
           // transient timeouts/429s, so retry once before giving up. Only
@@ -50,23 +54,38 @@ export async function parseOneFile(name: string, type: FileType, buffer: Buffer,
           // job with its own overall deadline (see JOB_DEADLINE_MS in the
           // process route), and OCR's own 45s-per-attempt timeout means two
           // retries alone could eat ~135s, more than the whole job's budget.
+          console.log(`[parseOneFile] PDF parser failed for "${name}" (${err instanceof Error ? err.message : "unknown error"}), START OCR fallback`);
           const text = await withRetry(() => extractTextViaOpenAI(buffer, "application/pdf"), { retries: 1, label: `PDF OCR for "${name}"` });
+          console.log(`[parseOneFile] OCR COMPLETE file="${name}"`);
           return { ...base, text, usedOcr: true };
         }
       }
-      case "excel": return { ...base, text: parseExcel(buffer) };
-      case "csv":   return { ...base, text: parseCsv(buffer) };
-      case "docx":  return { ...base, text: await parseDocx(buffer) };
-      case "text":  return { ...base, text: buffer.toString("utf-8") };
+      case "excel": { const text = parseExcel(buffer); console.log(`[parseOneFile] PARSE COMPLETE file="${name}"`); return { ...base, text }; }
+      case "csv":   { const text = parseCsv(buffer);   console.log(`[parseOneFile] PARSE COMPLETE file="${name}"`); return { ...base, text }; }
+      case "docx":  { const text = await parseDocx(buffer); console.log(`[parseOneFile] PARSE COMPLETE file="${name}"`); return { ...base, text }; }
+      case "text":  { const text = buffer.toString("utf-8"); console.log(`[parseOneFile] PARSE COMPLETE file="${name}"`); return { ...base, text }; }
       case "image": {
         // See the PDF-fallback comment above — one retry, not two, to stay
         // within the process job's overall deadline.
+        console.log(`[parseOneFile] START OCR file="${name}"`);
         const text = await withRetry(() => extractTextViaOpenAI(buffer, mime || "image/jpeg"), { retries: 1, label: `image OCR for "${name}"` });
+        console.log(`[parseOneFile] OCR COMPLETE file="${name}"`);
         return { ...base, text, usedOcr: true };
+      }
+      default: {
+        // Unreachable via the normal fetch/upload paths (detectFileType is
+        // checked before a rfq_files row is ever created — see
+        // src/lib/email/sync.ts and api/rfqs/upload/route.ts), but a
+        // stored file_type of unknown/corrupted provenance (e.g. a row from
+        // before some migration) must still fail gracefully here rather
+        // than silently falling through with no return value.
+        console.log(`[parseOneFile] unsupported file type "${type}" for "${name}"`);
+        return { ...base, error: `Unsupported file type for "${name}"` };
       }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Failed to parse this file";
+    console.log(`[parseOneFile] PARSE FAILED file="${name}": ${msg}`);
     return { ...base, error: `Could not read "${name}": ${msg}` };
   }
 }
