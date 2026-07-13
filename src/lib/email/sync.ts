@@ -77,9 +77,95 @@ async function filterUnseenMessageIds(supabase: SupabaseClient, ids: string[]): 
   return { unseen: ids.filter((id) => !seen.has(id)), alreadySeen: seen.size };
 }
 
-// Inserts already-filtered candidates. The batch pre-filter above handles
-// the common case; the unique index on gmail_message_id is the backstop if
-// two syncs still race on the same message between the filter and insert.
+// Emails are independent of each other — importing one has no bearing on
+// importing the next — so this runs several at a time instead of one at a
+// time. 4 in flight matches the concurrency already used for per-RFQ
+// processing elsewhere in the app; it's what turns "20 new emails" from a
+// slow one-by-one grind into a batch that finishes in roughly total/4 the
+// time. generateRfqCode's rare cross-request duplicate-number race under
+// concurrency is an accepted, cosmetic-only tradeoff (see its docstring).
+const EMAIL_IMPORT_CONCURRENCY = 4;
+
+type EmailOutcome =
+  | { kind: "created"; entry: SyncResult["results"][number] }
+  | { kind: "deduped" }
+  | { kind: "failed"; error: string };
+
+async function importOneEmail(supabase: SupabaseClient, userId: string, session: GmailSession, email: FetchedEmail): Promise<EmailOutcome> {
+  const supported = email.attachments
+    .map((att) => ({ att, type: detectFileType(att.filename, att.mimeType) }))
+    .filter((a): a is { att: typeof email.attachments[number]; type: NonNullable<typeof a.type> } => a.type !== null);
+
+  let rawText  = "";
+  let fileType: string | null = null;
+  const fileName = supported.length > 0 ? supported[0].att.filename : "(email body)";
+
+  if (supported.length === 0 && email.bodyText.trim()) {
+    rawText  = email.bodyText;
+    fileType = "text";
+  } else if (supported.length > 0) {
+    fileType = supported.length === 1 ? supported[0].type : "mixed";
+  }
+
+  const rfqCode = await generateRfqCode(supabase);
+  const { data: rfq, error: insertError } = await supabase
+    .from("rfqs")
+    .insert({
+      user_id:          userId,
+      rfq_code:         rfqCode,
+      buyer_name:       email.from,
+      buyer_email:      email.fromEmail,
+      file_name:        fileName,
+      file_type:        fileType,
+      raw_text:         rawText,
+      status:           "pending",
+      priority:         /urgent|asap|priority/i.test(email.subject) ? "urgent" : "normal",
+      created_at:       email.date.toISOString(),
+      gmail_message_id: email.messageId,
+      gmail_thread_id:  email.threadId,
+    })
+    .select("id")
+    .single();
+
+  if (insertError || !rfq) {
+    // Another sync (cron overlapping a manual fetch) beat us to it — not a
+    // real failure, just a dedup race the unique index caught.
+    if ((insertError as { code?: string } | null)?.code === UNIQUE_VIOLATION) return { kind: "deduped" };
+    logError("[gmail-sync] rfq insert failed", { messageId: email.messageId, error: insertError });
+    return { kind: "failed", error: insertError?.message ?? "insert returned no row" };
+  }
+
+  if (supported.length > 0) {
+    const uploadedRows = await mapWithConcurrency(supported, 3, async ({ att, type }) => {
+      const path = `${userId}/${Date.now()}-${att.filename}`;
+      try {
+        await withRetry(
+          async () => {
+            const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, att.buffer, { upsert: false });
+            if (storageError) throw storageError;
+          },
+          { retries: 2, label: `upload "${att.filename}"` }
+        );
+        return { rfq_id: rfq.id, user_id: userId, file_name: att.filename, file_url: path, file_type: type, raw_text: null, status: "pending" };
+      } catch (err) {
+        logError("[gmail-sync] attachment upload failed", { messageId: email.messageId, filename: att.filename, error: err });
+        return { rfq_id: rfq.id, user_id: userId, file_name: att.filename, file_url: null, file_type: type, raw_text: null, status: "pending" };
+      }
+    });
+
+    const { error: filesError } = await supabase.from("rfq_files").insert(uploadedRows);
+    if (filesError) logError("[gmail-sync] rfq_files insert failed", { messageId: email.messageId, error: filesError });
+  }
+
+  try { await session.markAsRead(email.messageId); } catch { /* best-effort */ }
+
+  return { kind: "created", entry: { rfqCode, subject: email.subject, from: email.from, hasAttachment: supported.length > 0 } };
+}
+
+// Inserts already-filtered candidates. The batch pre-filter upstream
+// handles the common dedup case; the unique index on gmail_message_id is
+// the backstop if two syncs still race on the same message between the
+// filter and insert.
 async function importCandidateEmails(
   supabase: SupabaseClient,
   userId: string,
@@ -87,92 +173,26 @@ async function importCandidateEmails(
   candidates: FetchedEmail[],
   onProgress?: (processed: number, total: number) => void
 ): Promise<Omit<SyncResult, "usedFallback">> {
+  if (candidates.length === 0) return { ...EMPTY };
+
+  let processed = 0;
+  const outcomes = await mapWithConcurrency(
+    candidates,
+    EMAIL_IMPORT_CONCURRENCY,
+    (email) => importOneEmail(supabase, userId, session, email),
+    () => onProgress?.(++processed, candidates.length)
+  );
+
   let created = 0;
   let deduped = 0;
   let insertFailed = 0;
   let lastInsertError: string | null = null;
   const results: SyncResult["results"] = [];
 
-  if (candidates.length === 0) return { ...EMPTY };
-
-  for (let i = 0; i < candidates.length; i++) {
-    const email = candidates[i];
-    onProgress?.(i, candidates.length);
-
-    const supported = email.attachments
-      .map((att) => ({ att, type: detectFileType(att.filename, att.mimeType) }))
-      .filter((a): a is { att: typeof email.attachments[number]; type: NonNullable<typeof a.type> } => a.type !== null);
-
-    let rawText  = "";
-    let fileType: string | null = null;
-    const fileName = supported.length > 0 ? supported[0].att.filename : "(email body)";
-
-    if (supported.length === 0 && email.bodyText.trim()) {
-      rawText  = email.bodyText;
-      fileType = "text";
-    } else if (supported.length > 0) {
-      fileType = supported.length === 1 ? supported[0].type : "mixed";
-    }
-
-    const rfqCode = await generateRfqCode(supabase);
-    const { data: rfq, error: insertError } = await supabase
-      .from("rfqs")
-      .insert({
-        user_id:          userId,
-        rfq_code:         rfqCode,
-        buyer_name:       email.from,
-        buyer_email:      email.fromEmail,
-        file_name:        fileName,
-        file_type:        fileType,
-        raw_text:         rawText,
-        status:           "pending",
-        priority:         /urgent|asap|priority/i.test(email.subject) ? "urgent" : "normal",
-        created_at:       email.date.toISOString(),
-        gmail_message_id: email.messageId,
-        gmail_thread_id:  email.threadId,
-      })
-      .select("id")
-      .single();
-
-    if (insertError || !rfq) {
-      // Another sync (cron overlapping a manual fetch) beat us to it — not
-      // a real failure, just a dedup race the unique index caught.
-      if ((insertError as { code?: string } | null)?.code === UNIQUE_VIOLATION) {
-        deduped++;
-        continue;
-      }
-      insertFailed++;
-      lastInsertError = insertError?.message ?? "insert returned no row";
-      logError("[gmail-sync] rfq insert failed", { messageId: email.messageId, error: insertError });
-      continue;
-    }
-
-    if (supported.length > 0) {
-      const uploadedRows = await mapWithConcurrency(supported, 3, async ({ att, type }) => {
-        const path = `${userId}/${Date.now()}-${att.filename}`;
-        try {
-          await withRetry(
-            async () => {
-              const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, att.buffer, { upsert: false });
-              if (storageError) throw storageError;
-            },
-            { retries: 2, label: `upload "${att.filename}"` }
-          );
-          return { rfq_id: rfq.id, user_id: userId, file_name: att.filename, file_url: path, file_type: type, raw_text: null, status: "pending" };
-        } catch (err) {
-          logError("[gmail-sync] attachment upload failed", { messageId: email.messageId, filename: att.filename, error: err });
-          return { rfq_id: rfq.id, user_id: userId, file_name: att.filename, file_url: null, file_type: type, raw_text: null, status: "pending" };
-        }
-      });
-
-      const { error: filesError } = await supabase.from("rfq_files").insert(uploadedRows);
-      if (filesError) logError("[gmail-sync] rfq_files insert failed", { messageId: email.messageId, error: filesError });
-    }
-
-    try { await session.markAsRead(email.messageId); } catch { /* best-effort */ }
-
-    results.push({ rfqCode, subject: email.subject, from: email.from, hasAttachment: supported.length > 0 });
-    created++;
+  for (const outcome of outcomes) {
+    if (outcome.kind === "created") { created++; results.push(outcome.entry); }
+    else if (outcome.kind === "deduped") deduped++;
+    else { insertFailed++; lastInsertError = outcome.error; }
   }
 
   return { created, fetched: candidates.length, deduped, insertFailed, lastInsertError, results };
