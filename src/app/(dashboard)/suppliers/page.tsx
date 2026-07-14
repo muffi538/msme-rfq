@@ -22,9 +22,9 @@ const BUILT_IN_CATEGORIES = [
 // are literal proper nouns — stored and shown exactly as entered, just
 // trimmed and de-duplicated case-insensitively.
 const BUILT_IN_BRANDS = [
-  "DeWalt", "Bosch", "Dormer", "Stanley", "Geepas", "Ridgid", "JTech",
-  "National Paint", "Jotun", "Makita", "Kiswel", "ESAB", "Modi", "RR",
-  "Philips", "Schneider Electric", "Eaton",
+  "Bosch", "DeWalt", "Dormer", "Eaton", "ESAB", "Geepas", "Jotun", "JTech",
+  "Kiswel", "Makita", "Modi", "National Paint", "Philips", "Ridgid", "RR",
+  "Schneider Electric", "Stanley",
 ];
 
 // Normalize free-text into a CATEGORY_KEY format: uppercase, underscores, no special chars

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Plus, X, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -12,6 +13,12 @@ import { cn } from "@/lib/utils";
 // like the Categories field and the inbox Label selector) rather than
 // built on an unfamiliar multi-part library primitive that can't be
 // visually verified in this environment.
+//
+// The dropdown popup is portaled to document.body (fixed-positioned against
+// the trigger's bounding rect) rather than absolutely positioned inside this
+// component's own DOM subtree — the forms that embed this component use
+// `overflow-hidden` on their outer card (to clip rounded corners), which
+// would otherwise clip the popup and make it look broken/cut-off.
 export function MultiSelectSearch({
   options,
   selected,
@@ -39,18 +46,42 @@ export function MultiSelectSearch({
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // No SSR-mount guard needed for the portal below: `open` only ever becomes
+  // true via a client-side click/focus handler, so by the time it's true
+  // we're already mounted on the client and `document` is safe to use.
   useEffect(() => {
     function handle(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        containerRef.current && !containerRef.current.contains(target) &&
+        popupRef.current && !popupRef.current.contains(target)
+      ) {
         setOpen(false);
         setQuery("");
       }
     }
     if (open) document.addEventListener("mousedown", handle);
     return () => document.removeEventListener("mousedown", handle);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function updatePosition() {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (rect) setPos({ top: rect.bottom + 6, left: rect.left, width: rect.width });
+    }
+    updatePosition();
+    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("resize", updatePosition);
+    return () => {
+      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("resize", updatePosition);
+    };
   }, [open]);
 
   const trimmedQuery = query.trim();
@@ -73,18 +104,18 @@ export function MultiSelectSearch({
     <div ref={containerRef} className="relative">
       <div
         onClick={() => { setOpen(true); inputRef.current?.focus(); }}
-        className="flex flex-wrap items-center gap-1.5 min-h-[42px] px-2.5 py-1.5 border border-gray-200 rounded-lg bg-white cursor-text focus-within:ring-2 focus-within:ring-[#1847F5]/20 focus-within:border-[#1847F5] transition-colors"
+        className="flex flex-wrap items-center gap-1.5 min-h-[42px] px-2.5 py-1.5 border border-gray-200 rounded-lg bg-white cursor-text focus-within:ring-2 focus-within:ring-blue-600/20 focus-within:border-blue-600 transition-colors"
       >
         {selected.map((v) => (
           <span
             key={v}
-            className="inline-flex items-center gap-1 text-xs pl-2 pr-1 py-1 rounded-md bg-[#1847F5]/8 text-[#1847F5] font-medium"
+            className="inline-flex items-center gap-1 text-xs pl-2 pr-1 py-1 rounded-md bg-blue-50 text-blue-700 font-medium"
           >
             {v}
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); toggle(v); }}
-              className="rounded hover:bg-[#1847F5]/15 p-0.5"
+              className="rounded hover:bg-blue-100 p-0.5"
               title={`Remove ${v}`}
             >
               <X className="w-3 h-3" />
@@ -101,8 +132,12 @@ export function MultiSelectSearch({
         />
       </div>
 
-      {open && (
-        <div className="absolute left-0 top-full mt-1.5 z-30 bg-white border border-gray-200 rounded-xl shadow-xl p-1.5 w-full max-h-64 overflow-y-auto">
+      {open && pos && createPortal(
+        <div
+          ref={popupRef}
+          style={{ position: "fixed", top: pos.top, left: pos.left, width: pos.width }}
+          className="z-50 bg-white border border-gray-200 rounded-xl shadow-xl p-1.5 max-h-64 overflow-y-auto"
+        >
           {filtered.length === 0 && !showCreate && (
             <p className="px-3 py-2 text-sm text-gray-400">{emptyLabel}</p>
           )}
@@ -120,7 +155,7 @@ export function MultiSelectSearch({
                   )}
                 >
                   {opt}
-                  {isSelected && <Check className="w-3.5 h-3.5 ml-auto text-[#1847F5]" />}
+                  {isSelected && <Check className="w-3.5 h-3.5 ml-auto text-blue-600" />}
                 </button>
                 {deletable && (
                   <button
@@ -141,7 +176,7 @@ export function MultiSelectSearch({
               onClick={handleCreate}
               disabled={creating}
               className={cn(
-                "w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-left text-[#1847F5] hover:bg-[#1847F5]/5 font-medium disabled:opacity-50",
+                "w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-left text-blue-600 hover:bg-blue-50 font-medium disabled:opacity-50",
                 filtered.length > 0 && "border-t border-gray-100 mt-1 pt-2"
               )}
             >
@@ -149,7 +184,8 @@ export function MultiSelectSearch({
               {creating ? "Adding…" : (createLabel ? createLabel(trimmedQuery) : `Add "${trimmedQuery}"`)}
             </button>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

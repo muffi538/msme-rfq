@@ -153,7 +153,7 @@ function CategoryCell({
   return (
     <Select value={item.category} onValueChange={handleSelect}>
       <SelectTrigger className="h-7 text-xs w-44">
-        <SelectValue />
+        <SelectValue>{(val: string) => val.replace(/_/g, " ")}</SelectValue>
       </SelectTrigger>
       <SelectContent>
         {PRESET_CATEGORIES.map((c) => (
@@ -186,7 +186,7 @@ function ColourCell({
   return (
     <Select value={item.colour ?? COLOUR_NONE} onValueChange={handleSelect}>
       <SelectTrigger className="h-7 text-xs w-32">
-        <SelectValue />
+        <SelectValue>{(val: string) => (val === COLOUR_NONE || !val ? "— None —" : val)}</SelectValue>
       </SelectTrigger>
       <SelectContent>
         <SelectItem value={COLOUR_NONE} className="text-xs text-gray-400">
