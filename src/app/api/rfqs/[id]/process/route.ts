@@ -360,7 +360,16 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       // is exactly how a job could get killed mid-flight and get stuck
       // "processing" forever with no terminal status ever written. The
       // deadline race below is the real backstop now, not nested retries.
-      const { meta, items, truncated, failedFiles, failedFileReasons } = await raceWithDeadline(normalizeAndCategorizeMulti(multiInput), jobDeadline, "AI item extraction");
+      // The onChunkDone callback reports real per-chunk progress instead of
+      // this stage sitting frozen at 0/1 for however long the slowest
+      // chunk's retries take (up to ~90s) and then jumping straight to
+      // done — a fire-and-forget report() call, same pattern already used
+      // for the download/parse stage's per-file progress above.
+      const { meta, items, truncated, failedFiles, failedFileReasons } = await raceWithDeadline(
+        normalizeAndCategorizeMulti(multiInput, (processed, total) => { report("extract_items", processed, total); }),
+        jobDeadline,
+        "AI item extraction"
+      );
       console.log(`[rfqs/process] rfq=${rfqId} AI COMPLETE items=${items.length} failedFiles=${failedFiles.join(", ") || "none"}`);
       logStageTiming(rfqId, "extract_items", extractStartedAt);
       await report("extract_items", 1, 1);
