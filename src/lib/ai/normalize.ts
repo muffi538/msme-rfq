@@ -1,6 +1,14 @@
 import { withRetry } from "@/lib/retry";
 import { logError } from "@/lib/logError";
 import { mapWithConcurrency } from "@/lib/concurrency";
+import { BUILT_IN_CATEGORIES as CATEGORIES, DEFAULT_CATEGORY, type Category } from "@/lib/categories";
+
+export type { Category };
+
+// Comma-separated for the two AI prompts below — built from the single
+// source of truth so the prompt text can never drift from the actual
+// allowed category set the way two separately hardcoded copies could.
+const CATEGORIES_PROMPT_LIST = CATEGORIES.join(", ");
 
 export type RawItem = {
   line_number: number;
@@ -12,14 +20,6 @@ export type RawItem = {
   spec: string | null;
   notes: string | null;
 };
-
-const CATEGORIES = [
-  "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
-  "FASTENERS","SANITARY_PLUMBING","PAINTS","VALVES_FITTINGS",
-  "PACKAGING_MATERIALS","ELECTRICAL","HVAC","GENERAL_HARDWARE",
-] as const;
-
-export type Category = typeof CATEGORIES[number];
 
 export type CategorisedItem = RawItem & {
   category: Category;
@@ -51,7 +51,7 @@ export async function normalizeAndCategorize(rawText: string): Promise<Categoris
           role: "user",
           content: `Extract all line items from this RFQ. Return JSON: {"items":[{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"cat":"POWER_TOOLS","conf":0.9},...]}
 
-Categories: POWER_TOOLS, HAND_TOOLS, FURNITURE_FITTINGS, SAFETY_ITEMS, FASTENERS, SANITARY_PLUMBING, PAINTS, VALVES_FITTINGS, PACKAGING_MATERIALS, ELECTRICAL, HVAC, GENERAL_HARDWARE
+Categories: ${CATEGORIES_PROMPT_LIST}
 
 Rules: skip headers/totals. Normalize Hindi to English. SS=Stainless Steel, GI=Galvanized Iron, MS=Mild Steel. qty=null if missing.
 
@@ -90,7 +90,7 @@ ${text}`,
     brand:               item.brand ? String(item.brand) : null,
     spec:                item.spec ? String(item.spec) : null,
     notes:               null,
-    category:            (CATEGORIES.includes(item.cat as Category) ? item.cat : "GENERAL_HARDWARE") as Category,
+    category:            (CATEGORIES.includes(item.cat as Category) ? item.cat : DEFAULT_CATEGORY) as Category,
     category_source:     "llm" as const,
     category_confidence: Number(item.conf ?? 0.8),
   }));
@@ -366,7 +366,7 @@ async function callAndParseOnce(labeled: string, useStructuredOutput: boolean): 
 {"rfq_number": "..." or null, "supplier": "..." or null, "date": "..." or null,
  "items": [{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"part":null,"delivery":null,"cat":"POWER_TOOLS","conf":0.9,"file":"exact FILE name this item came from"},...]}
 
-Categories: POWER_TOOLS, HAND_TOOLS, FURNITURE_FITTINGS, SAFETY_ITEMS, FASTENERS, SANITARY_PLUMBING, PAINTS, VALVES_FITTINGS, PACKAGING_MATERIALS, ELECTRICAL, HVAC, GENERAL_HARDWARE
+Categories: ${CATEGORIES_PROMPT_LIST}
 
 Field meanings: "supplier" = whoever authored/sent this RFQ document (their company name, if stated). "part" = part number / SKU / model code, if printed. "delivery" = any delivery location, date, or lead-time text tied to that item or the whole order. "conf" = your confidence (0-1) in the overall accuracy of that item's extracted fields, not just its category. "file" = copy the exact name from the "--- FILE: ... ---" heading this item was found under.
 
@@ -730,7 +730,7 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
         notes:               null,
         part_number:         item.part ? String(item.part) : null,
         delivery_details:    item.delivery ? String(item.delivery) : null,
-        category:            (CATEGORIES.includes(item.cat as Category) ? item.cat : "GENERAL_HARDWARE") as Category,
+        category:            (CATEGORIES.includes(item.cat as Category) ? item.cat : DEFAULT_CATEGORY) as Category,
         category_source:     "llm" as const,
         category_confidence: Number(item.conf ?? 0.8),
         confidence:          conf,

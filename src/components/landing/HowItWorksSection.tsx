@@ -16,8 +16,8 @@ const steps = [
   {
     num: "03",
     title: "Items are categorised",
-    desc: "Each item is mapped to one of 12 categories using a keyword engine first, AI fallback for ambiguous items.",
-    tag: "12 categories · per-tenant cache",
+    desc: "Each item is mapped to one of 20 categories using a keyword engine first, AI fallback for ambiguous items.",
+    tag: "20 categories · per-tenant cache",
   },
   {
     num: "04",

@@ -9,7 +9,7 @@ const features = [
   {
     num: "02",
     title: "AI categorisation",
-    desc: "Every item is automatically mapped to one of 12 categories — Power Tools, Fasteners, Electrical, and more.",
+    desc: "Every item is automatically mapped to one of 20 categories — Power Tools, Fasteners, Electrical, and more.",
   },
   {
     num: "03",

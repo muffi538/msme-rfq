@@ -10,12 +10,7 @@ import { Plus, Trash2, Users, Pencil, X, AlertTriangle, Check } from "lucide-rea
 import { toast } from "sonner";
 import { isValidWhatsappGroupLink } from "@/lib/whatsapp";
 import { MultiSelectSearch } from "@/components/ui/multi-select-search";
-
-const BUILT_IN_CATEGORIES = [
-  "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
-  "FASTENERS","SANITARY_PLUMBING","PAINTS","VALVES_FITTINGS",
-  "PACKAGING_MATERIALS","ELECTRICAL","HVAC","GENERAL_HARDWARE",
-];
+import { BUILT_IN_CATEGORIES } from "@/lib/categories";
 
 // Unlike categories (internal enum-like keys, normalized to
 // SCREAMING_SNAKE_CASE for storage and re-humanized for display), brands
