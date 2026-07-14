@@ -21,13 +21,14 @@ function buildMessage(
   supplierName: string,
   rfqCode: string,
   categories: string[],
-  items: { name: string; qty: number | null; unit: string | null; spec: string | null }[]
+  items: { name: string; qty: number | null; unit: string | null; spec: string | null; colour: string | null }[]
 ): string {
   const itemLines = items
     .map((item, i) => {
       const qty = item.qty != null ? `${item.qty} ${item.unit ?? ""}`.trim() : "TBD";
       const spec = item.spec ? ` (${item.spec})` : "";
-      return `${i + 1}. ${item.name}${spec} — Qty: ${qty}`;
+      const colour = item.colour ? ` — Colour: ${item.colour}` : "";
+      return `${i + 1}. ${item.name}${spec}${colour} — Qty: ${qty}`;
     })
     .join("\n");
 
@@ -53,7 +54,7 @@ export async function POST(
   const { data: rfq } = await supabase.from("rfqs").select("rfq_code").eq("id", rfqId).single();
   const { data: items } = await supabase
     .from("rfq_items")
-    .select("id, name, qty, unit, spec, category")
+    .select("id, name, qty, unit, spec, category, colour")
     .eq("rfq_id", rfqId);
 
   if (!rfq || !items) return NextResponse.json({ error: "RFQ not found" }, { status: 404 });

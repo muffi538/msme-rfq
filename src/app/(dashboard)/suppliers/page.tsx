@@ -9,11 +9,22 @@ import { Label } from "@/components/ui/label";
 import { Plus, Trash2, Users, Pencil, X, AlertTriangle, Check } from "lucide-react";
 import { toast } from "sonner";
 import { isValidWhatsappGroupLink } from "@/lib/whatsapp";
+import { MultiSelectSearch } from "@/components/ui/multi-select-search";
 
 const BUILT_IN_CATEGORIES = [
   "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
   "FASTENERS","SANITARY_PLUMBING","PAINTS","VALVES_FITTINGS",
   "PACKAGING_MATERIALS","ELECTRICAL","HVAC","GENERAL_HARDWARE",
+];
+
+// Unlike categories (internal enum-like keys, normalized to
+// SCREAMING_SNAKE_CASE for storage and re-humanized for display), brands
+// are literal proper nouns — stored and shown exactly as entered, just
+// trimmed and de-duplicated case-insensitively.
+const BUILT_IN_BRANDS = [
+  "DeWalt", "Bosch", "Dormer", "Stanley", "Geepas", "Ridgid", "JTech",
+  "National Paint", "Jotun", "Makita", "Kiswel", "ESAB", "Modi", "RR",
+  "Philips", "Schneider Electric", "Eaton",
 ];
 
 // Normalize free-text into a CATEGORY_KEY format: uppercase, underscores, no special chars
@@ -29,10 +40,14 @@ type Supplier = {
   whatsapp_number: string | null;
   whatsapp_group_link: string | null;
   categories: string[];
+  brands: string[];
   updated_at: string;
 };
 
-const emptyForm = { name: "", contact_person: "", email: "", whatsapp_number: "", whatsapp_group_link: "", categories: [] as string[] };
+const emptyForm = {
+  name: "", contact_person: "", email: "", whatsapp_number: "", whatsapp_group_link: "",
+  categories: [] as string[], brands: [] as string[],
+};
 
 export default function SuppliersPage() {
   const supabase = createClient();
@@ -56,6 +71,11 @@ export default function SuppliersPage() {
   const [newCategoryInput, setNewCategoryInput] = useState("");
   const [savingCategory,   setSavingCategory]   = useState(false);
 
+  // Custom brands — same storage pattern as custom categories, separate
+  // user_settings key so the two lists don't collide.
+  const [customBrands, setCustomBrands] = useState<string[]>([]);
+  const [savingBrand,  setSavingBrand]  = useState(false);
+
   // Standalone "Manage Categories" modal (separate from the supplier form)
   const [categoriesModalOpen, setCategoriesModalOpen] = useState(false);
   const [modalCategoryInput,  setModalCategoryInput]  = useState("");
@@ -74,8 +94,6 @@ export default function SuppliersPage() {
     setModalCategoryInput("");
     setSavingCategory(false);
   }
-
-  useEffect(() => { fetchSuppliers(); fetchCustomCategories(); }, []);
 
   // Custom categories are per-account, not shared with any other account —
   // stored in user_settings, scoped to the calling user.
@@ -137,6 +155,65 @@ export default function SuppliersPage() {
   // Combined list shown in the picker — built-ins first, then user's customs
   const allCategoryOptions = [...BUILT_IN_CATEGORIES, ...customCategories];
 
+  // ── Brands — same per-account user_settings storage pattern as
+  // categories, under a separate key so the two lists never collide. ──
+  async function fetchCustomBrands() {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const { data } = await supabase
+      .from("user_settings")
+      .select("value")
+      .eq("user_id", user.id)
+      .eq("key", "custom_brands")
+      .maybeSingle();
+    if (data?.value) {
+      try { setCustomBrands(JSON.parse(data.value)); } catch { /* ignore */ }
+    }
+  }
+
+  async function saveCustomBrands(next: string[]) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const { error } = await supabase.from("user_settings").upsert(
+      { user_id: user.id, key: "custom_brands", value: JSON.stringify(next) },
+      { onConflict: "user_id,key" }
+    );
+    if (error) {
+      console.error("[suppliers] custom brand save failed", error);
+      toast.error(`Couldn't save brand: ${error.message}`);
+    }
+  }
+
+  // Brands are proper nouns, not enum-like keys — trim only, no
+  // case-folding of the stored value, but dedupe case-insensitively so
+  // "Bosch" and "bosch" aren't both saved as separate entries.
+  async function addCustomBrand(raw: string) {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    const existing = [...BUILT_IN_BRANDS, ...customBrands].find(
+      (b) => b.toLowerCase() === trimmed.toLowerCase()
+    );
+    if (existing) {
+      if (!form.brands.includes(existing)) setForm((f) => ({ ...f, brands: [...f.brands, existing] }));
+      return;
+    }
+    setSavingBrand(true);
+    const next = [...customBrands, trimmed];
+    setCustomBrands(next);
+    await saveCustomBrands(next);
+    setForm((f) => ({ ...f, brands: [...f.brands, trimmed] }));
+    setSavingBrand(false);
+  }
+
+  async function removeCustomBrand(brand: string) {
+    const next = customBrands.filter((b) => b !== brand);
+    setCustomBrands(next);
+    await saveCustomBrands(next);
+    setForm((f) => ({ ...f, brands: f.brands.filter((b) => b !== brand) }));
+  }
+
+  const allBrandOptions = [...BUILT_IN_BRANDS, ...customBrands];
+
   async function fetchSuppliers() {
     setLoading(true);
     const { data: { user } } = await supabase.auth.getUser();
@@ -145,6 +222,8 @@ export default function SuppliersPage() {
     setSuppliers(data ?? []);
     setLoading(false);
   }
+
+  useEffect(() => { fetchSuppliers(); fetchCustomCategories(); fetchCustomBrands(); }, []);
 
   function openAdd() {
     setForm(emptyForm);
@@ -159,6 +238,7 @@ export default function SuppliersPage() {
       whatsapp_number:     s.whatsapp_number ?? "",
       whatsapp_group_link: s.whatsapp_group_link ?? "",
       categories:          s.categories ?? [],
+      brands:              s.brands ?? [],
     });
     setEditingUpdatedAt(s.updated_at ?? null);
     setFormMode(s.id);
@@ -197,6 +277,7 @@ export default function SuppliersPage() {
         whatsapp_number:      form.whatsapp_number || null,
         whatsapp_group_link:  form.whatsapp_group_link || null,
         categories:           form.categories,
+        brands:               form.brands,
       });
       setSaving(false);
       if (error) {
@@ -221,6 +302,7 @@ export default function SuppliersPage() {
       whatsapp_number:      form.whatsapp_number || null,
       whatsapp_group_link:  form.whatsapp_group_link || null,
       categories:           form.categories,
+      brands:               form.brands,
     };
 
     let query = supabase.from("suppliers").update(payload).eq("id", formMode!);
@@ -597,6 +679,34 @@ export default function SuppliersPage() {
                   </Button>
                 </div>
               </section>
+
+              {/* ── Section 4: Brands (optional) ─────── */}
+              <section className="space-y-3">
+                <p className="text-[11px] font-semibold tracking-widest text-gray-400 uppercase">
+                  Brands
+                  <span className="ml-2 text-gray-300 normal-case tracking-normal">(optional)</span>
+                  {form.brands.length > 0 && (
+                    <span className="ml-2 text-blue-600 normal-case tracking-normal">
+                      · {form.brands.length} selected
+                    </span>
+                  )}
+                </p>
+                <MultiSelectSearch
+                  options={allBrandOptions}
+                  selected={form.brands}
+                  onChange={(next) => setForm((f) => ({ ...f, brands: next }))}
+                  onCreate={addCustomBrand}
+                  creating={savingBrand}
+                  onDelete={(brand) => {
+                    if (confirm(`Delete custom brand "${brand}"? This won't affect existing supplier records.`)) {
+                      removeCustomBrand(brand);
+                    }
+                  }}
+                  isCustom={(brand) => customBrands.includes(brand)}
+                  placeholder="Search brands, or type to add a new one…"
+                  createLabel={(q) => `Add "${q}" as a new brand`}
+                />
+              </section>
             </div>
 
             {/* Footer actions */}
@@ -631,6 +741,7 @@ export default function SuppliersPage() {
                   <th className="px-6 py-3">Contact</th>
                   <th className="px-6 py-3">WhatsApp</th>
                   <th className="px-6 py-3">Categories</th>
+                  <th className="px-6 py-3">Brands</th>
                   <th className="px-6 py-3"></th>
                 </tr>
               </thead>
@@ -650,6 +761,19 @@ export default function SuppliersPage() {
                         {s.categories.length > 3 && (
                           <span className="text-xs text-gray-400">+{s.categories.length - 3} more</span>
                         )}
+                      </div>
+                    </td>
+                    <td className="px-6 py-3">
+                      <div className="flex flex-wrap gap-1">
+                        {(s.brands ?? []).slice(0, 3).map((b) => (
+                          <span key={b} className="text-xs bg-purple-50 text-purple-700 px-2 py-0.5 rounded-full">
+                            {b}
+                          </span>
+                        ))}
+                        {(s.brands ?? []).length > 3 && (
+                          <span className="text-xs text-gray-400">+{(s.brands ?? []).length - 3} more</span>
+                        )}
+                        {(s.brands ?? []).length === 0 && <span className="text-xs text-gray-300">—</span>}
                       </div>
                     </td>
                     <td className="px-6 py-3">

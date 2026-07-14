@@ -6,6 +6,7 @@ type ExportItem = {
   line_number: number; name: string; qty: number | null; unit: string | null;
   brand: string | null; spec: string | null; part_number?: string | null;
   category: string; delivery_details?: string | null; confidence?: number | null;
+  colour?: string | null;
 };
 
 type ExportRfq = { rfq_code: string; buyer_name: string | null; source_rfq_number?: string | null };
@@ -19,6 +20,7 @@ function toRows(items: ExportItem[]) {
     "Unit":           i.unit ?? "",
     "Brand":          i.brand ?? "",
     "Spec":           i.spec ?? "",
+    "Colour":         i.colour ?? "",
     "Category":       i.category.replace(/_/g, " "),
     "Delivery":       i.delivery_details ?? "",
     "Confidence":     i.confidence != null ? `${Math.round(i.confidence * 100)}%` : "",
@@ -27,7 +29,7 @@ function toRows(items: ExportItem[]) {
 
 function buildSheet(rfq: ExportRfq, items: ExportItem[]) {
   const ws = XLSX.utils.json_to_sheet(toRows(items));
-  ws["!cols"] = [{ wch: 4 }, { wch: 32 }, { wch: 14 }, { wch: 6 }, { wch: 8 }, { wch: 14 }, { wch: 24 }, { wch: 18 }, { wch: 20 }, { wch: 10 }];
+  ws["!cols"] = [{ wch: 4 }, { wch: 32 }, { wch: 14 }, { wch: 6 }, { wch: 8 }, { wch: 14 }, { wch: 24 }, { wch: 10 }, { wch: 18 }, { wch: 20 }, { wch: 10 }];
   return ws;
 }
 
@@ -56,7 +58,7 @@ export function exportItemsToPdf(rfq: ExportRfq, items: ExportItem[]) {
 
   autoTable(doc, {
     startY: 28,
-    head: [["#", "Item", "Part/SKU", "Qty", "Unit", "Brand", "Spec", "Category", "Confidence"]],
+    head: [["#", "Item", "Part/SKU", "Qty", "Unit", "Brand", "Spec", "Colour", "Category", "Confidence"]],
     body: items.map((i) => [
       i.line_number,
       i.name,
@@ -65,6 +67,7 @@ export function exportItemsToPdf(rfq: ExportRfq, items: ExportItem[]) {
       i.unit ?? "",
       i.brand ?? "",
       i.spec ?? "",
+      i.colour ?? "",
       i.category.replace(/_/g, " "),
       i.confidence != null ? `${Math.round(i.confidence * 100)}%` : "",
     ]),

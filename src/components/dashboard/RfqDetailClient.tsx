@@ -32,6 +32,17 @@ const PRESET_CATEGORIES = [
 
 const CUSTOM_VALUE = "__CUSTOM__";
 
+// Optional per-item colour — fixed palette, no custom-value escape hatch
+// (unlike category), since the spec asks for a plain dropdown only.
+const COLOUR_OPTIONS = [
+  "Red", "Blue", "Yellow", "Green", "Orange", "Purple", "Pink",
+  "Brown", "Black", "White", "Grey", "Silver", "Gold", "Rose Gold",
+];
+// Sentinel for "no colour selected" — Select items can't use an empty
+// string as a value, and this keeps the underlying stored value as a
+// genuine `null` (default/unset) rather than an empty string.
+const COLOUR_NONE = "__NONE__";
+
 const statusStyle: Record<string, string> = {
   draft:       "bg-gray-100 text-gray-600",
   approved:    "bg-blue-100 text-blue-700",
@@ -48,6 +59,7 @@ type Item = {
   part_number?: string | null; delivery_details?: string | null;
   confidence?: number | null; warnings?: string[] | null; merged_from_count?: number | null;
   source_files?: string[] | null;
+  colour?: string | null;
 };
 
 type OutgoingRfq = {
@@ -153,6 +165,38 @@ function CategoryCell({
         <SelectItem value={CUSTOM_VALUE} className="text-xs text-purple-600 font-medium">
           ✏️ Other — type your own…
         </SelectItem>
+      </SelectContent>
+    </Select>
+  );
+}
+
+// ── Colour selector — plain fixed-palette dropdown, optional (defaults to
+// unset), no custom-value entry per spec. ──
+function ColourCell({
+  item,
+  onSave,
+}: {
+  item: Item;
+  onSave: (id: string, colour: string | null) => void;
+}) {
+  function handleSelect(val: string | null) {
+    onSave(item.id, val === COLOUR_NONE || !val ? null : val);
+  }
+
+  return (
+    <Select value={item.colour ?? COLOUR_NONE} onValueChange={handleSelect}>
+      <SelectTrigger className="h-7 text-xs w-32">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={COLOUR_NONE} className="text-xs text-gray-400">
+          — None —
+        </SelectItem>
+        {COLOUR_OPTIONS.map((c) => (
+          <SelectItem key={c} value={c} className="text-xs">
+            {c}
+          </SelectItem>
+        ))}
       </SelectContent>
     </Select>
   );
@@ -309,6 +353,7 @@ function SupplierSplitCard({
                       <th className="px-3 py-1.5 font-medium">Item</th>
                       <th className="px-3 py-1.5 font-medium w-20">Qty</th>
                       <th className="px-3 py-1.5 font-medium">Spec</th>
+                      <th className="px-3 py-1.5 font-medium w-20">Colour</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
@@ -319,6 +364,7 @@ function SupplierSplitCard({
                           {item.qty != null ? `${item.qty} ${item.unit ?? ""}` : "—"}
                         </td>
                         <td className="px-3 py-1.5 text-gray-400 truncate max-w-[140px]">{item.spec ?? "—"}</td>
+                        <td className="px-3 py-1.5 text-gray-400 whitespace-nowrap">{item.colour ?? "—"}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -390,6 +436,24 @@ export default function RfqDetailClient({
       // Revert the optimistic update — it never actually saved.
       setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, category: previous ?? i.category } : i));
       toast.error("Couldn't save category — please try again");
+    }
+  }
+
+  // --- Update item colour (optional; null clears it) ---
+  async function updateColour(itemId: string, colour: string | null) {
+    const previous = items.find((i) => i.id === itemId)?.colour ?? null;
+    setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, colour } : i));
+    try {
+      const res = await fetch(`/api/rfqs/${rfq.id}/item`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId, colour }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      toast.success(colour ? `Colour set to "${colour}"` : "Colour cleared");
+    } catch {
+      setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, colour: previous } : i));
+      toast.error("Couldn't save colour — please try again");
     }
   }
 
@@ -758,6 +822,7 @@ export default function RfqDetailClient({
                   <th className="px-4 py-3">Part / SKU</th>
                   <th className="px-4 py-3">Qty</th>
                   <th className="px-4 py-3">Spec</th>
+                  <th className="px-4 py-3">Colour</th>
                   <th className="px-4 py-3">Category</th>
                   <th className="px-4 py-3">Confidence</th>
                 </tr>
@@ -817,6 +882,9 @@ export default function RfqDetailClient({
                     </td>
                     <td className="px-4 py-2.5 text-gray-500 text-xs max-w-[140px] truncate">{item.spec ?? "—"}</td>
                     <td className="px-4 py-3">
+                      <ColourCell item={item} onSave={updateColour} />
+                    </td>
+                    <td className="px-4 py-3">
                       <CategoryCell item={item} onSave={updateCategory} />
                     </td>
                     <td className="px-4 py-2.5">
@@ -868,7 +936,7 @@ export default function RfqDetailClient({
             <div className="bg-white rounded-2xl border border-gray-100 flex flex-col items-center py-20 text-center">
               <Package className="w-10 h-10 text-gray-200 mb-3" />
               <p className="text-gray-400 font-medium">No split yet</p>
-              <p className="text-gray-400 text-sm mt-1 mb-4">Go to the Items tab and click "Split by Supplier"</p>
+              <p className="text-gray-400 text-sm mt-1 mb-4">Go to the Items tab and click &quot;Split by Supplier&quot;</p>
             </div>
           ) : (
             <div className="space-y-2">
