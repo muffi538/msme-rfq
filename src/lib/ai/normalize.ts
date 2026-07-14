@@ -557,17 +557,27 @@ type ChunkOutcome =
   | { data: RawExtractionResponse; truncated: boolean; failed: false; fileNames: string[] }
   | { data: null; truncated: false; failed: true; detail: string; reason: string; fileNames: string[] };
 
-const CHUNK_RETRY_OPTS = {
-  // Worst case here (every attempt times out) is 3 * 30s = 90s — a single
-  // chunk's call already eats a large share of the process route's
-  // overall time budget (see JOB_DEADLINE_MS there), so it can't afford
-  // an unbounded retry budget on top of that. Callers do NOT double-wrap
-  // this in another retry — an earlier version did, and that compounding
-  // could exceed the route's maxDuration and get the serverless function
-  // killed mid-flight, leaving the job stuck "processing" forever with no
-  // terminal status ever written. This budget alone must stay safe.
-  retries: 2,
-} as const;
+// Split across two phases (structured-output attempt, then a json_object
+// fallback attempt) instead of one flat retry budget, so EVERY failure mode
+// — not just a schema rejection — gets one cross-mode second chance. This
+// was found to matter in practice: a real production chunk was timing out
+// on every attempt (AbortSignal firing, not a 4xx), and under the old code
+// a plain timeout never triggered the json_object fallback at all — only
+// SchemaRejectedError did — so the chunk had no path to succeed once
+// Structured Outputs itself was consistently slow for it, however that was
+// caused (schema-compilation overhead, a transient OpenAI slowdown, etc).
+//
+// Worst case for one chunk: PRIMARY (2 attempts * 30s + 500ms backoff ≈
+// 60.5s) + FALLBACK (1 attempt * 30s = 30s) ≈ 90.5s — must stay safely
+// under JOB_DEADLINE_MS (110s, see process/route.ts) with room left for
+// the rest of the job, for the same reason the original single-phase
+// budget was capped at 90s. Callers do NOT double-wrap this in another
+// retry layer — an earlier version did, and that compounding could exceed
+// the route's maxDuration and get the serverless function killed
+// mid-flight, leaving the job stuck "processing" forever with no terminal
+// status ever written.
+const PRIMARY_RETRY_OPTS = { retries: 1 } as const;
+const FALLBACK_RETRY_OPTS = { retries: 0 } as const;
 
 async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
   const { text: labeled, fileNames } = chunk;
@@ -575,17 +585,14 @@ async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
     const { data, truncated } = await withRetry(
       () => callAndParseOnce(labeled, true),
       {
-        ...CHUNK_RETRY_OPTS,
+        ...PRIMARY_RETRY_OPTS,
         label: `RFQ item extraction chunk (${fileNames.join(", ")})`,
-        // A schema rejection is a REQUEST-level problem (OpenAI didn't
-        // accept the shape we sent), not content-dependent — every retry
-        // with the identical schema would fail identically, so don't
-        // waste the retry budget on it; fall back to json_object mode
-        // once instead (below). Otherwise: retry OpenAI's own transient
-        // failures (429/5xx), genuine network errors (timeouts,
-        // connection resets), and invalid/malformed JSON (a fresh
-        // generation often doesn't truncate at the same point) —
-        // everything except the explicitly-tagged non-retryable 4xx case.
+        // Retry OpenAI's own transient failures (429/5xx), genuine network
+        // errors (timeouts, connection resets), and invalid/malformed JSON
+        // (a fresh generation often doesn't truncate at the same point) —
+        // everything except a schema rejection (see below — falls back to
+        // a different mode instead of retrying the same rejected shape)
+        // and the explicitly-tagged non-retryable 4xx case.
         isRetryable: (err) =>
           !(err instanceof SchemaRejectedError)
           && !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
@@ -595,46 +602,67 @@ async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
   } catch (err) {
     if (err instanceof SchemaRejectedError) {
       logError("[normalize] OpenAI rejected the structured-output schema — falling back to json_object mode", err.message.slice(0, 1000));
-      try {
-        const { data, truncated } = await withRetry(
-          () => callAndParseOnce(labeled, false),
-          {
-            ...CHUNK_RETRY_OPTS,
-            label: `RFQ item extraction chunk (${fileNames.join(", ")}, json_object fallback)`,
-            isRetryable: (err2) => !(err2 instanceof Error && (err2 as Error & { nonRetryable?: boolean }).nonRetryable),
-          }
-        );
-        return { data, truncated, failed: false, fileNames };
-      } catch (fallbackErr) {
-        const sanitized = sanitizeAiError(fallbackErr);
-        logError(`[normalize] chunk (${fileNames.join(", ")}) failed even after json_object fallback (continuing with the rest)`, sanitized.detail);
-        return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
-      }
+    } else if (err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable) {
+      // A genuinely non-retryable 4xx (bad API key, malformed request
+      // unrelated to the schema) would fail identically in json_object
+      // mode too — skip the fallback rather than spend more of the
+      // chunk's time budget on an attempt certain to fail the same way.
+      const sanitized = sanitizeAiError(err);
+      logError(`[normalize] chunk (${fileNames.join(", ")}) failed (non-retryable, continuing with the rest)`, sanitized.detail);
+      return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
     }
-    // One chunk failing (after its own retries) must never take the whole
-    // RFQ down with it — same fault-isolation principle as one bad
-    // attachment never freezing the whole RFQ. Log it (sanitized detail,
-    // not raw) and let the caller salvage whatever the OTHER chunks
-    // recovered; only if every chunk fails does the RFQ actually fail.
-    // Which specific file(s) this chunk covered is preserved so the
-    // caller can name them in a warning instead of a whole attachment's
-    // items silently vanishing with no clear explanation. `reason` is the
-    // sanitized, UI-safe message (never the raw `detail`, which can
-    // contain a raw OpenAI response body) — surfacing it in the RFQ
-    // warning means the next failure is diagnosable (transient service
-    // error vs. a genuinely unreadable chunk) without needing production
-    // logs, instead of every failure collapsing into one generic message.
-    const sanitized = sanitizeAiError(err);
-    logError(`[normalize] chunk (${fileNames.join(", ")}) failed (continuing with the rest)`, sanitized.detail);
-    return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
+    // Every other failure — including a plain timeout, which is the
+    // production case that motivated this — also gets one fallback
+    // attempt in json_object mode before giving up.
+    try {
+      const { data, truncated } = await withRetry(
+        () => callAndParseOnce(labeled, false),
+        {
+          ...FALLBACK_RETRY_OPTS,
+          label: `RFQ item extraction chunk (${fileNames.join(", ")}, json_object fallback)`,
+        }
+      );
+      return { data, truncated, failed: false, fileNames };
+    } catch (fallbackErr) {
+      // One chunk failing (after its own retries, across both modes) must
+      // never take the whole RFQ down with it — same fault-isolation
+      // principle as one bad attachment never freezing the whole RFQ. Log
+      // it (sanitized detail, not raw) and let the caller salvage whatever
+      // the OTHER chunks recovered; only if every chunk fails does the RFQ
+      // actually fail. Which specific file(s) this chunk covered is
+      // preserved so the caller can name them in a warning instead of a
+      // whole attachment's items silently vanishing with no clear
+      // explanation. `reason` is the sanitized, UI-safe message (never the
+      // raw `detail`, which can contain a raw OpenAI response body) —
+      // surfacing it in the RFQ warning means the next failure is
+      // diagnosable (transient service error vs. a genuinely unreadable
+      // chunk) without needing production logs.
+      const sanitized = sanitizeAiError(fallbackErr);
+      logError(`[normalize] chunk (${fileNames.join(", ")}) failed even after json_object fallback (continuing with the rest)`, sanitized.detail);
+      return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
+    }
   }
 }
 
-export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[]; failedFileReasons: Record<string, string> }> {
+// `onChunkDone` reports real progress as each chunk finishes (processed,
+// total) — a chunk can legitimately take up to ~90s worst case (see
+// PRIMARY_RETRY_OPTS/FALLBACK_RETRY_OPTS above), and previously the caller
+// had no visibility into this stage until EVERY chunk had finished, so a
+// multi-chunk RFQ's progress bar sat frozen at whatever percent it entered
+// this stage at for that whole stretch, then jumped straight to done — the
+// exact "stuck at 29%, then all of a sudden it's processed" UX this fixes.
+export async function normalizeAndCategorizeMulti(
+  files: MultiFileInput[],
+  onChunkDone?: (processed: number, total: number) => void
+): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[]; failedFileReasons: Record<string, string> }> {
   const chunks = chunkLabeledFiles(files);
   console.log(`[normalize] split ${files.length} file(s) into ${chunks.length} AI extraction chunk(s)`);
 
-  const results = await mapWithConcurrency(chunks, CHUNK_CONCURRENCY, runChunk);
+  let chunksDone = 0;
+  const results = await mapWithConcurrency(chunks, CHUNK_CONCURRENCY, runChunk, () => {
+    chunksDone++;
+    onChunkDone?.(chunksDone, chunks.length);
+  });
   const succeeded = results.filter((r): r is ChunkOutcome & { failed: false } => !r.failed);
 
   if (succeeded.length === 0) {
