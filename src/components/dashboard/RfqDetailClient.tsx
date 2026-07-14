@@ -23,12 +23,7 @@ import {
 } from "@/lib/rfq-lifecycle";
 import { exportItemsToExcel, exportItemsToCsv, exportItemsToPdf } from "@/lib/exportRfqItems";
 import { normalizePhone, buildWaUrl, isValidWhatsappGroupLink } from "@/lib/whatsapp";
-
-const PRESET_CATEGORIES = [
-  "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
-  "FASTENERS","SANITARY_PLUMBING","PAINTS","VALVES_FITTINGS",
-  "PACKAGING_MATERIALS","ELECTRICAL","HVAC","GENERAL_HARDWARE",
-];
+import { BUILT_IN_CATEGORIES as PRESET_CATEGORIES } from "@/lib/categories";
 
 const CUSTOM_VALUE = "__CUSTOM__";
 

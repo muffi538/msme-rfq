@@ -360,7 +360,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       // is exactly how a job could get killed mid-flight and get stuck
       // "processing" forever with no terminal status ever written. The
       // deadline race below is the real backstop now, not nested retries.
-      const { meta, items, truncated, failedFiles } = await raceWithDeadline(normalizeAndCategorizeMulti(multiInput), jobDeadline, "AI item extraction");
+      const { meta, items, truncated, failedFiles, failedFileReasons } = await raceWithDeadline(normalizeAndCategorizeMulti(multiInput), jobDeadline, "AI item extraction");
       console.log(`[rfqs/process] rfq=${rfqId} AI COMPLETE items=${items.length} failedFiles=${failedFiles.join(", ") || "none"}`);
       logStageTiming(rfqId, "extract_items", extractStartedAt);
       await report("extract_items", 1, 1);
@@ -376,7 +376,13 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       // truncation, and needs to be unmistakable rather than folded into
       // the generic message below.
       if (failedFiles.length > 0) {
-        rfqWarnings.push(`Could not extract items from: ${failedFiles.join(", ")}. Tap "Process it" again to retry just this RFQ.`);
+        // Include the SAFE, per-file reason (e.g. "AI service temporarily
+        // unavailable" vs. a malformed-response message) so a repeat
+        // failure is immediately diagnosable from the warning itself —
+        // distinguishes "worth retrying" from "will fail the same way
+        // again" without needing production logs.
+        const named = failedFiles.map((f) => `${f} (${failedFileReasons[f] ?? "unknown reason"})`).join(", ");
+        rfqWarnings.push(`Could not extract items from: ${named}. Tap "Process it" again to retry just this RFQ.`);
       }
       if (truncated && failedFiles.length === 0) {
         rfqWarnings.push("The AI response was very large and got cut off — some items near the end may be missing. Consider splitting this RFQ into smaller uploads.");

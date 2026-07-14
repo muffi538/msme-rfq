@@ -138,7 +138,7 @@ async function runUploadJob(
     // Merge + extract across every successfully-parsed file
     await report("parsing", files.length);
     const multiInput: MultiFileInput[] = usable.map((f) => ({ fileName: f.name, text: f.text }));
-    const { meta, items, truncated, failedFiles } = await normalizeAndCategorizeMulti(multiInput);
+    const { meta, items, truncated, failedFiles, failedFileReasons } = await normalizeAndCategorizeMulti(multiInput);
 
     const rfqWarnings: string[] = failed.map((f) => f.error!).filter(Boolean);
     if (!meta.source_rfq_number) rfqWarnings.push("No RFQ number was found in the uploaded document(s).");
@@ -151,7 +151,11 @@ async function runUploadJob(
     // truncation, and needs to be unmistakable rather than folded into the
     // generic message below.
     if (failedFiles.length > 0) {
-      rfqWarnings.push(`Could not extract items from: ${failedFiles.join(", ")}. Please try uploading it again.`);
+      // Include the SAFE, per-file reason so a repeat failure is
+      // immediately diagnosable from the warning itself — see the matching
+      // comment in the process route for why.
+      const named = failedFiles.map((f) => `${f} (${failedFileReasons[f] ?? "unknown reason"})`).join(", ");
+      rfqWarnings.push(`Could not extract items from: ${named}. Please try uploading it again.`);
     }
     if (truncated && failedFiles.length === 0) {
       rfqWarnings.push("The AI response was very large and got cut off — some items near the end may be missing. Consider splitting this RFQ into smaller uploads.");

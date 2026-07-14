@@ -1,6 +1,14 @@
 import { withRetry } from "@/lib/retry";
 import { logError } from "@/lib/logError";
 import { mapWithConcurrency } from "@/lib/concurrency";
+import { BUILT_IN_CATEGORIES as CATEGORIES, DEFAULT_CATEGORY, type Category } from "@/lib/categories";
+
+export type { Category };
+
+// Comma-separated for the two AI prompts below — built from the single
+// source of truth so the prompt text can never drift from the actual
+// allowed category set the way two separately hardcoded copies could.
+const CATEGORIES_PROMPT_LIST = CATEGORIES.join(", ");
 
 export type RawItem = {
   line_number: number;
@@ -12,14 +20,6 @@ export type RawItem = {
   spec: string | null;
   notes: string | null;
 };
-
-const CATEGORIES = [
-  "POWER_TOOLS","HAND_TOOLS","FURNITURE_FITTINGS","SAFETY_ITEMS",
-  "FASTENERS","SANITARY_PLUMBING","PAINTS","VALVES_FITTINGS",
-  "PACKAGING_MATERIALS","ELECTRICAL","HVAC","GENERAL_HARDWARE",
-] as const;
-
-export type Category = typeof CATEGORIES[number];
 
 export type CategorisedItem = RawItem & {
   category: Category;
@@ -51,7 +51,7 @@ export async function normalizeAndCategorize(rawText: string): Promise<Categoris
           role: "user",
           content: `Extract all line items from this RFQ. Return JSON: {"items":[{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"cat":"POWER_TOOLS","conf":0.9},...]}
 
-Categories: POWER_TOOLS, HAND_TOOLS, FURNITURE_FITTINGS, SAFETY_ITEMS, FASTENERS, SANITARY_PLUMBING, PAINTS, VALVES_FITTINGS, PACKAGING_MATERIALS, ELECTRICAL, HVAC, GENERAL_HARDWARE
+Categories: ${CATEGORIES_PROMPT_LIST}
 
 Rules: skip headers/totals. Normalize Hindi to English. SS=Stainless Steel, GI=Galvanized Iron, MS=Mild Steel. qty=null if missing.
 
@@ -90,7 +90,7 @@ ${text}`,
     brand:               item.brand ? String(item.brand) : null,
     spec:                item.spec ? String(item.spec) : null,
     notes:               null,
-    category:            (CATEGORIES.includes(item.cat as Category) ? item.cat : "GENERAL_HARDWARE") as Category,
+    category:            (CATEGORIES.includes(item.cat as Category) ? item.cat : DEFAULT_CATEGORY) as Category,
     category_source:     "llm" as const,
     category_confidence: Number(item.conf ?? 0.8),
   }));
@@ -366,7 +366,7 @@ async function callAndParseOnce(labeled: string, useStructuredOutput: boolean): 
 {"rfq_number": "..." or null, "supplier": "..." or null, "date": "..." or null,
  "items": [{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"part":null,"delivery":null,"cat":"POWER_TOOLS","conf":0.9,"file":"exact FILE name this item came from"},...]}
 
-Categories: POWER_TOOLS, HAND_TOOLS, FURNITURE_FITTINGS, SAFETY_ITEMS, FASTENERS, SANITARY_PLUMBING, PAINTS, VALVES_FITTINGS, PACKAGING_MATERIALS, ELECTRICAL, HVAC, GENERAL_HARDWARE
+Categories: ${CATEGORIES_PROMPT_LIST}
 
 Field meanings: "supplier" = whoever authored/sent this RFQ document (their company name, if stated). "part" = part number / SKU / model code, if printed. "delivery" = any delivery location, date, or lead-time text tied to that item or the whole order. "conf" = your confidence (0-1) in the overall accuracy of that item's extracted fields, not just its category. "file" = copy the exact name from the "--- FILE: ... ---" heading this item was found under.
 
@@ -555,7 +555,7 @@ function sanitizeAiError(err: unknown): AiExtractionError {
 
 type ChunkOutcome =
   | { data: RawExtractionResponse; truncated: boolean; failed: false; fileNames: string[] }
-  | { data: null; truncated: false; failed: true; detail: string; fileNames: string[] };
+  | { data: null; truncated: false; failed: true; detail: string; reason: string; fileNames: string[] };
 
 const CHUNK_RETRY_OPTS = {
   // Worst case here (every attempt times out) is 3 * 30s = 90s — a single
@@ -608,7 +608,7 @@ async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
       } catch (fallbackErr) {
         const sanitized = sanitizeAiError(fallbackErr);
         logError(`[normalize] chunk (${fileNames.join(", ")}) failed even after json_object fallback (continuing with the rest)`, sanitized.detail);
-        return { data: null, truncated: false, failed: true, detail: sanitized.detail, fileNames };
+        return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
       }
     }
     // One chunk failing (after its own retries) must never take the whole
@@ -618,14 +618,19 @@ async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
     // recovered; only if every chunk fails does the RFQ actually fail.
     // Which specific file(s) this chunk covered is preserved so the
     // caller can name them in a warning instead of a whole attachment's
-    // items silently vanishing with no clear explanation.
+    // items silently vanishing with no clear explanation. `reason` is the
+    // sanitized, UI-safe message (never the raw `detail`, which can
+    // contain a raw OpenAI response body) — surfacing it in the RFQ
+    // warning means the next failure is diagnosable (transient service
+    // error vs. a genuinely unreadable chunk) without needing production
+    // logs, instead of every failure collapsing into one generic message.
     const sanitized = sanitizeAiError(err);
     logError(`[normalize] chunk (${fileNames.join(", ")}) failed (continuing with the rest)`, sanitized.detail);
-    return { data: null, truncated: false, failed: true, detail: sanitized.detail, fileNames };
+    return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
   }
 }
 
-export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[] }> {
+export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[]; failedFileReasons: Record<string, string> }> {
   const chunks = chunkLabeledFiles(files);
   console.log(`[normalize] split ${files.length} file(s) into ${chunks.length} AI extraction chunk(s)`);
 
@@ -657,6 +662,20 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
   // "response was cut off" warning that didn't even describe what
   // actually happened. Callers can now name the exact file(s) affected.
   const failedFiles = [...new Set(results.filter((r) => r.failed).flatMap((r) => r.fileNames))];
+
+  // The UI-safe reason each failed file's chunk actually failed with (e.g.
+  // "The AI service is temporarily unavailable" vs. a malformed-response
+  // message) — lets a caller tell the user whether retrying is likely to
+  // help, instead of every failure showing the same generic wording no
+  // matter the cause. First chunk to report a given file wins (a file only
+  // ever belongs to one chunk in practice, per chunkLabeledFiles above).
+  const failedFileReasons: Record<string, string> = {};
+  for (const r of results) {
+    if (!r.failed) continue;
+    for (const name of r.fileNames) {
+      if (!(name in failedFileReasons)) failedFileReasons[name] = r.reason;
+    }
+  }
 
   // Merge header metadata from whichever chunk actually has it — these
   // fields describe the RFQ as a whole, so the first chunk with a
@@ -711,7 +730,7 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
         notes:               null,
         part_number:         item.part ? String(item.part) : null,
         delivery_details:    item.delivery ? String(item.delivery) : null,
-        category:            (CATEGORIES.includes(item.cat as Category) ? item.cat : "GENERAL_HARDWARE") as Category,
+        category:            (CATEGORIES.includes(item.cat as Category) ? item.cat : DEFAULT_CATEGORY) as Category,
         category_source:     "llm" as const,
         category_confidence: Number(item.conf ?? 0.8),
         confidence:          conf,
@@ -722,5 +741,5 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
     });
   }).filter((item) => item.name.trim().length > 0);
 
-  return { meta, items: dedupeItems(items), truncated, failedFiles };
+  return { meta, items: dedupeItems(items), truncated, failedFiles, failedFileReasons };
 }
