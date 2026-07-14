@@ -346,8 +346,8 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       // is exactly how a job could get killed mid-flight and get stuck
       // "processing" forever with no terminal status ever written. The
       // deadline race below is the real backstop now, not nested retries.
-      const { meta, items, truncated } = await raceWithDeadline(normalizeAndCategorizeMulti(multiInput), jobDeadline, "AI item extraction");
-      console.log(`[rfqs/process] rfq=${rfqId} AI COMPLETE items=${items.length}`);
+      const { meta, items, truncated, failedFiles } = await raceWithDeadline(normalizeAndCategorizeMulti(multiInput), jobDeadline, "AI item extraction");
+      console.log(`[rfqs/process] rfq=${rfqId} AI COMPLETE items=${items.length} failedFiles=${failedFiles.join(", ") || "none"}`);
       logStageTiming(rfqId, "extract_items", extractStartedAt);
       await report("extract_items", 1, 1);
       // Categories arrive already assigned in the same response above — this
@@ -357,7 +357,16 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
 
       const rfqWarnings: string[] = failed.map((f) => `Could not read "${f.name}": ${f.error}`);
       if (items.length === 0) rfqWarnings.push("No line items could be extracted — please review the source file(s) manually.");
-      if (truncated) rfqWarnings.push("The AI response was very large and got cut off — some items near the end may be missing. Consider splitting this RFQ into smaller uploads.");
+      // Name the exact file(s) that lost ALL their items, if any — this is
+      // a whole attachment's worth of real data missing, not a cosmetic
+      // truncation, and needs to be unmistakable rather than folded into
+      // the generic message below.
+      if (failedFiles.length > 0) {
+        rfqWarnings.push(`Could not extract items from: ${failedFiles.join(", ")}. Tap "Process it" again to retry just this RFQ.`);
+      }
+      if (truncated && failedFiles.length === 0) {
+        rfqWarnings.push("The AI response was very large and got cut off — some items near the end may be missing. Consider splitting this RFQ into smaller uploads.");
+      }
 
       // Re-processing: clear whatever a previous run produced.
       await supabase.from("rfq_items").delete().eq("rfq_id", rfqId);

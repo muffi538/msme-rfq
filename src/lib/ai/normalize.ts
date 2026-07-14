@@ -462,6 +462,8 @@ ${labeled}`,
 const CHUNK_CHAR_LIMIT = 6000; // per-AI-call cap — keeps each call's expected item count (and output tokens) small enough to generate comfortably inside one attempt's timeout. This is what actually bounds latency for a large RFQ, not a bigger timeout number: a single call asked to extract everything from a big multi-file RFQ has to generate a proportionally huge JSON response, and token generation time scales with how much the model actually has to write.
 const CHUNK_CONCURRENCY = 3; // parallel AI calls per RFQ — bounded so a many-chunk RFQ doesn't fire dozens of simultaneous OpenAI requests
 
+type LabeledChunk = { text: string; fileNames: string[] };
+
 // Splits the source text into per-call chunks small enough that no single
 // AI call has to generate a huge JSON response. File boundaries are kept
 // intact where possible (each chunk holds one or more WHOLE files) so the
@@ -470,9 +472,23 @@ const CHUNK_CONCURRENCY = 3; // parallel AI calls per RFQ — bounded so a many-
 // content is still capped at MAX_COMBINED_CHARS, same bound as before —
 // this only changes HOW that budget is sent to the AI (parallel small
 // calls instead of one large serial one), not how much content is used.
-function chunkLabeledFiles(files: MultiFileInput[]): string[] {
-  const chunks: string[] = [];
+//
+// Each chunk tracks WHICH source file(s) it covers. This matters because
+// two attachments on the same email are not always duplicates of the same
+// order — a real case that motivated this: two separate purchase
+// requisition PDFs for two different projects, attached to one email.
+// Together their text exceeded CHUNK_CHAR_LIMIT, so they landed in two
+// separate AI calls (one per file). When one of those two calls failed,
+// the fault-isolation logic below silently kept only the successful
+// file's items — a whole attachment's worth of real data disappearing
+// with only a vague "response was cut off" warning that didn't even
+// describe what actually happened. Tracking file coverage per chunk lets
+// the caller detect exactly which file(s) ended up with zero items and
+// say so explicitly, instead of losing that information.
+function chunkLabeledFiles(files: MultiFileInput[]): LabeledChunk[] {
+  const chunks: LabeledChunk[] = [];
   let current = "";
+  let currentFiles: string[] = [];
   let usedChars = 0;
   for (const f of files) {
     if (usedChars >= MAX_COMBINED_CHARS) break;
@@ -480,22 +496,26 @@ function chunkLabeledFiles(files: MultiFileInput[]): string[] {
     if (labeled.length === 0) break;
 
     if (labeled.length > CHUNK_CHAR_LIMIT) {
-      if (current) { chunks.push(current); current = ""; }
-      for (let i = 0; i < labeled.length; i += CHUNK_CHAR_LIMIT) chunks.push(labeled.slice(i, i + CHUNK_CHAR_LIMIT));
+      if (current) { chunks.push({ text: current, fileNames: currentFiles }); current = ""; currentFiles = []; }
+      for (let i = 0; i < labeled.length; i += CHUNK_CHAR_LIMIT) {
+        chunks.push({ text: labeled.slice(i, i + CHUNK_CHAR_LIMIT), fileNames: [f.fileName] });
+      }
       usedChars += labeled.length;
       continue;
     }
     const sepLen = current ? 2 : 0;
     if (current && current.length + sepLen + labeled.length > CHUNK_CHAR_LIMIT) {
-      chunks.push(current);
+      chunks.push({ text: current, fileNames: currentFiles });
       current = labeled;
+      currentFiles = [f.fileName];
       usedChars += labeled.length;
     } else {
       current = current ? `${current}\n\n${labeled}` : labeled;
+      currentFiles.push(f.fileName);
       usedChars += sepLen + labeled.length;
     }
   }
-  if (current) chunks.push(current);
+  if (current) chunks.push({ text: current, fileNames: currentFiles });
   return chunks;
 }
 
@@ -534,8 +554,8 @@ function sanitizeAiError(err: unknown): AiExtractionError {
 }
 
 type ChunkOutcome =
-  | { data: RawExtractionResponse; truncated: boolean; failed: false }
-  | { data: null; truncated: false; failed: true; detail: string };
+  | { data: RawExtractionResponse; truncated: boolean; failed: false; fileNames: string[] }
+  | { data: null; truncated: false; failed: true; detail: string; fileNames: string[] };
 
 const CHUNK_RETRY_OPTS = {
   // Worst case here (every attempt times out) is 3 * 30s = 90s — a single
@@ -549,13 +569,14 @@ const CHUNK_RETRY_OPTS = {
   retries: 2,
 } as const;
 
-async function runChunk(labeled: string): Promise<ChunkOutcome> {
+async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
+  const { text: labeled, fileNames } = chunk;
   try {
     const { data, truncated } = await withRetry(
       () => callAndParseOnce(labeled, true),
       {
         ...CHUNK_RETRY_OPTS,
-        label: "RFQ item extraction chunk",
+        label: `RFQ item extraction chunk (${fileNames.join(", ")})`,
         // A schema rejection is a REQUEST-level problem (OpenAI didn't
         // accept the shape we sent), not content-dependent — every retry
         // with the identical schema would fail identically, so don't
@@ -570,7 +591,7 @@ async function runChunk(labeled: string): Promise<ChunkOutcome> {
           && !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
       }
     );
-    return { data, truncated, failed: false };
+    return { data, truncated, failed: false, fileNames };
   } catch (err) {
     if (err instanceof SchemaRejectedError) {
       logError("[normalize] OpenAI rejected the structured-output schema — falling back to json_object mode", err.message.slice(0, 1000));
@@ -579,15 +600,15 @@ async function runChunk(labeled: string): Promise<ChunkOutcome> {
           () => callAndParseOnce(labeled, false),
           {
             ...CHUNK_RETRY_OPTS,
-            label: "RFQ item extraction chunk (json_object fallback)",
+            label: `RFQ item extraction chunk (${fileNames.join(", ")}, json_object fallback)`,
             isRetryable: (err2) => !(err2 instanceof Error && (err2 as Error & { nonRetryable?: boolean }).nonRetryable),
           }
         );
-        return { data, truncated, failed: false };
+        return { data, truncated, failed: false, fileNames };
       } catch (fallbackErr) {
         const sanitized = sanitizeAiError(fallbackErr);
-        logError("[normalize] one extraction chunk failed even after json_object fallback (continuing with the rest)", sanitized.detail);
-        return { data: null, truncated: false, failed: true, detail: sanitized.detail };
+        logError(`[normalize] chunk (${fileNames.join(", ")}) failed even after json_object fallback (continuing with the rest)`, sanitized.detail);
+        return { data: null, truncated: false, failed: true, detail: sanitized.detail, fileNames };
       }
     }
     // One chunk failing (after its own retries) must never take the whole
@@ -595,13 +616,16 @@ async function runChunk(labeled: string): Promise<ChunkOutcome> {
     // attachment never freezing the whole RFQ. Log it (sanitized detail,
     // not raw) and let the caller salvage whatever the OTHER chunks
     // recovered; only if every chunk fails does the RFQ actually fail.
+    // Which specific file(s) this chunk covered is preserved so the
+    // caller can name them in a warning instead of a whole attachment's
+    // items silently vanishing with no clear explanation.
     const sanitized = sanitizeAiError(err);
-    logError("[normalize] one extraction chunk failed (continuing with the rest)", sanitized.detail);
-    return { data: null, truncated: false, failed: true, detail: sanitized.detail };
+    logError(`[normalize] chunk (${fileNames.join(", ")}) failed (continuing with the rest)`, sanitized.detail);
+    return { data: null, truncated: false, failed: true, detail: sanitized.detail, fileNames };
   }
 }
 
-export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean }> {
+export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[] }> {
   const chunks = chunkLabeledFiles(files);
   console.log(`[normalize] split ${files.length} file(s) into ${chunks.length} AI extraction chunk(s)`);
 
@@ -624,6 +648,15 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
   // for warning purposes — either way, some items may be missing from
   // what was actually in the source document.
   const truncated = results.some((r) => r.failed || r.truncated);
+
+  // Which SPECIFIC file(s) ended up with zero items because their chunk
+  // failed — a real case that motivated this: two separate PDF purchase
+  // requisitions attached to one email landed in two different chunks
+  // (their combined text exceeded the per-chunk limit), one chunk failed,
+  // and the whole file's items silently vanished with only a generic
+  // "response was cut off" warning that didn't even describe what
+  // actually happened. Callers can now name the exact file(s) affected.
+  const failedFiles = [...new Set(results.filter((r) => r.failed).flatMap((r) => r.fileNames))];
 
   // Merge header metadata from whichever chunk actually has it — these
   // fields describe the RFQ as a whole, so the first chunk with a
@@ -689,5 +722,5 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
     });
   }).filter((item) => item.name.trim().length > 0);
 
-  return { meta, items: dedupeItems(items), truncated };
+  return { meta, items: dedupeItems(items), truncated, failedFiles };
 }
