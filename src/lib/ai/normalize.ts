@@ -207,17 +207,24 @@ type RawExtractionResponse = { rfq_number?: unknown; supplier?: unknown; date?: 
 // it is structurally incapable of producing anything but this exact
 // shape — eliminating this whole class of failure at the source instead
 // of reactively validating/repairing after the fact. Every field must be
-// listed in "required" per strict mode's rules (nullability is expressed
-// via a ["type","null"] union, not by omitting the key).
+// listed in "required" per strict mode's rules. Nullability is expressed
+// via "anyOf": [{type:...}, {type:"null"}] — OpenAI's structured-outputs
+// implementation only supports a CONSTRAINED subset of JSON Schema, and
+// their own documented pattern for nullable fields is anyOf-with-null, not
+// a bare array-valued "type" (e.g. ["string","null"]) — the latter is
+// valid generic JSON Schema (confirmed with ajv) but was not confirmed
+// against OpenAI's specific supported subset, which is what actually
+// matters here since the API validates/rejects the schema itself before
+// ever generating anything.
 const EXTRACTION_JSON_SCHEMA = {
   name: "rfq_extraction",
   strict: true,
   schema: {
     type: "object",
     properties: {
-      rfq_number: { type: ["string", "null"] },
-      supplier:   { type: ["string", "null"] },
-      date:       { type: ["string", "null"] },
+      rfq_number: { anyOf: [{ type: "string" }, { type: "null" }] },
+      supplier:   { anyOf: [{ type: "string" }, { type: "null" }] },
+      date:       { anyOf: [{ type: "string" }, { type: "null" }] },
       items: {
         type: "array",
         items: {
@@ -225,12 +232,12 @@ const EXTRACTION_JSON_SCHEMA = {
           properties: {
             n:        { type: "integer" },
             name:     { type: "string" },
-            qty:      { type: ["number", "null"] },
-            unit:     { type: ["string", "null"] },
-            brand:    { type: ["string", "null"] },
-            spec:     { type: ["string", "null"] },
-            part:     { type: ["string", "null"] },
-            delivery: { type: ["string", "null"] },
+            qty:      { anyOf: [{ type: "number" }, { type: "null" }] },
+            unit:     { anyOf: [{ type: "string" }, { type: "null" }] },
+            brand:    { anyOf: [{ type: "string" }, { type: "null" }] },
+            spec:     { anyOf: [{ type: "string" }, { type: "null" }] },
+            part:     { anyOf: [{ type: "string" }, { type: "null" }] },
+            delivery: { anyOf: [{ type: "string" }, { type: "null" }] },
             cat:      { type: "string", enum: [...CATEGORIES] },
             conf:     { type: "number" },
             file:     { type: "string" },
@@ -314,9 +321,19 @@ function tryRepairTruncatedJson(content: string): RawExtractionResponse | null {
   };
 }
 
-async function callAndParseOnce(labeled: string): Promise<{ data: RawExtractionResponse; truncated: boolean }> {
+// Thrown specifically when OpenAI's API rejects the REQUEST itself (a 400)
+// while using Structured Outputs — distinct from a 400 caused by bad
+// content, which isn't possible in structured-output mode until a
+// response is actually generated. Signals the caller to retry the SAME
+// chunk with plain json_object mode instead, so a schema the API doesn't
+// accept for any reason (a subtly unsupported keyword, a future API
+// change, etc.) degrades to the previously-working manual-validation path
+// rather than taking extraction down entirely.
+class SchemaRejectedError extends Error {}
+
+async function callAndParseOnce(labeled: string, useStructuredOutput: boolean): Promise<{ data: RawExtractionResponse; truncated: boolean }> {
   const callStartedAt = Date.now();
-  console.log(`[normalize] START AI chars=${labeled.length}`);
+  console.log(`[normalize] START AI chars=${labeled.length} structured=${useStructuredOutput}`);
   let res: Response;
   try {
     res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -333,7 +350,11 @@ async function callAndParseOnce(labeled: string): Promise<{ data: RawExtractionR
         // weaker json_object mode — constrains generation itself so the
         // model cannot produce a malformed or wrong-shaped response, not
         // just "some valid JSON" that still needs shape-validating after.
-        response_format: { type: "json_schema", json_schema: EXTRACTION_JSON_SCHEMA },
+        // Falls back to json_object (see SchemaRejectedError) if OpenAI's
+        // API rejects the schema itself for any reason.
+        response_format: useStructuredOutput
+          ? { type: "json_schema", json_schema: EXTRACTION_JSON_SCHEMA }
+          : { type: "json_object" },
         messages: [
           {
             role: "system",
@@ -373,8 +394,9 @@ ${labeled}`,
 
   if (!res.ok) {
     const body = await res.text();
-    console.log(`[normalize] AI FAILED chars=${labeled.length} status=${res.status} after ${Date.now() - callStartedAt}ms`);
+    console.log(`[normalize] AI FAILED chars=${labeled.length} structured=${useStructuredOutput} status=${res.status} after ${Date.now() - callStartedAt}ms body=${body.slice(0, 500)}`);
     if (res.status === 429 || res.status >= 500) throw new OpenAiError(body, res.status);
+    if (res.status === 400 && useStructuredOutput) throw new SchemaRejectedError(body);
     // Non-retryable — surface immediately instead of burning retries.
     throw Object.assign(new Error(`OpenAI error: ${body}`), { nonRetryable: true });
   }
@@ -511,34 +533,63 @@ function sanitizeAiError(err: unknown): AiExtractionError {
   );
 }
 
-type ChunkOutcome = { data: RawExtractionResponse; truncated: boolean; failed: false } | { data: null; truncated: false; failed: true };
+type ChunkOutcome =
+  | { data: RawExtractionResponse; truncated: boolean; failed: false }
+  | { data: null; truncated: false; failed: true; detail: string };
+
+const CHUNK_RETRY_OPTS = {
+  // Worst case here (every attempt times out) is 3 * 30s = 90s — a single
+  // chunk's call already eats a large share of the process route's
+  // overall time budget (see JOB_DEADLINE_MS there), so it can't afford
+  // an unbounded retry budget on top of that. Callers do NOT double-wrap
+  // this in another retry — an earlier version did, and that compounding
+  // could exceed the route's maxDuration and get the serverless function
+  // killed mid-flight, leaving the job stuck "processing" forever with no
+  // terminal status ever written. This budget alone must stay safe.
+  retries: 2,
+} as const;
 
 async function runChunk(labeled: string): Promise<ChunkOutcome> {
   try {
     const { data, truncated } = await withRetry(
-      () => callAndParseOnce(labeled),
+      () => callAndParseOnce(labeled, true),
       {
-        // Worst case here (every attempt times out) is 3 * 30s = 90s — a
-        // single chunk's call already eats a large share of the process
-        // route's overall time budget (see JOB_DEADLINE_MS there), so it
-        // can't afford an unbounded retry budget on top of that. Callers
-        // do NOT double-wrap this in another retry — an earlier version
-        // did, and that compounding could exceed the route's maxDuration
-        // and get the serverless function killed mid-flight, leaving the
-        // job stuck "processing" forever with no terminal status ever
-        // written. This budget alone must stay safe.
-        retries: 2,
+        ...CHUNK_RETRY_OPTS,
         label: "RFQ item extraction chunk",
-        // Retry OpenAI's own transient failures (429/5xx), genuine network
-        // errors (timeouts, connection resets), and invalid/malformed JSON
-        // (a fresh generation often doesn't truncate at the same point) —
-        // everything except the explicitly-tagged non-retryable 4xx case,
-        // which fails the same way every time.
-        isRetryable: (err) => !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
+        // A schema rejection is a REQUEST-level problem (OpenAI didn't
+        // accept the shape we sent), not content-dependent — every retry
+        // with the identical schema would fail identically, so don't
+        // waste the retry budget on it; fall back to json_object mode
+        // once instead (below). Otherwise: retry OpenAI's own transient
+        // failures (429/5xx), genuine network errors (timeouts,
+        // connection resets), and invalid/malformed JSON (a fresh
+        // generation often doesn't truncate at the same point) —
+        // everything except the explicitly-tagged non-retryable 4xx case.
+        isRetryable: (err) =>
+          !(err instanceof SchemaRejectedError)
+          && !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
       }
     );
     return { data, truncated, failed: false };
   } catch (err) {
+    if (err instanceof SchemaRejectedError) {
+      logError("[normalize] OpenAI rejected the structured-output schema — falling back to json_object mode", err.message.slice(0, 1000));
+      try {
+        const { data, truncated } = await withRetry(
+          () => callAndParseOnce(labeled, false),
+          {
+            ...CHUNK_RETRY_OPTS,
+            label: "RFQ item extraction chunk (json_object fallback)",
+            isRetryable: (err2) => !(err2 instanceof Error && (err2 as Error & { nonRetryable?: boolean }).nonRetryable),
+          }
+        );
+        return { data, truncated, failed: false };
+      } catch (fallbackErr) {
+        const sanitized = sanitizeAiError(fallbackErr);
+        logError("[normalize] one extraction chunk failed even after json_object fallback (continuing with the rest)", sanitized.detail);
+        return { data: null, truncated: false, failed: true, detail: sanitized.detail };
+      }
+    }
     // One chunk failing (after its own retries) must never take the whole
     // RFQ down with it — same fault-isolation principle as one bad
     // attachment never freezing the whole RFQ. Log it (sanitized detail,
@@ -546,7 +597,7 @@ async function runChunk(labeled: string): Promise<ChunkOutcome> {
     // recovered; only if every chunk fails does the RFQ actually fail.
     const sanitized = sanitizeAiError(err);
     logError("[normalize] one extraction chunk failed (continuing with the rest)", sanitized.detail);
-    return { data: null, truncated: false, failed: true };
+    return { data: null, truncated: false, failed: true, detail: sanitized.detail };
   }
 }
 
@@ -558,9 +609,14 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
   const succeeded = results.filter((r): r is ChunkOutcome & { failed: false } => !r.failed);
 
   if (succeeded.length === 0) {
+    // Include the ACTUAL reason(s) each chunk failed, not just a count —
+    // this was previously lost by the time it reached whichever caller's
+    // catch block logs it, making a real cause (e.g. OpenAI rejecting the
+    // schema itself) indistinguishable from every other failure mode.
+    const details = results.filter((r) => r.failed).map((r) => r.detail).join(" | ");
     throw new AiExtractionError(
       "We couldn't reliably read this document — please try again, or upload the file manually.",
-      `All ${chunks.length} extraction chunk(s) failed`
+      `All ${chunks.length} extraction chunk(s) failed: ${details}`
     );
   }
 
