@@ -71,6 +71,20 @@ async function runUploadJob(
       }
     );
 
+    // A parser can return successfully (no thrown error) but with empty
+    // text — e.g. a workbook XLSX.read could still open but with no rows
+    // flattenWorkbookToText finds anything usable in. Without this, such a
+    // file was neither `usable` (empty text fails .trim() below) nor
+    // `failed` (f.error was null) — it silently vanished from the RFQ with
+    // zero warning, and no rfq_files row ever recorded why. Mark it failed
+    // here so every downstream use (usable/failed filters, the rfq_files
+    // insert below) treats it consistently as a real failure.
+    for (const f of parsed) {
+      if (!f.error && !f.text.trim()) {
+        f.error = `Could not extract any text from "${f.name}" — the file may be empty, image-only, or in an unsupported layout.`;
+      }
+    }
+
     const usable = parsed.filter((f) => !f.error && f.text.trim());
     const failed = parsed.filter((f) => f.error);
 
