@@ -555,7 +555,7 @@ function sanitizeAiError(err: unknown): AiExtractionError {
 
 type ChunkOutcome =
   | { data: RawExtractionResponse; truncated: boolean; failed: false; fileNames: string[] }
-  | { data: null; truncated: false; failed: true; detail: string; fileNames: string[] };
+  | { data: null; truncated: false; failed: true; detail: string; reason: string; fileNames: string[] };
 
 const CHUNK_RETRY_OPTS = {
   // Worst case here (every attempt times out) is 3 * 30s = 90s — a single
@@ -608,7 +608,7 @@ async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
       } catch (fallbackErr) {
         const sanitized = sanitizeAiError(fallbackErr);
         logError(`[normalize] chunk (${fileNames.join(", ")}) failed even after json_object fallback (continuing with the rest)`, sanitized.detail);
-        return { data: null, truncated: false, failed: true, detail: sanitized.detail, fileNames };
+        return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
       }
     }
     // One chunk failing (after its own retries) must never take the whole
@@ -618,14 +618,19 @@ async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
     // recovered; only if every chunk fails does the RFQ actually fail.
     // Which specific file(s) this chunk covered is preserved so the
     // caller can name them in a warning instead of a whole attachment's
-    // items silently vanishing with no clear explanation.
+    // items silently vanishing with no clear explanation. `reason` is the
+    // sanitized, UI-safe message (never the raw `detail`, which can
+    // contain a raw OpenAI response body) — surfacing it in the RFQ
+    // warning means the next failure is diagnosable (transient service
+    // error vs. a genuinely unreadable chunk) without needing production
+    // logs, instead of every failure collapsing into one generic message.
     const sanitized = sanitizeAiError(err);
     logError(`[normalize] chunk (${fileNames.join(", ")}) failed (continuing with the rest)`, sanitized.detail);
-    return { data: null, truncated: false, failed: true, detail: sanitized.detail, fileNames };
+    return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
   }
 }
 
-export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[] }> {
+export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[]; failedFileReasons: Record<string, string> }> {
   const chunks = chunkLabeledFiles(files);
   console.log(`[normalize] split ${files.length} file(s) into ${chunks.length} AI extraction chunk(s)`);
 
@@ -657,6 +662,20 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
   // "response was cut off" warning that didn't even describe what
   // actually happened. Callers can now name the exact file(s) affected.
   const failedFiles = [...new Set(results.filter((r) => r.failed).flatMap((r) => r.fileNames))];
+
+  // The UI-safe reason each failed file's chunk actually failed with (e.g.
+  // "The AI service is temporarily unavailable" vs. a malformed-response
+  // message) — lets a caller tell the user whether retrying is likely to
+  // help, instead of every failure showing the same generic wording no
+  // matter the cause. First chunk to report a given file wins (a file only
+  // ever belongs to one chunk in practice, per chunkLabeledFiles above).
+  const failedFileReasons: Record<string, string> = {};
+  for (const r of results) {
+    if (!r.failed) continue;
+    for (const name of r.fileNames) {
+      if (!(name in failedFileReasons)) failedFileReasons[name] = r.reason;
+    }
+  }
 
   // Merge header metadata from whichever chunk actually has it — these
   // fields describe the RFQ as a whole, so the first chunk with a
@@ -722,5 +741,5 @@ export async function normalizeAndCategorizeMulti(files: MultiFileInput[]): Prom
     });
   }).filter((item) => item.name.trim().length > 0);
 
-  return { meta, items: dedupeItems(items), truncated, failedFiles };
+  return { meta, items: dedupeItems(items), truncated, failedFiles, failedFileReasons };
 }
