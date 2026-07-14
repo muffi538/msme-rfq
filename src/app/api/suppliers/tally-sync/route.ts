@@ -169,6 +169,7 @@ export async function POST(request: NextRequest) {
           whatsapp_number:  s.phone || null,
           email:            s.email || null,
           categories:       [],      // user assigns categories after import
+          brands:           [],      // user assigns brands after import, same as categories
           active:           true,
           notes,
         },
