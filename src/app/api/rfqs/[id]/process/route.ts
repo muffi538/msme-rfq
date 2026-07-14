@@ -215,19 +215,33 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
               const parsed = await parseOneFile(row.file_name, type, buffer, "");
               console.log(`[rfqs/process] rfq=${rfqId} file="${row.file_name}" parse${parsed.usedOcr ? "+ocr" : ""} took ${Date.now() - parseStartedAt}ms error=${parsed.error ?? "none"}`);
 
+              // A parser can return successfully (no thrown error) but with
+              // empty text — e.g. a workbook with no rows XLSX.read could
+              // still open, or a sheet layout flattenWorkbookToText finds
+              // nothing usable in. Without this check, such a file was
+              // neither `usable` (empty text fails the .trim() check below)
+              // NOR `failed` (parsed.error was null) — it silently vanished
+              // from the RFQ with zero warning shown to the user, who then
+              // saw a "successfully processed" RFQ missing an entire
+              // attachment's items with no indication why. Treat empty
+              // output as a real failure so it surfaces in rfq.warnings.
+              const effectiveError = parsed.error ?? (parsed.text.trim()
+                ? null
+                : `Could not extract any text from "${row.file_name}" — the file may be empty, image-only, or in an unsupported layout.`);
+
               await withRetry(
                 async () => {
                   const { error: updateError } = await supabase.from("rfq_files").update({
-                    status:   parsed.error ? "failed" : "parsed",
+                    status:   effectiveError ? "failed" : "parsed",
                     raw_text: parsed.text || null,
-                    error:    parsed.error,
+                    error:    effectiveError,
                   }).eq("id", row.id);
                   if (updateError) throw updateError;
                 },
                 { retries: 2, label: `rfq_files update for "${row.file_name}"` }
               ).catch((err) => logError("[rfqs/process] rfq_files status update failed (non-fatal)", err));
 
-              return { name: row.file_name, type, text: parsed.text, error: parsed.error, fileRowId: row.id };
+              return { name: row.file_name, type, text: parsed.text, error: effectiveError, fileRowId: row.id };
             } catch (err) {
               // Never let one bad attachment take the others down with it —
               // record the failure on this file and move on; the batch as a
