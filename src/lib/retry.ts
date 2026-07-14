@@ -13,12 +13,19 @@ import { logError } from "@/lib/logError";
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
-  opts: { retries?: number; baseDelayMs?: number; label?: string; isRetryable?: (err: unknown) => boolean } = {}
+  opts: {
+    retries?: number; baseDelayMs?: number; label?: string; isRetryable?: (err: unknown) => boolean;
+    /** Fires right before each attempt starts (0-indexed) — an opt-in hook for callers that want to
+     * report real per-attempt progress (e.g. a long-running call with no other observable milestone
+     * between "started" and "finished"). No-op for every existing caller that doesn't pass it. */
+    onAttemptStart?: (attempt: number, maxAttempts: number) => void;
+  } = {}
 ): Promise<T> {
-  const { retries = 2, baseDelayMs = 500, label = "operation", isRetryable = () => true } = opts;
+  const { retries = 2, baseDelayMs = 500, label = "operation", isRetryable = () => true, onAttemptStart } = opts;
 
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    onAttemptStart?.(attempt, retries + 1);
     try {
       return await fn();
     } catch (err) {

@@ -579,7 +579,18 @@ type ChunkOutcome =
 const PRIMARY_RETRY_OPTS = { retries: 1 } as const;
 const FALLBACK_RETRY_OPTS = { retries: 0 } as const;
 
-async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
+// A single chunk's own retry attempts are the only real, observable
+// milestones available inside a call that can legitimately take up to
+// ~90s with no other progress signal (a non-streaming JSON response either
+// arrives whole or doesn't) — up to 2 primary attempts + 1 fallback
+// attempt, so 3 total. Reporting fraction-of-3 as each one genuinely
+// starts is what lets even a single-chunk RFQ (the common case — most
+// attachments fit in one chunk) show real incremental progress instead of
+// the percent sitting frozen for the whole call and then jumping straight
+// to done.
+const CHUNK_SUB_STEPS = 3;
+
+async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) => void): Promise<ChunkOutcome> {
   const { text: labeled, fileNames } = chunk;
   try {
     const { data, truncated } = await withRetry(
@@ -596,8 +607,10 @@ async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
         isRetryable: (err) =>
           !(err instanceof SchemaRejectedError)
           && !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
+        onAttemptStart: (attempt) => onSubProgress?.(attempt / CHUNK_SUB_STEPS),
       }
     );
+    onSubProgress?.(1);
     return { data, truncated, failed: false, fileNames };
   } catch (err) {
     if (err instanceof SchemaRejectedError) {
@@ -609,11 +622,13 @@ async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
       // chunk's time budget on an attempt certain to fail the same way.
       const sanitized = sanitizeAiError(err);
       logError(`[normalize] chunk (${fileNames.join(", ")}) failed (non-retryable, continuing with the rest)`, sanitized.detail);
+      onSubProgress?.(1);
       return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
     }
     // Every other failure — including a plain timeout, which is the
     // production case that motivated this — also gets one fallback
     // attempt in json_object mode before giving up.
+    onSubProgress?.((CHUNK_SUB_STEPS - 1) / CHUNK_SUB_STEPS);
     try {
       const { data, truncated } = await withRetry(
         () => callAndParseOnce(labeled, false),
@@ -622,6 +637,7 @@ async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
           label: `RFQ item extraction chunk (${fileNames.join(", ")}, json_object fallback)`,
         }
       );
+      onSubProgress?.(1);
       return { data, truncated, failed: false, fileNames };
     } catch (fallbackErr) {
       // One chunk failing (after its own retries, across both modes) must
@@ -639,30 +655,40 @@ async function runChunk(chunk: LabeledChunk): Promise<ChunkOutcome> {
       // chunk) without needing production logs.
       const sanitized = sanitizeAiError(fallbackErr);
       logError(`[normalize] chunk (${fileNames.join(", ")}) failed even after json_object fallback (continuing with the rest)`, sanitized.detail);
+      onSubProgress?.(1);
       return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
     }
   }
 }
 
-// `onChunkDone` reports real progress as each chunk finishes (processed,
-// total) — a chunk can legitimately take up to ~90s worst case (see
-// PRIMARY_RETRY_OPTS/FALLBACK_RETRY_OPTS above), and previously the caller
-// had no visibility into this stage until EVERY chunk had finished, so a
-// multi-chunk RFQ's progress bar sat frozen at whatever percent it entered
-// this stage at for that whole stretch, then jumped straight to done — the
-// exact "stuck at 29%, then all of a sudden it's processed" UX this fixes.
+// `onProgress` reports real progress continuously, both across chunks AND
+// within a single chunk's own retry attempts (see CHUNK_SUB_STEPS/
+// runChunk's onSubProgress above) — a chunk can legitimately take up to
+// ~90s worst case (see PRIMARY_RETRY_OPTS/FALLBACK_RETRY_OPTS above), and
+// previously the caller had no visibility into this stage until EVERY
+// chunk had fully finished, so even a single-chunk RFQ's progress bar (the
+// common case — most attachments fit in one chunk) sat frozen for the
+// entire call and then jumped straight to done. `processed` is a real
+// number, not necessarily an integer — it's the sum of each chunk's own
+// fraction-of-complete, so it climbs smoothly as attempts start rather
+// than only ticking once per whole chunk.
 export async function normalizeAndCategorizeMulti(
   files: MultiFileInput[],
-  onChunkDone?: (processed: number, total: number) => void
+  onProgress?: (processed: number, total: number) => void
 ): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[]; failedFileReasons: Record<string, string> }> {
   const chunks = chunkLabeledFiles(files);
   console.log(`[normalize] split ${files.length} file(s) into ${chunks.length} AI extraction chunk(s)`);
 
-  let chunksDone = 0;
-  const results = await mapWithConcurrency(chunks, CHUNK_CONCURRENCY, runChunk, () => {
-    chunksDone++;
-    onChunkDone?.(chunksDone, chunks.length);
-  });
+  const chunkFractions = new Array(chunks.length).fill(0);
+  function reportChunkFraction(index: number, fraction: number) {
+    chunkFractions[index] = fraction;
+    onProgress?.(chunkFractions.reduce((sum, f) => sum + f, 0), chunks.length);
+  }
+  const results = await mapWithConcurrency(
+    chunks,
+    CHUNK_CONCURRENCY,
+    (chunk, index) => runChunk(chunk, (fraction) => reportChunkFraction(index, fraction))
+  );
   const succeeded = results.filter((r): r is ChunkOutcome & { failed: false } => !r.failed);
 
   if (succeeded.length === 0) {
