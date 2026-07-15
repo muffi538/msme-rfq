@@ -4,8 +4,19 @@ import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { logError } from "@/lib/logError";
+import { mapWithConcurrency } from "@/lib/concurrency";
 
 export const maxDuration = 60;
+
+// A supplier's quotation sometimes arrives as several WhatsApp screenshots
+// (a long price list that didn't fit in one screen) rather than a single
+// image — this caps how many can be combined into one extraction request,
+// keeping both cost and the route's own maxDuration bounded.
+const MAX_FILES = 6;
+// Bounded concurrency for the per-file vision/parse calls — several images
+// run in parallel rather than serially, since each vision call alone can
+// take up to 45s and this route's own budget is 60s total.
+const FILE_CONCURRENCY = 3;
 
 export type QuoteItem = {
   name: string;
@@ -48,6 +59,36 @@ async function extractWithVision(base64: string, mimeType: string): Promise<stri
   return json.choices?.[0]?.message?.content ?? "";
 }
 
+// Extracts raw text from one uploaded file, routing by type exactly like
+// the single-file path used to inline in the POST handler — pulled out so
+// multiple files can each go through the same logic and run concurrently.
+// Never throws: a failure on one file must not take the whole batch down,
+// same fault-isolation principle as the main RFQ pipeline's per-attachment
+// handling.
+async function extractTextFromFile(file: File): Promise<{ name: string; text: string; error: string | null }> {
+  try {
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const mime = file.type || "application/octet-stream";
+    let text = "";
+    if (mime.includes("pdf") || file.name.toLowerCase().endsWith(".pdf")) {
+      try {
+        text = await parsePdf(buffer);
+      } catch {
+        text = await extractWithVision(buffer.toString("base64"), "application/pdf");
+      }
+    } else if (mime.includes("image")) {
+      text = await extractWithVision(buffer.toString("base64"), mime);
+    } else if (mime.includes("sheet") || mime.includes("excel") || file.name.match(/\.(xlsx?|csv)$/i)) {
+      text = parseExcel(buffer);
+    } else {
+      text = buffer.toString("utf-8");
+    }
+    return { name: file.name, text, error: null };
+  } catch (err) {
+    return { name: file.name, text: "", error: err instanceof Error ? err.message : `Could not read "${file.name}"` };
+  }
+}
+
 async function parseQuote(
   rawText: string,
   companyName: string,
@@ -72,6 +113,7 @@ async function parseQuote(
           role: "system",
           content: `You are helping an Indian MSME hardware/industrial supplies company reply to buyer enquiries.
 A supplier sent back a quotation. Extract the details and write a professional buyer reply email.
+The input may be split across multiple screenshots or files (e.g. a long price list that didn't fit in one WhatsApp screenshot, each marked "--- Screenshot/File N ---") — treat them as ONE combined quotation from ONE supplier and merge into a single item list, not separate quotes.
 Return ONLY valid JSON matching this schema exactly:
 {
   "supplier_name": string | null,
@@ -141,28 +183,42 @@ export async function POST(request: NextRequest) {
 
   if (contentType.includes("multipart/form-data")) {
     const form = await request.formData();
-    const file = form.get("file") as File | null;
+    // "files" (plural) — a quotation can arrive as several WhatsApp
+    // screenshots (a long price list split across screens) rather than
+    // one image. "file" (singular) is still accepted for backward
+    // compatibility with any older client sending exactly one.
+    const uploadedFiles = [...form.getAll("files"), ...form.getAll("file")]
+      .filter((f): f is File => f instanceof File);
     const text = form.get("text") as string | null;
 
     if (text?.trim()) {
       rawText = text.trim();
-    } else if (file) {
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const mime = file.type || "application/octet-stream";
-
-      if (mime.includes("pdf") || file.name.toLowerCase().endsWith(".pdf")) {
-        try {
-          rawText = await parsePdf(buffer);
-        } catch {
-          rawText = await extractWithVision(buffer.toString("base64"), "application/pdf");
-        }
-      } else if (mime.includes("image")) {
-        rawText = await extractWithVision(buffer.toString("base64"), mime);
-      } else if (mime.includes("sheet") || mime.includes("excel") || file.name.match(/\.(xlsx?|csv)$/i)) {
-        rawText = parseExcel(buffer);
-      } else {
-        rawText = buffer.toString("utf-8");
+    } else if (uploadedFiles.length > 0) {
+      if (uploadedFiles.length > MAX_FILES) {
+        return NextResponse.json({ error: `Too many files — maximum ${MAX_FILES} at once.` }, { status: 413 });
       }
+
+      const results = await mapWithConcurrency(uploadedFiles, FILE_CONCURRENCY, extractTextFromFile);
+      const usable = results.filter((r) => !r.error && r.text.trim());
+      const failed = results.filter((r) => r.error);
+
+      if (usable.length === 0) {
+        return NextResponse.json(
+          {
+            error: failed.length > 0
+              ? `Could not extract any content from the file(s). ${failed.map((f) => f.error).join(" ")}`
+              : "No content could be extracted. Please try again.",
+          },
+          { status: 422 }
+        );
+      }
+
+      // Multiple files are labeled so the AI (per the system prompt above)
+      // treats them as one combined quotation rather than separate ones —
+      // same labeling convention as the main RFQ extraction pipeline.
+      rawText = usable.length === 1
+        ? usable[0].text
+        : usable.map((r, i) => `--- Screenshot/File ${i + 1}: ${r.name} ---\n${r.text}`).join("\n\n");
     }
   } else {
     const body = await request.json() as { text?: string };

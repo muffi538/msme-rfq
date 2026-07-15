@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Loader2, ClipboardPaste, Upload, FileText, ImageIcon,
-  Sparkles, Send, CheckCircle2, X, Pencil, RotateCcw,
+  Sparkles, Send, CheckCircle2, X, Pencil, RotateCcw, Plus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ExtractedQuote, QuoteItem } from "@/app/api/rfq-reply/extract/route";
@@ -19,13 +19,19 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 
 type Step = "input" | "extracting" | "review";
 
+// A quotation can arrive as several WhatsApp screenshots (a long price
+// list split across screens) — must match MAX_FILES in
+// src/app/api/rfq-reply/extract/route.ts.
+const MAX_FILES = 6;
+
+type StagedFile = { file: File; previewUrl: string | null };
+
 export default function RfqReplyClient() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── Input state ──
   const [inputMode, setInputMode]     = useState<"paste" | "upload" | "text">("paste");
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [file, setFile]               = useState<File | null>(null);
+  const [files, setFiles]             = useState<StagedFile[]>([]);
   const [textInput, setTextInput]     = useState("");
 
   // ── Flow state ──
@@ -42,7 +48,34 @@ export default function RfqReplyClient() {
   const [sentAt, setSentAt]           = useState<string | null>(null);
   const [sentDetailsOpen, setSentDetailsOpen] = useState(false);
 
-  // ── Clipboard paste (Ctrl+V anywhere) ──
+// Adds new files to the staged batch, capped at MAX_FILES total (extra
+  // files beyond the cap are silently dropped — see the toast in each
+  // caller for the user-facing warning).
+  function addFiles(newFiles: File[], onLimitHit?: () => void) {
+    setFiles((prev) => {
+      const room = MAX_FILES - prev.length;
+      if (room <= 0) { onLimitHit?.(); return prev; }
+      const accepted = newFiles.slice(0, room);
+      if (newFiles.length > accepted.length) onLimitHit?.();
+      const staged = accepted.map((f) => ({
+        file: f,
+        previewUrl: f.type.startsWith("image/") ? URL.createObjectURL(f) : null,
+      }));
+      return [...prev, ...staged];
+    });
+  }
+
+  function removeFile(index: number) {
+    setFiles((prev) => {
+      const target = prev[index];
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((_, i) => i !== index);
+    });
+  }
+
+  // ── Clipboard paste (Ctrl+V anywhere) — appends to the batch, so pasting
+  // several screenshots in a row (e.g. a long price list split across
+  // WhatsApp screens) stages all of them for one combined extraction. ──
   const handlePaste = useCallback((e: ClipboardEvent) => {
     if (step !== "input") return;
     const clipItems = e.clipboardData?.items;
@@ -52,10 +85,9 @@ export default function RfqReplyClient() {
         const blob = item.getAsFile();
         if (!blob) continue;
         const f = new File([blob], `paste-${Date.now()}.png`, { type: blob.type });
-        setFile(f);
-        setImagePreview(URL.createObjectURL(f));
         setInputMode("paste");
-        toast.success("Screenshot pasted — hit Extract to process it");
+        addFiles([f], () => toast.error(`Maximum ${MAX_FILES} screenshots at once.`));
+        toast.success("Screenshot added — paste another or hit Extract");
         return;
       }
     }
@@ -75,10 +107,9 @@ export default function RfqReplyClient() {
         if (imageType) {
           const blob = await item.getType(imageType);
           const f = new File([blob], `paste-${Date.now()}.png`, { type: imageType });
-          setFile(f);
-          setImagePreview(URL.createObjectURL(f));
           setInputMode("paste");
-          toast.success("Screenshot pasted!");
+          addFiles([f], () => toast.error(`Maximum ${MAX_FILES} screenshots at once.`));
+          toast.success("Screenshot added!");
           return;
         }
       }
@@ -89,18 +120,16 @@ export default function RfqReplyClient() {
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setFile(f);
-    setImagePreview(f.type.startsWith("image/") ? URL.createObjectURL(f) : null);
+    const picked = Array.from(e.target.files ?? []);
+    if (picked.length === 0) return;
     setInputMode("upload");
+    addFiles(picked, () => toast.error(`Maximum ${MAX_FILES} files at once — the rest were skipped.`));
     e.target.value = "";
   }
 
   function reset() {
-    if (imagePreview) URL.revokeObjectURL(imagePreview);
-    setFile(null);
-    setImagePreview(null);
+    files.forEach((sf) => { if (sf.previewUrl) URL.revokeObjectURL(sf.previewUrl); });
+    setFiles([]);
     setTextInput("");
     setInputMode("paste");
     setStep("input");
@@ -153,9 +182,9 @@ export default function RfqReplyClient() {
           body: JSON.stringify({ text: textInput }),
         });
       } else {
-        if (!file) { toast.error("No file to process"); setStep("input"); return; }
+        if (files.length === 0) { toast.error("No file to process"); setStep("input"); return; }
         const form = new FormData();
-        form.append("file", file);
+        files.forEach(({ file }) => form.append("files", file));
         res = await fetch("/api/rfq-reply/extract", { method: "POST", body: form });
       }
 
@@ -250,7 +279,7 @@ export default function RfqReplyClient() {
 
   const canExtract =
     (inputMode === "text" && textInput.trim().length > 10) ||
-    ((inputMode === "paste" || inputMode === "upload") && !!file);
+    ((inputMode === "paste" || inputMode === "upload") && files.length > 0);
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -290,7 +319,12 @@ export default function RfqReplyClient() {
             ] as const).map(({ mode, label, icon: Icon }) => (
               <button
                 key={mode}
-                onClick={() => { setInputMode(mode); setFile(null); setImagePreview(null); setTextInput(""); }}
+                onClick={() => {
+                  setInputMode(mode);
+                  files.forEach((sf) => { if (sf.previewUrl) URL.revokeObjectURL(sf.previewUrl); });
+                  setFiles([]);
+                  setTextInput("");
+                }}
                 className={cn(
                   "flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors border-b-2",
                   inputMode === mode
@@ -308,35 +342,51 @@ export default function RfqReplyClient() {
             {/* ── Paste / Upload modes ── */}
             {(inputMode === "paste" || inputMode === "upload") && (
               <>
-                {imagePreview ? (
-                  <div className="relative group">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={imagePreview}
-                      alt="Quote preview"
-                      className="w-full max-h-80 object-contain rounded-xl border border-border bg-muted"
-                    />
-                    <button
-                      onClick={() => { if (imagePreview) URL.revokeObjectURL(imagePreview); setFile(null); setImagePreview(null); }}
-                      className="absolute top-2 right-2 w-7 h-7 bg-black/50 hover:bg-black/70 rounded-full flex items-center justify-center transition-colors"
-                    >
-                      <X className="w-3.5 h-3.5 text-white" />
-                    </button>
-                    <div className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
-                      <ImageIcon className="w-4 h-4" />
-                      {file?.name}
+                {files.length > 0 ? (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-3 gap-3">
+                      {files.map((sf, i) => (
+                        <div key={i} className="relative group">
+                          {sf.previewUrl ? (
+                            /* eslint-disable-next-line @next/next/no-img-element */
+                            <img
+                              src={sf.previewUrl}
+                              alt={`Quote page ${i + 1}`}
+                              className="w-full h-32 object-cover rounded-xl border border-border bg-muted"
+                            />
+                          ) : (
+                            <div className="w-full h-32 flex flex-col items-center justify-center gap-1.5 rounded-xl border border-border bg-muted/40 p-2">
+                              <FileText className="w-7 h-7 text-red-400" />
+                              <p className="text-xs text-muted-foreground truncate w-full text-center">{sf.file.name}</p>
+                            </div>
+                          )}
+                          <span className="absolute bottom-1.5 left-1.5 text-[10px] font-medium bg-black/60 text-white rounded px-1.5 py-0.5">
+                            {i + 1}
+                          </span>
+                          <button
+                            onClick={() => removeFile(i)}
+                            title="Remove"
+                            className="absolute top-1.5 right-1.5 w-6 h-6 bg-black/50 hover:bg-black/70 rounded-full flex items-center justify-center transition-colors"
+                          >
+                            <X className="w-3.5 h-3.5 text-white" />
+                          </button>
+                        </div>
+                      ))}
+                      {files.length < MAX_FILES && (
+                        <button
+                          onClick={() => inputMode === "upload" ? fileInputRef.current?.click() : handleClipboardButton()}
+                          className="w-full h-32 border-2 border-dashed border-border rounded-xl flex flex-col items-center justify-center gap-1.5 text-muted-foreground hover:border-blue-400 hover:bg-blue-50/30 dark:hover:bg-blue-950/10 transition-colors"
+                        >
+                          <Plus className="w-5 h-5" />
+                          <span className="text-xs font-medium">Add more</span>
+                        </button>
+                      )}
                     </div>
-                  </div>
-                ) : file ? (
-                  <div className="flex items-center gap-3 p-4 rounded-xl border border-border bg-muted/40">
-                    <FileText className="w-8 h-8 text-red-400 flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-sm truncate">{file.name}</p>
-                      <p className="text-xs text-muted-foreground">{(file.size / 1024).toFixed(0)} KB</p>
-                    </div>
-                    <button onClick={() => setFile(null)} className="text-muted-foreground hover:text-destructive">
-                      <X className="w-4 h-4" />
-                    </button>
+                    <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                      <ImageIcon className="w-3.5 h-3.5" />
+                      {files.length} file{files.length > 1 ? "s" : ""} added
+                      {files.length > 1 ? " — they'll be combined into a single quote when extracted." : ""}
+                    </p>
                   </div>
                 ) : (
                   <div
@@ -347,19 +397,19 @@ export default function RfqReplyClient() {
                       <>
                         <ClipboardPaste className="w-10 h-10 text-muted-foreground/50" />
                         <p className="font-medium text-muted-foreground">Click to paste from clipboard</p>
-                        <p className="text-sm text-muted-foreground/60">Or press <kbd className="px-1.5 py-0.5 bg-muted rounded text-xs font-mono">Ctrl+V</kbd> anywhere on this page</p>
+                        <p className="text-sm text-muted-foreground/60">Or press <kbd className="px-1.5 py-0.5 bg-muted rounded text-xs font-mono">Ctrl+V</kbd> anywhere on this page — paste multiple screenshots to combine them</p>
                       </>
                     ) : (
                       <>
                         <Upload className="w-10 h-10 text-muted-foreground/50" />
-                        <p className="font-medium text-muted-foreground">Click to upload file</p>
-                        <p className="text-sm text-muted-foreground/60">PDF, image (JPG/PNG), Excel, or text file</p>
+                        <p className="font-medium text-muted-foreground">Click to upload file(s)</p>
+                        <p className="text-sm text-muted-foreground/60">PDF, image (JPG/PNG), Excel, or text — select multiple to combine them</p>
                       </>
                     )}
                   </div>
                 )}
 
-                {inputMode === "paste" && !file && (
+                {inputMode === "paste" && files.length === 0 && (
                   <button
                     onClick={handleClipboardButton}
                     className="w-full flex items-center justify-center gap-2 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/20 dark:hover:bg-purple-950/40 border border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-300 font-medium text-sm rounded-xl py-3 transition-colors"
@@ -373,6 +423,7 @@ export default function RfqReplyClient() {
                 <input
                   ref={fileInputRef}
                   type="file"
+                  multiple
                   accept=".pdf,.jpg,.jpeg,.png,.webp,.xlsx,.xls,.csv,.txt"
                   className="hidden"
                   onChange={handleFileChange}
