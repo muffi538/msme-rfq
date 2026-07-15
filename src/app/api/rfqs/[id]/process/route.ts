@@ -113,6 +113,19 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
   const jobDeadline = jobStartedAt + JOB_DEADLINE_MS;
   console.log(`[rfqs/process] rfq=${rfqId} job=${jobId} started, deadline in ${JOB_DEADLINE_MS}ms`);
 
+  // The Cancel endpoint (/api/rfqs/[id]/cancel) only ever writes to the DB —
+  // it has no way to actually stop this background function once after()
+  // has started it, so this job keeps running to completion regardless of
+  // a cancel click. Without checking for that, fail() and the success path
+  // below would unconditionally overwrite a user-cancelled RFQ's status
+  // back to "failed"/"processed" the moment this function finally finishes
+  // — silently undoing the cancellation, and in the success case, saving
+  // items into a DB the user explicitly tried to stop the extraction for.
+  async function wasCancelledByUser(): Promise<boolean> {
+    const { data } = await supabase.from("rfqs").select("status").eq("id", rfqId).maybeSingle();
+    return data?.status === "cancelled";
+  }
+
   // Every failure exit needs to leave the RFQ in a real 'failed' state
   // (with the reason recorded) instead of the old behavior of silently
   // reverting to 'pending' — which made a failed run indistinguishable
@@ -120,8 +133,16 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
   // to show the user.
   async function fail(message: string) {
     console.log(`[rfqs/process] rfq=${rfqId} FAILED after ${Date.now() - jobStartedAt}ms: ${message}`);
-    await supabase.from("rfqs").update({ status: "failed", process_error: message }).eq("id", rfqId);
-    await updateJob(supabase, jobId, { status: "failed", error: message });
+    // The .neq guard makes this atomic against a concurrent cancel — a
+    // separate check-then-write would leave a race window where a cancel
+    // lands in between the check and this update.
+    await supabase.from("rfqs").update({ status: "failed", process_error: message }).eq("id", rfqId).neq("status", "cancelled");
+    // Same atomicity concern applies to the jobs row — updateJob's generic
+    // helper has no conditional support, so this goes straight to the
+    // table rather than clobbering a job the cancel route already marked
+    // "cancelled".
+    const { error } = await supabase.from("jobs").update({ status: "failed", error: message, updated_at: new Date().toISOString() }).eq("id", jobId).neq("status", "cancelled");
+    if (error) logError("[rfqs/process] jobs update failed", error);
   }
 
   try {
@@ -399,6 +420,15 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
         rfqWarnings.push("The AI response was very large and got cut off — some items near the end may be missing. Consider splitting this RFQ into smaller uploads.");
       }
 
+      // The AI extraction call above is the single longest stage (up to
+      // ~90s per chunk) — check for a cancel that raced it BEFORE mutating
+      // any data, rather than only at the very end. See wasCancelledByUser
+      // above for why this matters.
+      if (await wasCancelledByUser()) {
+        console.log(`[rfqs/process] rfq=${rfqId} was cancelled by the user during extraction — discarding results, not saving`);
+        return;
+      }
+
       // Re-processing: clear whatever a previous run produced.
       await supabase.from("rfq_items").delete().eq("rfq_id", rfqId);
       await supabase.from("rfq_item_images").delete().eq("rfq_id", rfqId);
@@ -493,13 +523,20 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
         logStageTiming(rfqId, "match_images", matchStartedAt);
       }
 
-      await supabase.from("rfqs").update({
+      // Atomic guard (see wasCancelledByUser above) — closes the race
+      // window between the earlier check and this write.
+      const { data: finalRfq } = await supabase.from("rfqs").update({
         status:            "processed",
         process_error:      null,
         source_rfq_number: meta.source_rfq_number,
         source_date:        meta.source_date,
         warnings:           rfqWarnings,
-      }).eq("id", rfqId);
+      }).eq("id", rfqId).neq("status", "cancelled").select("id");
+
+      if (!finalRfq || finalRfq.length === 0) {
+        console.log(`[rfqs/process] rfq=${rfqId} was cancelled by the user right at the finish line — items were already saved above, but not marking as processed`);
+        return;
+      }
 
       await report("complete", 1, 1);
       console.log(`[rfqs/process] rfq=${rfqId} job=${jobId} COMPLETED in ${Date.now() - jobStartedAt}ms`);
