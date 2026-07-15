@@ -9,8 +9,8 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  // RFQ, items, outgoing splits, and images don't depend on each other — fetch in parallel.
-  const [{ data: rfq }, { data: items }, { data: outgoing }, { data: images }] = await Promise.all([
+  // RFQ, items, outgoing splits, images, and source files don't depend on each other — fetch in parallel.
+  const [{ data: rfq }, { data: items }, { data: outgoing }, { data: images }, { data: files }] = await Promise.all([
     supabase.from("rfqs").select("*").eq("id", id).single(),
     supabase.from("rfq_items").select("*").eq("rfq_id", id).order("line_number"),
     supabase
@@ -19,6 +19,7 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
       .eq("rfq_id", id)
       .order("category"),
     supabase.from("rfq_item_images").select("*").eq("rfq_id", id).order("created_at"),
+    supabase.from("rfq_files").select("id, file_name, file_type, status, error, created_at").eq("rfq_id", id).order("created_at"),
   ]);
 
   if (!rfq) notFound();
@@ -68,6 +69,7 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
         outgoingStats={outgoingStats}
         buyerLog={buyerLog}
         itemImages={itemImages}
+        files={files ?? []}
       />
     </>
   );
