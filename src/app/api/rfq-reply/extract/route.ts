@@ -13,6 +13,10 @@ export const maxDuration = 60;
 // image — this caps how many can be combined into one extraction request,
 // keeping both cost and the route's own maxDuration bounded.
 const MAX_FILES = 6;
+// Matches MAX_UPLOAD_BYTES in the main RFQ upload route — comfortably under
+// OpenAI's file-upload limits, and bounds how much this route buffers into
+// memory per file (buffer.arrayBuffer() + a base64 copy for vision calls).
+const MAX_FILE_BYTES = 15 * 1024 * 1024;
 // Bounded concurrency for the per-file vision/parse calls — several images
 // run in parallel rather than serially, since each vision call alone can
 // take up to 45s and this route's own budget is 60s total.
@@ -196,6 +200,17 @@ export async function POST(request: NextRequest) {
     } else if (uploadedFiles.length > 0) {
       if (uploadedFiles.length > MAX_FILES) {
         return NextResponse.json({ error: `Too many files — maximum ${MAX_FILES} at once.` }, { status: 413 });
+      }
+      const empty = uploadedFiles.find((f) => f.size === 0);
+      if (empty) {
+        return NextResponse.json({ error: `"${empty.name}" is empty.` }, { status: 400 });
+      }
+      const tooLarge = uploadedFiles.find((f) => f.size > MAX_FILE_BYTES);
+      if (tooLarge) {
+        return NextResponse.json(
+          { error: `"${tooLarge.name}" is too large (${(tooLarge.size / 1024 / 1024).toFixed(1)}MB). Maximum is ${MAX_FILE_BYTES / 1024 / 1024}MB per file.` },
+          { status: 413 }
+        );
       }
 
       const results = await mapWithConcurrency(uploadedFiles, FILE_CONCURRENCY, extractTextFromFile);
