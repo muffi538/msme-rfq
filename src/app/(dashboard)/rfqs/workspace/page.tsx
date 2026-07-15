@@ -197,6 +197,7 @@ function WorkspaceInner() {
                 outgoingStats={tab.data!.outgoingStats}
                 buyerLog={tab.data!.buyerLog}
                 itemImages={tab.data!.itemImages}
+                files={tab.data!.files}
                 onDirtyChange={(d) => setDirty((prev) => ({ ...prev, [id]: d }))}
               />
             )}

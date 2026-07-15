@@ -11,7 +11,7 @@ type RfqImageRow = {
 // which needs to load several RFQs' full detail into browser state instead
 // of relying on one server-rendered page per RFQ.
 export async function fetchRfqDetail(supabase: SupabaseClient, id: string) {
-  const [{ data: rfq }, { data: items }, { data: outgoing }, { data: images }] = await Promise.all([
+  const [{ data: rfq }, { data: items }, { data: outgoing }, { data: images }, { data: files }] = await Promise.all([
     supabase.from("rfqs").select("*").eq("id", id).single(),
     supabase.from("rfq_items").select("*").eq("rfq_id", id).order("line_number"),
     supabase
@@ -20,6 +20,7 @@ export async function fetchRfqDetail(supabase: SupabaseClient, id: string) {
       .eq("rfq_id", id)
       .order("category"),
     supabase.from("rfq_item_images").select("*").eq("rfq_id", id).order("created_at"),
+    supabase.from("rfq_files").select("id, file_name, file_type, status, error, created_at").eq("rfq_id", id).order("created_at"),
   ]);
 
   if (!rfq) throw new Error("RFQ not found");
@@ -61,5 +62,6 @@ export async function fetchRfqDetail(supabase: SupabaseClient, id: string) {
     outgoingStats,
     buyerLog,
     itemImages,
+    files: files ?? [],
   };
 }

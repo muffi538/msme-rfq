@@ -70,6 +70,15 @@ type ItemImage = {
   match_confidence: number | null; signedUrl: string | null;
 };
 
+// One row per source file this RFQ was built from — every attachment PLUS
+// (when present) a synthetic "(email body)" row for line items typed
+// directly into the email itself, so a source that isn't a real uploaded
+// file still shows up here instead of being invisible.
+type RfqFile = {
+  id: string; file_name: string; file_type: string;
+  status: string | null; error: string | null; created_at: string;
+};
+
 type Rfq = {
   id: string; rfq_code: string; buyer_name: string | null;
   buyer_email: string | null; status: string; priority: string;
@@ -375,7 +384,7 @@ function SupplierSplitCard({
 
 export default function RfqDetailClient({
   rfq, items: initialItems, outgoing: initialOutgoing, outgoingItems,
-  outgoingStats, buyerLog, itemImages, onDirtyChange,
+  outgoingStats, buyerLog, itemImages, files, onDirtyChange,
 }: {
   rfq: Rfq;
   items: Item[];
@@ -384,6 +393,9 @@ export default function RfqDetailClient({
   outgoingStats: OutgoingStats;
   buyerLog: BuyerReplyLog | null;
   itemImages: ItemImage[];
+  // Optional (defaults to []) so this component doesn't hard-require every
+  // caller to fetch rfq_files — a legacy single-blob RFQ genuinely has none.
+  files?: RfqFile[];
   // Fires whenever this RFQ has locally-edited-but-unsent supplier message
   // text — used by the multi-RFQ workspace to warn before closing a tab.
   // Optional and unused by the single-RFQ page.
@@ -764,6 +776,7 @@ export default function RfqDetailClient({
           <TabsTrigger value="items">Items ({items.length})</TabsTrigger>
           <TabsTrigger value="split">Supplier Split ({outgoing.length})</TabsTrigger>
           <TabsTrigger value="status">Status</TabsTrigger>
+          <TabsTrigger value="files">Files ({files?.length ?? 0})</TabsTrigger>
         </TabsList>
 
         {/* ── TAB 1: Items ── */}
@@ -1073,6 +1086,58 @@ export default function RfqDetailClient({
                       </td>
                       <td className="px-6 py-3 text-gray-400 text-xs">
                         {o.sent_at ? new Date(o.sent_at).toLocaleString("en-IN") : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </TabsContent>
+
+        {/* ── TAB 4: Files — every source this RFQ was built from (each real
+            attachment plus, when present, the email body itself), so it's
+            visible at a glance which files were actually scanned and which
+            failed, instead of that only being inferable from item counts
+            and warning text. ── */}
+        <TabsContent value="files">
+          <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+            {!files || files.length === 0 ? (
+              <div className="flex flex-col items-center py-20 text-gray-400">
+                <FileText className="w-10 h-10 text-gray-200 mb-3" />
+                <p className="font-medium">No source files recorded for this RFQ</p>
+              </div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50">
+                    <th className="px-6 py-3">File</th>
+                    <th className="px-6 py-3">Type</th>
+                    <th className="px-6 py-3">Scan status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {files.map((f) => (
+                    <tr key={f.id} className="hover:bg-gray-50">
+                      <td className="px-6 py-3 font-medium text-gray-700">{f.file_name}</td>
+                      <td className="px-6 py-3 text-gray-500 text-xs uppercase">{f.file_type}</td>
+                      <td className="px-6 py-3">
+                        {f.status === "parsed" ? (
+                          <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium bg-green-50 text-green-700">
+                            <CheckCircle className="w-3 h-3" /> Scanned
+                          </span>
+                        ) : f.status === "failed" ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium bg-red-50 text-red-700"
+                            title={f.error ?? undefined}
+                          >
+                            <AlertTriangle className="w-3 h-3" /> Failed{f.error ? ` — ${f.error}` : ""}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium bg-gray-100 text-gray-500">
+                            <Loader2 className="w-3 h-3" /> Pending
+                          </span>
+                        )}
                       </td>
                     </tr>
                   ))}

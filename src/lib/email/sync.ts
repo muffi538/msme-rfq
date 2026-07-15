@@ -139,11 +139,15 @@ async function importOneEmail(supabase: SupabaseClient, userId: string, session:
       .map((att) => ({ att, type: detectFileType(att.filename, att.mimeType) }))
       .filter((a): a is { att: typeof email.attachments[number]; type: NonNullable<typeof a.type> } => a.type !== null);
 
+    const hasBodyText = email.bodyText.trim().length > 0;
+
     let rawText  = "";
     let fileType: string | null = null;
     const fileName = supported.length > 0 ? supported[0].att.filename : "(email body)";
 
-    if (supported.length === 0 && email.bodyText.trim()) {
+    if (supported.length === 0 && hasBodyText) {
+      // No attachments — the legacy single-blob path (rfqs.raw_text) handles
+      // this directly; no rfq_files rows needed at all.
       rawText  = email.bodyText;
       fileType = "text";
     } else if (supported.length > 0) {
@@ -209,7 +213,25 @@ async function importOneEmail(supabase: SupabaseClient, userId: string, session:
         }
       });
 
-      const { error: filesError } = await supabase.from("rfq_files").insert(uploadedRows);
+      // The email's own body text is a real, independent source of RFQ
+      // content in its own right — e.g. line items typed directly into the
+      // email with a product photo attached separately — and was
+      // previously silently dropped whenever there was also at least one
+      // attachment: this whole branch only handled attachments, and the
+      // body-text branch above only fires when supported.length === 0, so
+      // it never ran. Insert it as its own rfq_files row — already parsed
+      // (we already have the text, no download/parse step needed) — so the
+      // multi-file extraction pipeline treats it as a genuine additional
+      // source instead of losing it entirely.
+      const bodyRow = hasBodyText
+        ? [{
+            rfq_id: rfq.id, user_id: userId, file_name: "(email body)",
+            file_url: null, file_type: "text", raw_text: email.bodyText,
+            status: "parsed", error: null,
+          }]
+        : [];
+
+      const { error: filesError } = await supabase.from("rfq_files").insert([...uploadedRows, ...bodyRow]);
       if (filesError) logError("[gmail-sync] rfq_files insert failed", { messageId: email.messageId, error: filesError });
     }
 
