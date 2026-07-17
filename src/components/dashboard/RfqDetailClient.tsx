@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { RfqWorkflowTracker } from "@/components/dashboard/RfqWorkflowTracker";
 import { RfqLifecycleExpand } from "@/components/dashboard/RfqLifecycleExpand";
+import { ImageLightbox } from "@/components/dashboard/ImageLightbox";
 import {
   type BuyerReplyLog,
   type OutgoingStats,
@@ -68,6 +69,7 @@ type OutgoingItem = { outgoing_rfq_id: string; item_id: string };
 type ItemImage = {
   id: string; item_id: string | null; file_url: string; source_file_name: string | null;
   match_confidence: number | null; signedUrl: string | null;
+  category?: string | null; brand?: string | null; comment?: string | null;
 };
 
 // One row per source file this RFQ was built from — every attachment PLUS
@@ -384,7 +386,7 @@ function SupplierSplitCard({
 
 export default function RfqDetailClient({
   rfq, items: initialItems, outgoing: initialOutgoing, outgoingItems,
-  outgoingStats, buyerLog, itemImages, files, onDirtyChange,
+  outgoingStats, buyerLog, itemImages: initialItemImages, files, onDirtyChange,
 }: {
   rfq: Rfq;
   items: Item[];
@@ -403,6 +405,8 @@ export default function RfqDetailClient({
 }) {
   const [items, setItems]         = useState<Item[]>(initialItems);
   const [outgoing, setOutgoing]   = useState<OutgoingRfq[]>(initialOutgoing);
+  const [itemImages, setItemImages] = useState<ItemImage[]>(initialItemImages);
+  const [lightboxImage, setLightboxImage] = useState<ItemImage | null>(null);
   const [splitting, setSplitting] = useState(false);
   const [sending, setSending]     = useState<string | null>(null);
   const [splitError, setSplitError] = useState("");
@@ -461,6 +465,30 @@ export default function RfqDetailClient({
     } catch {
       setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, colour: previous } : i));
       toast.error("Couldn't save colour — please try again");
+    }
+  }
+
+  // --- Manually annotate an image (category/brand/comment) — mainly for
+  // "Unassigned Images", which have no line item of their own to carry
+  // this metadata otherwise, but works for any image. ---
+  async function updateImageMeta(
+    imageId: string,
+    patch: { category?: string | null; brand?: string | null; comment?: string | null }
+  ) {
+    const previous = itemImages.find((i) => i.id === imageId);
+    setItemImages((prev) => prev.map((i) => i.id === imageId ? { ...i, ...patch } : i));
+    try {
+      const res = await fetch(`/api/rfqs/${rfq.id}/image`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageId, ...patch }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      toast.success("Image details saved");
+    } catch {
+      if (previous) setItemImages((prev) => prev.map((i) => i.id === imageId ? previous : i));
+      toast.error("Couldn't save image details — please try again");
+      throw new Error("Save failed");
     }
   }
 
@@ -869,7 +897,9 @@ export default function RfqDetailClient({
                             img.signedUrl ? (
                               // eslint-disable-next-line @next/next/no-img-element
                               <img key={img.id} src={img.signedUrl} alt={img.source_file_name ?? "item photo"}
-                                className="w-8 h-8 rounded-lg object-cover border-2 border-white shadow-sm" />
+                                onClick={() => setLightboxImage(img)}
+                                title="Click to enlarge"
+                                className="w-8 h-8 rounded-lg object-cover border-2 border-white shadow-sm cursor-pointer hover:ring-2 hover:ring-blue-400 transition-shadow" />
                             ) : (
                               <div key={img.id} className="w-8 h-8 rounded-lg bg-gray-100 border-2 border-white flex items-center justify-center">
                                 <ImageOff className="w-3 h-3 text-gray-300" />
@@ -914,23 +944,36 @@ export default function RfqDetailClient({
             </table>
           </div>
 
-          {/* Images that couldn't be confidently matched to a line item */}
+          {/* Images that couldn't be confidently matched to a line item —
+              click to enlarge, and to manually assign a category/brand or
+              add a comment, since these have no line item of their own to
+              carry that metadata otherwise. */}
           {itemImages.some((img) => !img.item_id) && (
             <div className="mt-4 bg-white rounded-2xl border border-gray-100 p-5">
               <p className="text-sm font-medium text-gray-700 mb-3">Unassigned Images</p>
               <div className="flex flex-wrap gap-3">
                 {itemImages.filter((img) => !img.item_id).map((img) => (
-                  <div key={img.id} className="w-20 text-center">
+                  <div key={img.id} className="w-24 text-center">
                     {img.signedUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={img.signedUrl} alt={img.source_file_name ?? "unassigned"}
-                        className="w-20 h-20 rounded-lg object-cover border border-gray-100" />
+                        onClick={() => setLightboxImage(img)}
+                        title="Click to enlarge and edit"
+                        className="w-24 h-24 rounded-lg object-cover border border-gray-100 cursor-pointer hover:ring-2 hover:ring-blue-400 transition-shadow" />
                     ) : (
-                      <div className="w-20 h-20 rounded-lg bg-gray-100 flex items-center justify-center">
+                      <div className="w-24 h-24 rounded-lg bg-gray-100 flex items-center justify-center">
                         <ImageOff className="w-5 h-5 text-gray-300" />
                       </div>
                     )}
                     <p className="text-[10px] text-gray-400 truncate mt-1">{img.source_file_name ?? "image"}</p>
+                    {(img.category || img.brand) && (
+                      <p className="text-[10px] text-blue-600 truncate">
+                        {[img.category?.replace(/_/g, " "), img.brand].filter(Boolean).join(" · ")}
+                      </p>
+                    )}
+                    {img.comment && (
+                      <p className="text-[10px] text-gray-400 truncate" title={img.comment}>💬 {img.comment}</p>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1147,6 +1190,14 @@ export default function RfqDetailClient({
           </div>
         </TabsContent>
       </Tabs>
+
+      {lightboxImage && (
+        <ImageLightbox
+          image={lightboxImage}
+          onClose={() => setLightboxImage(null)}
+          onSave={updateImageMeta}
+        />
+      )}
     </main>
   );
 }
