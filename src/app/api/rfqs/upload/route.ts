@@ -152,7 +152,7 @@ async function runUploadJob(
     // reported as a normal failed chunk instead of taking every other
     // chunk's already-succeeded results down with it — see
     // normalizeAndCategorizeMulti's docstring.
-    const { meta, items, truncated, failedFiles, failedFileReasons } = await normalizeAndCategorizeMulti(multiInput, undefined, jobDeadline);
+    const { meta, items, truncated, failedFiles, failedFileReasons, truncatedFiles } = await normalizeAndCategorizeMulti(multiInput, undefined, jobDeadline);
 
     const rfqWarnings: string[] = failed.map((f) => f.error!).filter(Boolean);
     if (!meta.source_rfq_number) rfqWarnings.push("No RFQ number was found in the uploaded document(s).");
@@ -173,6 +173,13 @@ async function runUploadJob(
     }
     if (truncated && failedFiles.length === 0) {
       rfqWarnings.push("The AI response was very large and got cut off — some items near the end may be missing. Consider splitting this RFQ into smaller uploads.");
+    }
+    // Files that didn't fully fit in the shared per-RFQ content budget —
+    // some of that file WAS sent and may have contributed items, unlike
+    // failedFiles above where nothing from the file made it to the AI.
+    const stillTruncated = truncatedFiles.filter((f) => !failedFiles.includes(f));
+    if (stillTruncated.length > 0) {
+      rfqWarnings.push(`Some content from ${stillTruncated.join(", ")} didn't fit alongside the other attachment(s) and was skipped — please double-check for missing items, or upload it separately.`);
     }
 
     let insertedItems: { id: string; name: string; brand: string | null; spec: string | null }[] = [];

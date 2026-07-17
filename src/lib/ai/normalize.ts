@@ -491,22 +491,62 @@ type LabeledChunk = { text: string; fileNames: string[] };
 // describe what actually happened. Tracking file coverage per chunk lets
 // the caller detect exactly which file(s) ended up with zero items and
 // say so explicitly, instead of losing that information.
-function chunkLabeledFiles(files: MultiFileInput[]): LabeledChunk[] {
+// Allocates MAX_COMBINED_CHARS fairly across files instead of first-come-
+// first-served. Real case that motivated this: an email with a PDF and an
+// Excel attachment — the PDF's OCR'd text alone ran close to the whole
+// budget, so the old strictly-sequential version consumed it entirely on
+// file 1 and `break`d before file 2 (the Excel sheet) ever contributed a
+// single character to a chunk. That file was never sent to the AI at all,
+// with zero error, zero warning — every extracted item was then naturally
+// attributed to the PDF, making the Excel attachment look "skipped" with
+// no visible cause. Every file is now guaranteed at least an equal share
+// of the budget (files needing less than their share free it up for
+// files that need more), so a small file can no longer be silently
+// starved out by a large one ahead of it.
+function allocateFileBudget(files: MultiFileInput[]): Map<string, number> {
+  const fairShare = Math.floor(MAX_COMBINED_CHARS / files.length);
+  const allocated = new Map<string, number>();
+  let leftover = 0;
+  for (const f of files) {
+    const need = f.text.length;
+    if (need <= fairShare) {
+      allocated.set(f.fileName, need);
+      leftover += fairShare - need;
+    } else {
+      allocated.set(f.fileName, fairShare);
+    }
+  }
+  if (leftover > 0) {
+    for (const f of files) {
+      if (leftover <= 0) break;
+      const used = allocated.get(f.fileName)!;
+      const need = f.text.length - used;
+      if (need <= 0) continue;
+      const extra = Math.min(need, leftover);
+      allocated.set(f.fileName, used + extra);
+      leftover -= extra;
+    }
+  }
+  return allocated;
+}
+
+function chunkLabeledFiles(files: MultiFileInput[]): { chunks: LabeledChunk[]; truncatedFiles: string[] } {
+  const budget = allocateFileBudget(files);
+  const truncatedFiles: string[] = [];
   const chunks: LabeledChunk[] = [];
   let current = "";
   let currentFiles: string[] = [];
-  let usedChars = 0;
   for (const f of files) {
-    if (usedChars >= MAX_COMBINED_CHARS) break;
-    const labeled = `--- FILE: ${f.fileName} ---\n${f.text}`.slice(0, MAX_COMBINED_CHARS - usedChars);
-    if (labeled.length === 0) break;
+    const cap = budget.get(f.fileName)!;
+    if (cap < f.text.length) truncatedFiles.push(f.fileName);
+    if (cap === 0) continue;
+    const labeled = `--- FILE: ${f.fileName} ---\n${f.text.slice(0, cap)}`;
 
     if (labeled.length > CHUNK_CHAR_LIMIT) {
       if (current) { chunks.push({ text: current, fileNames: currentFiles }); current = ""; currentFiles = []; }
       for (let i = 0; i < labeled.length; i += CHUNK_CHAR_LIMIT) {
         chunks.push({ text: labeled.slice(i, i + CHUNK_CHAR_LIMIT), fileNames: [f.fileName] });
       }
-      usedChars += labeled.length;
       continue;
     }
     const sepLen = current ? 2 : 0;
@@ -514,15 +554,13 @@ function chunkLabeledFiles(files: MultiFileInput[]): LabeledChunk[] {
       chunks.push({ text: current, fileNames: currentFiles });
       current = labeled;
       currentFiles = [f.fileName];
-      usedChars += labeled.length;
     } else {
       current = current ? `${current}\n\n${labeled}` : labeled;
       currentFiles.push(f.fileName);
-      usedChars += sepLen + labeled.length;
     }
   }
   if (current) chunks.push({ text: current, fileNames: currentFiles });
-  return chunks;
+  return { chunks, truncatedFiles };
 }
 
 // Sanitizes any error from a single chunk's extraction attempt into a safe
@@ -699,8 +737,11 @@ export async function normalizeAndCategorizeMulti(
   files: MultiFileInput[],
   onProgress?: (processed: number, total: number) => void,
   deadlineAt?: number
-): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[]; failedFileReasons: Record<string, string> }> {
-  const chunks = chunkLabeledFiles(files);
+): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[]; failedFileReasons: Record<string, string>; truncatedFiles: string[] }> {
+  const { chunks, truncatedFiles } = chunkLabeledFiles(files);
+  if (truncatedFiles.length > 0) {
+    console.log(`[normalize] combined-budget truncation: ${truncatedFiles.join(", ")} did not fully fit in MAX_COMBINED_CHARS=${MAX_COMBINED_CHARS} and were only partially sent to the AI`);
+  }
   console.log(`[normalize] split ${files.length} file(s) into ${chunks.length} AI extraction chunk(s)`);
   if (chunks.length > CHUNK_CONCURRENCY) {
     console.log(`[normalize] ${chunks.length} chunks exceed CHUNK_CONCURRENCY=${CHUNK_CONCURRENCY} — some will queue for a free slot, extending total wall-clock time`);
@@ -839,5 +880,5 @@ export async function normalizeAndCategorizeMulti(
     });
   }).filter((item) => item.name.trim().length > 0);
 
-  return { meta, items: dedupeItems(items), truncated, failedFiles, failedFileReasons };
+  return { meta, items: dedupeItems(items), truncated, failedFiles, failedFileReasons, truncatedFiles };
 }

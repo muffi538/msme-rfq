@@ -151,7 +151,8 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       .from("rfq_files")
       .select("id, file_name, file_url, file_type, raw_text, status, error")
       .eq("rfq_id", rfqId)
-      .order("created_at");
+      .order("created_at")
+      .order("id"); // tiebreaker — attachments on the same email are inserted in one batch and can share an identical created_at, which otherwise makes their processing order (and so which file wins chunkLabeledFiles' budget below) unpredictable
 
     await supabase.from("rfqs").update({ status: "processing", process_error: null }).eq("id", rfqId);
 
@@ -381,7 +382,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       // discarding every OTHER chunk's already-succeeded results too. This
       // outer race stays as defense-in-depth for anything unexpected, not
       // the primary mechanism anymore.
-      const { meta, items, truncated, failedFiles, failedFileReasons } = await raceWithDeadline(
+      const { meta, items, truncated, failedFiles, failedFileReasons, truncatedFiles } = await raceWithDeadline(
         normalizeAndCategorizeMulti(multiInput, (processed, total) => { report("extract_items", processed, total); }, jobDeadline),
         jobDeadline,
         "AI item extraction"
@@ -411,6 +412,14 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       }
       if (truncated && failedFiles.length === 0) {
         rfqWarnings.push("The AI response was very large and got cut off — some items near the end may be missing. Consider splitting this RFQ into smaller uploads.");
+      }
+      // Files that didn't fully fit in the shared per-RFQ content budget
+      // (see chunkLabeledFiles/allocateFileBudget) — some of that file WAS
+      // sent and may have contributed items, unlike failedFiles above where
+      // nothing from the file made it to the AI at all.
+      const stillTruncated = truncatedFiles.filter((f) => !failedFiles.includes(f));
+      if (stillTruncated.length > 0) {
+        rfqWarnings.push(`Some content from ${stillTruncated.join(", ")} didn't fit alongside the other attachment(s) and was skipped — please double-check for missing items, or upload it separately.`);
       }
 
       // The AI extraction call above is the single longest stage (up to
