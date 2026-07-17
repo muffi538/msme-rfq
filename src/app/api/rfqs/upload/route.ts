@@ -17,6 +17,15 @@ const MAX_UPLOAD_BYTES = 15 * 1024 * 1024; // 15MB per file — comfortably unde
 const MAX_FILES = 10;
 const FILE_CONCURRENCY = 3; // bounded — avoids firing dozens of simultaneous OpenAI OCR calls for a big batch
 
+// This route previously had NO internal deadline at all — only the
+// platform's hard maxDuration kill above, which terminates the function
+// outright with no chance to write a clean "failed" status, leaving the
+// job stuck in "running" forever from the client's perspective (found
+// auditing this route against the same standard process/route.ts already
+// meets). Mirrors process/route.ts's JOB_DEADLINE_MS exactly — same
+// reasoning, same margin before maxDuration.
+const JOB_DEADLINE_MS = 110_000;
+
 type ProgressStage = "uploading" | "ocr" | "parsing" | "matching" | "complete";
 
 async function runUploadJob(
@@ -28,6 +37,7 @@ async function runUploadJob(
   buyerEmail: string | null,
   priority: string
 ) {
+  const jobDeadline = Date.now() + JOB_DEADLINE_MS;
   const report = (stage: ProgressStage, processed: number, currentFile?: string) =>
     updateJob(supabase, jobId, { status: "running", progress: { stage, processed, total: files.length, currentFile } });
 
@@ -138,7 +148,11 @@ async function runUploadJob(
     // Merge + extract across every successfully-parsed file
     await report("parsing", files.length);
     const multiInput: MultiFileInput[] = usable.map((f) => ({ fileName: f.name, text: f.text }));
-    const { meta, items, truncated, failedFiles, failedFileReasons } = await normalizeAndCategorizeMulti(multiInput);
+    // jobDeadline passed through so a chunk that can't finish in time is
+    // reported as a normal failed chunk instead of taking every other
+    // chunk's already-succeeded results down with it — see
+    // normalizeAndCategorizeMulti's docstring.
+    const { meta, items, truncated, failedFiles, failedFileReasons } = await normalizeAndCategorizeMulti(multiInput, undefined, jobDeadline);
 
     const rfqWarnings: string[] = failed.map((f) => f.error!).filter(Boolean);
     if (!meta.source_rfq_number) rfqWarnings.push("No RFQ number was found in the uploaded document(s).");

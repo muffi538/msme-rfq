@@ -8,11 +8,21 @@
 export async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Promise<string> {
   const base64 = buffer.toString("base64");
   const isPdf  = mimeType.includes("pdf");
+  const startedAt = Date.now();
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: JSON.stringify({
       model: "gpt-4o",
+      // Root cause of "the same document sometimes succeeds, sometimes
+      // fails": this call had no temperature set, so it defaulted to 1.0 —
+      // genuine sampling randomness on every OCR call, meaning the exact
+      // same image could legitimately produce DIFFERENT extracted text
+      // (different wording/digit transcription) run to run, which then
+      // cascades into different downstream extraction outcomes for what
+      // the user sees as "the same document." OCR is a transcription task,
+      // not a creative one — there's no reason for it to vary.
+      temperature: 0,
       messages: [{
         role: "user",
         content: isPdf
@@ -28,12 +38,18 @@ export async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Pr
     }),
     signal: AbortSignal.timeout(45000),
   });
+  // OpenAI's own request id — the single most useful thing to hand OpenAI
+  // support/dashboard lookups when a specific call is slow or misbehaves,
+  // and otherwise unrecoverable after the fact.
+  const requestId = res.headers.get("x-request-id");
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText);
+    console.log(`[extractTextViaOpenAI] FAILED status=${res.status} requestId=${requestId} durationMs=${Date.now() - startedAt} mime=${mimeType} bytes=${buffer.length}`);
     throw new Error(`OpenAI vision error (${res.status}): ${errText}`);
   }
   const json = await res.json();
   const content = json.choices?.[0]?.message?.content;
+  console.log(`[extractTextViaOpenAI] COMPLETE requestId=${requestId} durationMs=${Date.now() - startedAt} mime=${mimeType} bytes=${buffer.length} tokens=${JSON.stringify(json.usage ?? {})}`);
   if (!content) throw new Error("OpenAI returned no text content");
   return content;
 }

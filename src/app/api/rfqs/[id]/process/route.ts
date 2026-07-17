@@ -10,6 +10,7 @@ import { checkRateLimit } from "@/lib/rateLimit";
 import { createJob, updateJob, findActiveJobForRfq } from "@/lib/jobs";
 import { withRetry } from "@/lib/retry";
 import { mapWithConcurrency } from "@/lib/concurrency";
+import { raceWithDeadline } from "@/lib/timeout";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const maxDuration = 120;
@@ -36,20 +37,6 @@ const DOWNLOAD_TIMEOUT_MS = 20_000; // storage.download() has no built-in timeou
 // room to accommodate raising it. Still leaves a 10s buffer before
 // maxDuration.
 const JOB_DEADLINE_MS = 110_000;
-
-class JobTimeoutError extends Error {
-  constructor(label: string) { super(`${label} took too long — processing was stopped after its safe time budget to avoid hanging forever.`); }
-}
-
-function raceWithDeadline<T>(promise: Promise<T>, deadlineAt: number, label: string): Promise<T> {
-  const remaining = deadlineAt - Date.now();
-  if (remaining <= 0) return Promise.reject(new JobTimeoutError(label));
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<T>((_, reject) => {
-    timer = setTimeout(() => reject(new JobTimeoutError(label)), remaining);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
 
 // Per-stage timing, logged unconditionally (not just on failure) — the
 // "add logs and timing for every stage" requirement, and genuinely useful
@@ -388,8 +375,14 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       // jumping straight to done. A fire-and-forget report() call, same
       // pattern already used for the download/parse stage's per-file
       // progress above.
+      // jobDeadline is now also passed INTO normalizeAndCategorizeMulti
+      // itself (see its docstring) so a chunk that can't finish in time is
+      // reported as a normal failed chunk rather than this outer race
+      // discarding every OTHER chunk's already-succeeded results too. This
+      // outer race stays as defense-in-depth for anything unexpected, not
+      // the primary mechanism anymore.
       const { meta, items, truncated, failedFiles, failedFileReasons } = await raceWithDeadline(
-        normalizeAndCategorizeMulti(multiInput, (processed, total) => { report("extract_items", processed, total); }),
+        normalizeAndCategorizeMulti(multiInput, (processed, total) => { report("extract_items", processed, total); }, jobDeadline),
         jobDeadline,
         "AI item extraction"
       );
