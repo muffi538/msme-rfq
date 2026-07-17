@@ -41,6 +41,7 @@ export type ExtractedQuote = {
 };
 
 async function extractWithVision(base64: string, mimeType: string): Promise<string> {
+  const startedAt = Date.now();
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -49,6 +50,10 @@ async function extractWithVision(base64: string, mimeType: string): Promise<stri
     },
     body: JSON.stringify({
       model: "gpt-4o",
+      // OCR is transcription, not generation — no reason for it to vary
+      // run to run on the identical image. Previously unset (defaulted to
+      // 1.0), a real source of non-deterministic extraction output.
+      temperature: 0,
       messages: [{
         role: "user",
         content: [
@@ -59,8 +64,23 @@ async function extractWithVision(base64: string, mimeType: string): Promise<stri
     }),
     signal: AbortSignal.timeout(45000),
   });
-  const json = await res.json() as { choices: { message: { content: string } }[] };
-  return json.choices?.[0]?.message?.content ?? "";
+  const requestId = res.headers.get("x-request-id");
+  // Previously skipped this check entirely — an OpenAI error response
+  // (429/5xx/4xx) silently parsed as { choices: undefined } and fell
+  // through to "" below, indistinguishable from "this image genuinely has
+  // no text." The caller (extractTextFromFile) treats an empty result as
+  // usable-but-empty, not a failure, so a real API error here previously
+  // vanished instead of being retried or reported.
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    console.log(`[extractWithVision] FAILED status=${res.status} requestId=${requestId} durationMs=${Date.now() - startedAt} mime=${mimeType}`);
+    throw new Error(`OpenAI vision error (${res.status}): ${errText}`);
+  }
+  const json = await res.json() as { choices: { message: { content: string } }[]; usage?: unknown };
+  console.log(`[extractWithVision] COMPLETE requestId=${requestId} durationMs=${Date.now() - startedAt} mime=${mimeType} tokens=${JSON.stringify(json.usage ?? {})}`);
+  const content = json.choices?.[0]?.message?.content;
+  if (!content) throw new Error("OpenAI returned no text content");
+  return content;
 }
 
 // Extracts raw text from one uploaded file, routing by type exactly like
@@ -102,6 +122,7 @@ async function parseQuote(
     ? `\n\nUse this template as the structure/tone for the email_body. Substitute the placeholders with the extracted values, keep the wording natural, and adapt it as needed:\n\n---\n${buyerReplyTemplate}\n---\n\nPlaceholders the user defined: {customer} = the buyer name (use a polite generic like "Sir/Madam" if unknown), {items} = item-wise list with qty + unit price, {totalPrice} = sum total in ₹, {deliveryDays}, {paymentTerms}, {validityDays}, {company} = "${companyName}".`
     : `\n\nFor email_body: write in warm Indian business English. Include a friendly opening, a clear item-wise price list (with quantities and units), delivery and payment terms, and end with a call to confirm or contact. Sign off as "${companyName}".`;
 
+  const startedAt = Date.now();
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -140,19 +161,23 @@ Do NOT include a subject line inside the body.`,
     signal: AbortSignal.timeout(45000),
   });
 
+  const requestId = res.headers.get("x-request-id");
   if (!res.ok) {
     const err = await res.text();
+    console.log(`[rfq-reply/parseQuote] FAILED status=${res.status} requestId=${requestId} durationMs=${Date.now() - startedAt}`);
     throw new Error(`OpenAI error: ${err}`);
   }
 
-  const json = await res.json() as { choices?: { message: { content: string } }[] };
+  const json = await res.json() as { choices?: { message: { content: string } }[]; usage?: unknown };
   const content = json.choices?.[0]?.message?.content;
   if (!content) throw new Error("OpenAI returned no content");
+  console.log(`[rfq-reply/parseQuote] COMPLETE requestId=${requestId} durationMs=${Date.now() - startedAt} tokens=${JSON.stringify(json.usage ?? {})}`);
 
   let parsed: ExtractedQuote;
   try {
     parsed = JSON.parse(content) as ExtractedQuote;
   } catch {
+    console.log(`[rfq-reply/parseQuote] AI returned invalid JSON, requestId=${requestId}, rawContent=${content.slice(0, 500)}`);
     throw new Error("AI returned invalid JSON");
   }
 

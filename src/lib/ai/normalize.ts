@@ -1,6 +1,7 @@
 import { withRetry } from "@/lib/retry";
 import { logError } from "@/lib/logError";
 import { mapWithConcurrency } from "@/lib/concurrency";
+import { raceWithDeadline, JobTimeoutError } from "@/lib/timeout";
 import { BUILT_IN_CATEGORIES as CATEGORIES, DEFAULT_CATEGORY, type Category } from "@/lib/categories";
 
 export type { Category };
@@ -392,16 +393,21 @@ ${labeled}`,
     throw err;
   }
 
+  // OpenAI's own request id — hand this to OpenAI support/dashboard lookups
+  // when a specific call was slow or misbehaved; otherwise unrecoverable
+  // after the fact.
+  const requestId = res.headers.get("x-request-id");
+
   if (!res.ok) {
     const body = await res.text();
-    console.log(`[normalize] AI FAILED chars=${labeled.length} structured=${useStructuredOutput} status=${res.status} after ${Date.now() - callStartedAt}ms body=${body.slice(0, 500)}`);
+    console.log(`[normalize] AI FAILED chars=${labeled.length} structured=${useStructuredOutput} status=${res.status} requestId=${requestId} after ${Date.now() - callStartedAt}ms body=${body.slice(0, 500)}`);
     if (res.status === 429 || res.status >= 500) throw new OpenAiError(body, res.status);
     if (res.status === 400 && useStructuredOutput) throw new SchemaRejectedError(body);
     // Non-retryable — surface immediately instead of burning retries.
     throw Object.assign(new Error(`OpenAI error: ${body}`), { nonRetryable: true });
   }
 
-  const json = await res.json() as { choices?: { message: { content: string }; finish_reason?: string }[] };
+  const json = await res.json() as { choices?: { message: { content: string }; finish_reason?: string }[]; usage?: unknown };
   const choice = json.choices?.[0];
   const content = choice?.message?.content;
   if (!content) throw new Error("OpenAI returned no content");
@@ -411,7 +417,7 @@ ${labeled}`,
   // path below and the truncation warning surfaced to the user are both
   // acting on a confirmed cause, not a guess.
   const truncatedByModel = choice?.finish_reason === "length";
-  console.log(`[normalize] AI COMPLETE chars_in=${labeled.length} chars_out=${content.length} truncated=${truncatedByModel} in ${Date.now() - callStartedAt}ms`);
+  console.log(`[normalize] AI COMPLETE chars_in=${labeled.length} chars_out=${content.length} truncated=${truncatedByModel} requestId=${requestId} tokens=${JSON.stringify(json.usage ?? {})} in ${Date.now() - callStartedAt}ms`);
 
   let parsed: unknown;
   try {
@@ -672,12 +678,33 @@ async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) 
 // number, not necessarily an integer — it's the sum of each chunk's own
 // fraction-of-complete, so it climbs smoothly as attempts start rather
 // than only ticking once per whole chunk.
+//
+// `deadlineAt`, if given, is the caller's own overall job deadline (e.g.
+// JOB_DEADLINE_MS in process/route.ts) — NOT a new/extra timeout. Root
+// cause this closes: chunkLabeledFiles keeps whole files together where
+// possible, but files in roughly the 3000-6000 char range (a realistic
+// size for one OCR'd screenshot or scanned page) can't pair up under
+// CHUNK_CHAR_LIMIT, so 4+ such files produce 4+ chunks — MORE than
+// CHUNK_CONCURRENCY (3). The extra chunk(s) then queue for a free
+// concurrency slot, which can push total wall-clock time past the job's
+// own deadline. Previously that meant the caller's OWN outer deadline
+// race rejected the ENTIRE call — discarding every chunk's results,
+// including ones that had already succeeded, and failing the whole RFQ
+// with a generic timeout. Now each chunk is individually raced against
+// the SAME shared deadline: a chunk that can't finish in time is reported
+// as a normal failed chunk (same failedFiles/failedFileReasons mechanism
+// as any other chunk failure) instead of taking every other chunk's
+// real, already-computed results down with it.
 export async function normalizeAndCategorizeMulti(
   files: MultiFileInput[],
-  onProgress?: (processed: number, total: number) => void
+  onProgress?: (processed: number, total: number) => void,
+  deadlineAt?: number
 ): Promise<{ meta: RfqMeta; items: MergedItem[]; truncated: boolean; failedFiles: string[]; failedFileReasons: Record<string, string> }> {
   const chunks = chunkLabeledFiles(files);
   console.log(`[normalize] split ${files.length} file(s) into ${chunks.length} AI extraction chunk(s)`);
+  if (chunks.length > CHUNK_CONCURRENCY) {
+    console.log(`[normalize] ${chunks.length} chunks exceed CHUNK_CONCURRENCY=${CHUNK_CONCURRENCY} — some will queue for a free slot, extending total wall-clock time`);
+  }
 
   const chunkFractions = new Array(chunks.length).fill(0);
   function reportChunkFraction(index: number, fraction: number) {
@@ -687,7 +714,24 @@ export async function normalizeAndCategorizeMulti(
   const results = await mapWithConcurrency(
     chunks,
     CHUNK_CONCURRENCY,
-    (chunk, index) => runChunk(chunk, (fraction) => reportChunkFraction(index, fraction))
+    async (chunk, index) => {
+      const onSubProgress = (fraction: number) => reportChunkFraction(index, fraction);
+      const outcome = runChunk(chunk, onSubProgress);
+      if (deadlineAt === undefined) return outcome;
+      try {
+        return await raceWithDeadline(outcome, deadlineAt, `RFQ item extraction chunk (${chunk.fileNames.join(", ")})`);
+      } catch (err) {
+        if (!(err instanceof JobTimeoutError)) throw err; // runChunk itself never throws — an unexpected error, don't swallow it
+        reportChunkFraction(index, 1);
+        const detail = err.message;
+        logError(`[normalize] chunk (${chunk.fileNames.join(", ")}) ran out of the job's shared deadline (continuing with the rest)`, detail);
+        return {
+          data: null, truncated: false, failed: true, detail,
+          reason: "Ran out of shared processing time — this RFQ has several large attachments; try processing it again.",
+          fileNames: chunk.fileNames,
+        } as ChunkOutcome;
+      }
+    }
   );
   const succeeded = results.filter((r): r is ChunkOutcome & { failed: false } => !r.failed);
 

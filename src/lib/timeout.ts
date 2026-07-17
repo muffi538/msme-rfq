@@ -18,3 +18,26 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
+
+// Same idea as withTimeout, but bound to a fixed point in time shared across
+// an entire job (e.g. JOB_DEADLINE_MS in the process route) rather than a
+// fresh duration per call — lets many independent steps all race against
+// the SAME overall budget instead of each getting their own full timeout
+// stacked on top of the others. Moved here (was process/route.ts-local)
+// so normalize.ts's per-chunk AI calls can share it too — see its use in
+// runChunk, which needs to stop waiting on a chunk that would otherwise
+// finish only after the job's own deadline has already passed, without
+// throwing away whatever OTHER chunks already succeeded.
+export class JobTimeoutError extends Error {
+  constructor(label: string) { super(`${label} took too long — processing was stopped after its safe time budget to avoid hanging forever.`); }
+}
+
+export function raceWithDeadline<T>(promise: Promise<T>, deadlineAt: number, label: string): Promise<T> {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) return Promise.reject(new JobTimeoutError(label));
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new JobTimeoutError(label)), remaining);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
