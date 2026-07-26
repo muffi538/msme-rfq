@@ -843,10 +843,20 @@ export async function normalizeAndCategorizeMulti(
     return match ? [match] : [];
   }
 
-  // A running counter across ALL chunks (not reset per chunk) — using a
-  // per-chunk index as the line_number fallback would produce duplicate
-  // line numbers across chunks whenever the model didn't supply "n"
-  // itself.
+  // A running counter across ALL chunks (not reset per chunk), and used
+  // UNCONDITIONALLY — not as a fallback behind the model's own "n". Root
+  // cause of a real, confirmed bug: each chunk is a separate AI call with
+  // no visibility into any other chunk, so the model naturally numbers
+  // "n" starting from 1 within its own chunk every time (confirmed via a
+  // real executed test feeding two chunks through the actual merge code:
+  // chunk 1 returned n=1,2 and chunk 2 ALSO returned n=1,2,3 — trusting
+  // "n" as line_number produced two items both numbered 1 and two both
+  // numbered 2 in the final merged list, then dedupeItems' sort-by-
+  // line_number interleaved items from different files instead of
+  // grouping them). "n" is still sent to the model purely as a
+  // generation aid (helps it keep track while writing a long items
+  // array); it must never be trusted as the final display order once
+  // results from multiple independent chunks are combined.
   let globalIndex = 0;
   const items: MergedItem[] = succeeded.flatMap((r) => {
     const raw = r.data.items ?? [];
@@ -859,7 +869,7 @@ export async function normalizeAndCategorizeMulti(
       if (conf < 0.6) warnings.push("Low overall extraction confidence — please double-check this row.");
 
       return {
-        line_number:         Number(item.n ?? item.line_number ?? i + 1),
+        line_number:         i + 1,
         raw_text:            String(item.name ?? ""),
         name:                String(item.name ?? ""),
         qty:                 item.qty != null ? Number(item.qty) : null,

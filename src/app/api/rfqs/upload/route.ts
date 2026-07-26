@@ -48,8 +48,12 @@ async function runUploadJob(
     const uploadResults = await mapWithConcurrency(
       files,
       FILE_CONCURRENCY,
-      async (f) => {
-        const path = `${userId}/${Date.now()}-${f.name}`;
+      async (f, i) => {
+        // Index included so two files with the SAME name in one upload
+        // batch never collide on the same millisecond-granularity path —
+        // see the matching comment/fix in lib/email/sync.ts, where this was
+        // confirmed to actually happen under concurrent upload.
+        const path = `${userId}/${Date.now()}-${i}-${f.name}`;
         try {
           await withRetry(
             async () => {

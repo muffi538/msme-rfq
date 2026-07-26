@@ -196,8 +196,16 @@ async function importOneEmail(supabase: SupabaseClient, userId: string, session:
     }
 
     if (supported.length > 0) {
-      const uploadedRows = await mapWithConcurrency(supported, 3, async ({ att, type }) => {
-        const path = `${userId}/${Date.now()}-${att.filename}`;
+      const uploadedRows = await mapWithConcurrency(supported, 3, async ({ att, type }, i) => {
+        // The index guarantees uniqueness even when two attachments in the
+        // SAME email share an identical filename (confirmed reproducible: a
+        // real test with two "photo.jpg" attachments uploaded concurrently
+        // landed on the exact same Date.now() millisecond, so the second
+        // upload hit Supabase Storage's upsert:false collision check and
+        // failed — that attachment's file_url ended up null, and it later
+        // failed processing with the misleading "Could not find the stored
+        // file" error instead of ever being read).
+        const path = `${userId}/${Date.now()}-${i}-${att.filename}`;
         try {
           await withRetry(
             async () => {
