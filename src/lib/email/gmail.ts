@@ -212,38 +212,53 @@ type GmailPayload = {
   filename?: string;
 };
 
+// Large attachments (no inline body.data) each need their own
+// attachments.get round trip. Split into two phases so those round trips
+// run concurrently instead of one at a time: first a pure, synchronous
+// tree walk collects every attachment-bearing part (no I/O, can't be slow),
+// then all the actual fetching/decoding runs together. Previously this was
+// one recursive async walk that awaited each part in sequence — for an
+// email with several "large" attachments (e.g. multiple scanned PDFs from
+// a phone), that meant N sequential Gmail API calls where N-1 of them
+// could have been happening at the same time.
+const ATTACHMENT_FETCH_CONCURRENCY = 5;
+
+function collectAttachmentParts(payload: GmailPayload): GmailPayload[] {
+  const parts: GmailPayload[] = [];
+  function walk(p: GmailPayload) {
+    if (p.filename && p.filename.length > 0) parts.push(p);
+    for (const part of p.parts ?? []) walk(part);
+  }
+  walk(payload);
+  return parts;
+}
+
 async function extractAttachments(
   messageId: string,
   payload: GmailPayload,
   token: string
 ): Promise<FetchedEmail["attachments"]> {
-  const results: FetchedEmail["attachments"] = [];
+  const parts = collectAttachmentParts(payload);
 
-  async function walk(p: GmailPayload) {
-    if (p.filename && p.filename.length > 0) {
-      let buffer: Buffer | null = null;
+  const fetched = await mapWithConcurrency(parts, ATTACHMENT_FETCH_CONCURRENCY, async (p) => {
+    let buffer: Buffer | null = null;
 
-      if (p.body?.attachmentId) {
-        // Large attachment — fetched separately
-        const attData = await gmailGet(
-          `/messages/${messageId}/attachments/${p.body.attachmentId}`,
-          token
-        ) as { data?: string };
-        if (attData.data) buffer = decodeBase64(attData.data);
-      } else if (p.body?.data) {
-        // Small attachment — data is inline in the payload
-        buffer = decodeBase64(p.body.data);
-      }
-
-      if (buffer && buffer.length > 0) {
-        results.push({ filename: p.filename, mimeType: p.mimeType, buffer });
-      }
+    if (p.body?.attachmentId) {
+      // Large attachment — fetched separately
+      const attData = await gmailGet(
+        `/messages/${messageId}/attachments/${p.body.attachmentId}`,
+        token
+      ) as { data?: string };
+      if (attData.data) buffer = decodeBase64(attData.data);
+    } else if (p.body?.data) {
+      // Small attachment — data is inline in the payload
+      buffer = decodeBase64(p.body.data);
     }
-    for (const part of p.parts ?? []) await walk(part);
-  }
 
-  await walk(payload);
-  return results;
+    return buffer && buffer.length > 0 ? { filename: p.filename!, mimeType: p.mimeType, buffer } : null;
+  });
+
+  return fetched.filter((a): a is FetchedEmail["attachments"][number] => a !== null);
 }
 
 export async function sendEmail({
