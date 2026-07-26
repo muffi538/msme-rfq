@@ -33,7 +33,7 @@ export default function TallyImportPage() {
   const [excelSuppliers, setExcelSuppliers] = useState<ParsedSupplier[] | null>(null);
   const [parsing, setParsing] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [result, setResult]   = useState<{ imported: number; skipped: number; total: number } | null>(null);
+  const [result, setResult]   = useState<{ total: number; imported: number; updated: number; skipped: number; failed: number; errors: string[] } | null>(null);
   const [error, setError]     = useState("");
 
   async function handleImport() {
@@ -56,7 +56,7 @@ export default function TallyImportPage() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Import failed");
       setResult(json);
-      toast.success(`${json.imported} suppliers imported from Tally!`);
+      toast.success(`${json.imported} imported, ${json.updated} updated from Tally!`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Import failed";
       setError(msg);
@@ -256,12 +256,28 @@ export default function TallyImportPage() {
         {result && (
           <div className="bg-green-50 rounded-xl p-4 flex items-start gap-3">
             <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
-            <div>
+            <div className="flex-1">
               <p className="font-semibold text-green-800">Import complete!</p>
-              <p className="text-sm text-green-700 mt-0.5">
-                {result.imported} suppliers imported · {result.skipped} skipped (duplicates)
-              </p>
-              <p className="text-xs text-green-600 mt-1">
+              <div className="grid grid-cols-5 gap-2 mt-2 text-center">
+                {[
+                  ["Total", result.total],
+                  ["Imported", result.imported],
+                  ["Updated", result.updated],
+                  ["Skipped", result.skipped],
+                  ["Failed", result.failed],
+                ].map(([label, value]) => (
+                  <div key={label as string} className="bg-white rounded-lg py-2">
+                    <p className="text-lg font-semibold text-gray-900">{value}</p>
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wide">{label}</p>
+                  </div>
+                ))}
+              </div>
+              {result.errors.length > 0 && (
+                <ul className="text-xs text-red-700 mt-2 space-y-0.5">
+                  {result.errors.map((e, i) => <li key={i}>• {e}</li>)}
+                </ul>
+              )}
+              <p className="text-xs text-green-600 mt-2">
                 Now go to <strong>Suppliers</strong> to assign categories to each supplier.
               </p>
             </div>

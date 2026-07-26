@@ -21,6 +21,17 @@ export function buildWaUrl(phone: string, message: string): string {
   return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
 }
 
+// A persisted, message-less chat link (unlike buildWaUrl above, which
+// always bundles a specific outgoing message) — for storing alongside a
+// supplier's whatsapp_number so the record carries a ready-to-click link,
+// not just the raw digits. Returns null for anything normalizePhone can't
+// turn into a plausible international number, same validity rule used
+// everywhere else a WhatsApp number is accepted.
+export function buildWaLink(rawNumber: string): string | null {
+  const phone = normalizePhone(rawNumber);
+  return phone ? `https://wa.me/${phone}` : null;
+}
+
 // Group invite links only ever look like https://chat.whatsapp.com/<code>.
 export function isValidWhatsappGroupLink(link: string | null | undefined): boolean {
   if (!link) return false;
