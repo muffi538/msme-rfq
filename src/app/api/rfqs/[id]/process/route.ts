@@ -88,7 +88,7 @@ function makePercentCalculator(activeStages: StageId[]) {
   };
 }
 
-type Attachment = { name: string; type: FileType; text: string; error: string | null; fileRowId: string | null };
+type Attachment = { name: string; type: FileType; text: string; error: string | null; fileRowId: string | null; truncated: boolean };
 
 // The Gmail import used to only capture the FIRST attachment's text and
 // silently drop the rest. Attachments are now stored (unparsed) as
@@ -195,13 +195,13 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
             // Already parsed on an earlier "Process it" click (re-processing
             // an RFQ shouldn't re-run OCR/parsing on files that already succeeded).
             if (row.status === "parsed" && row.raw_text) {
-              return { name: row.file_name, type, text: row.raw_text, error: null, fileRowId: row.id };
+              return { name: row.file_name, type, text: row.raw_text, error: null, fileRowId: row.id, truncated: false };
             }
             if (row.status === "failed") {
-              return { name: row.file_name, type, text: "", error: row.error ?? "Previously failed to parse", fileRowId: row.id };
+              return { name: row.file_name, type, text: "", error: row.error ?? "Previously failed to parse", fileRowId: row.id, truncated: false };
             }
             if (!row.file_url) {
-              return { name: row.file_name, type, text: "", error: `Could not find the stored file for "${row.file_name}"`, fileRowId: row.id };
+              return { name: row.file_name, type, text: "", error: `Could not find the stored file for "${row.file_name}"`, fileRowId: row.id, truncated: false };
             }
 
             try {
@@ -250,7 +250,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
                 { retries: 2, label: `rfq_files update for "${row.file_name}"` }
               ).catch((err) => logError("[rfqs/process] rfq_files status update failed (non-fatal)", err));
 
-              return { name: row.file_name, type, text: parsed.text, error: effectiveError, fileRowId: row.id };
+              return { name: row.file_name, type, text: parsed.text, error: effectiveError, fileRowId: row.id, truncated: parsed.truncated };
             } catch (err) {
               // Never let one bad attachment take the others down with it —
               // record the failure on this file and move on; the batch as a
@@ -258,7 +258,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
               const message = err instanceof Error ? err.message : `Could not read "${row.file_name}"`;
               logError(`[rfqs/process] rfq=${rfqId} file="${row.file_name}" failed after ${Date.now() - fileStartedAt}ms`, err);
               await supabase.from("rfq_files").update({ status: "failed", error: message }).eq("id", row.id);
-              return { name: row.file_name, type, text: "", error: message, fileRowId: row.id };
+              return { name: row.file_name, type, text: "", error: message, fileRowId: row.id, truncated: false };
             }
           },
           () => {
@@ -290,13 +290,16 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       await report("download", 0, 1);
       let rawText = (rfq.raw_text ?? "").trim();
       let error: string | null = null;
+      let legacyTruncated = false;
       const legacyStartedAt = Date.now();
 
       if (isPdf) {
         await report("parse", 0, 1, rfq.file_name ?? undefined);
         const buffer = Buffer.from(rawText.slice("base64pdf:".length), "base64");
         try {
-          rawText = await parsePdf(buffer);
+          const parsed = await parsePdf(buffer);
+          rawText = parsed.text;
+          legacyTruncated = parsed.truncated;
         } catch {
           try {
             await report("ocr", 0, 1, rfq.file_name ?? undefined);
@@ -334,7 +337,7 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
 
       logStageTiming(rfqId, isImage ? "ocr" : "parse", legacyStartedAt);
       if (!rawText.trim() && !error) error = "No text could be extracted from this email.";
-      attachments = [{ name: rfq.file_name ?? "attachment", type: (rfq.file_type as FileType) ?? "text", text: rawText, error, fileRowId: null }];
+      attachments = [{ name: rfq.file_name ?? "attachment", type: (rfq.file_type as FileType) ?? "text", text: rawText, error, fileRowId: null, truncated: legacyTruncated }];
 
       await runRest(report, activeStages, fileRows);
     }
@@ -420,6 +423,13 @@ async function runProcessJob(supabase: SupabaseClient, userId: string, jobId: st
       const stillTruncated = truncatedFiles.filter((f) => !failedFiles.includes(f));
       if (stillTruncated.length > 0) {
         rfqWarnings.push(`Some content from ${stillTruncated.join(", ")} didn't fit alongside the other attachment(s) and was skipped — please double-check for missing items, or upload it separately.`);
+      }
+      // PDF_MAX_PAGES in parsers/pdf.ts caps how many pages get parsed —
+      // a file that hit that cap only had its first pages read, so items
+      // on later pages are genuinely missing, not just an AI-side issue.
+      const pageTruncated = attachments.filter((a) => a.truncated).map((a) => a.name);
+      if (pageTruncated.length > 0) {
+        rfqWarnings.push(`${pageTruncated.join(", ")} has more pages than we can process in one go — only the first pages were read. Consider splitting it into smaller files.`);
       }
 
       // The AI extraction call above is the single longest stage (up to

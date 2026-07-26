@@ -181,6 +181,12 @@ async function runUploadJob(
     if (stillTruncated.length > 0) {
       rfqWarnings.push(`Some content from ${stillTruncated.join(", ")} didn't fit alongside the other attachment(s) and was skipped — please double-check for missing items, or upload it separately.`);
     }
+    // PDF_MAX_PAGES in parsers/pdf.ts caps how many pages get parsed — a
+    // file that hit that cap only had its first pages read.
+    const pageTruncated = parsed.filter((f) => f.truncated).map((f) => f.name);
+    if (pageTruncated.length > 0) {
+      rfqWarnings.push(`${pageTruncated.join(", ")} has more pages than we can process in one go — only the first pages were read. Consider splitting it into smaller files.`);
+    }
 
     let insertedItems: { id: string; name: string; brand: string | null; spec: string | null }[] = [];
     if (items.length > 0) {

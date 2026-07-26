@@ -96,7 +96,7 @@ async function extractTextFromFile(file: File): Promise<{ name: string; text: st
     let text = "";
     if (mime.includes("pdf") || file.name.toLowerCase().endsWith(".pdf")) {
       try {
-        text = await parsePdf(buffer);
+        text = (await parsePdf(buffer)).text;
       } catch {
         text = await extractWithVision(buffer.toString("base64"), "application/pdf");
       }
