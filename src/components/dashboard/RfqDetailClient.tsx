@@ -594,11 +594,18 @@ export default function RfqDetailClient({
     // `await` before it causes Chrome/Safari to flag it as a programmatic
     // pop-up and silently block it. So open the group FIRST, do everything
     // else after.
-    const newWin = window.open(groupLink, "_blank", "noopener,noreferrer");
-    if (!newWin) {
-      toast.error("Pop-up blocked — please allow pop-ups for this site, then try again.");
-      return;
-    }
+    //
+    // Its return value is NOT a reliable "did this get blocked?" signal —
+    // confirmed with a real browser test: window.open(url, "_blank",
+    // "noopener,noreferrer") returns null UNCONDITIONALLY, even when the
+    // tab opens successfully, because noopener means the caller is never
+    // given a handle to the new window at all. The old `if (!newWin)`
+    // check here was a false-positive generator — it fired on essentially
+    // every real send, not just genuinely blocked ones. noopener/noreferrer
+    // are kept (they protect against the opened WhatsApp tab reaching back
+    // into this one via window.opener); we just no longer pretend the
+    // return value tells us anything.
+    window.open(groupLink, "_blank", "noopener,noreferrer");
 
     // Now safe to do async work
     try {
@@ -647,11 +654,9 @@ export default function RfqDetailClient({
           toast.error(`"${whatsappNumber}" isn't a valid WhatsApp number. Update it in Suppliers.`);
           return;
         }
-        const newWin = window.open(buildWaUrl(phone, message ?? ""), "_blank", "noopener,noreferrer");
-        if (!newWin) {
-          toast.error("Pop-up blocked — please allow pop-ups for this site, then try again.");
-          return;
-        }
+        // Return value isn't a reliable open/blocked signal with noopener
+        // set (see confirmGroupSend's comment) — call it and trust it.
+        window.open(buildWaUrl(phone, message ?? ""), "_blank", "noopener,noreferrer");
         toast.success("WhatsApp opened — tap Send in WhatsApp to deliver the message.");
       } else {
         toast.info("Email channel — marking as sent.");
@@ -664,54 +669,45 @@ export default function RfqDetailClient({
     }
   }
 
-  // Bulk WhatsApp send — fires every window.open() back-to-back BEFORE any
-  // await, since browsers only treat pop-ups opened synchronously within
-  // the click's call stack as user-initiated; anything after an awaited
-  // network call is liable to be blocked regardless of how this is written.
-  // Reports exactly what happened instead of the previous silent forEach.
-  async function handleBulkWhatsappSend(targets: OutgoingRfq[]) {
-    const attempts = targets.map((o) => {
-      const phone = normalizePhone(o.suppliers?.whatsapp_number ?? "");
-      if (!phone) return { o, win: null as Window | null, invalid: true };
-      const win = window.open(buildWaUrl(phone, o.message_body), "_blank", "noopener,noreferrer");
-      return { o, win, invalid: false };
-    });
-
-    let opened = 0, blocked = 0, invalidPhone = 0, markFailed = 0;
-    const blockedTargets: OutgoingRfq[] = [];
-    for (const { o, win, invalid } of attempts) {
-      if (invalid) { invalidPhone++; continue; }
-      if (!win) { blocked++; blockedTargets.push(o); continue; }
-      opened++;
-      try {
-        await markOutgoingSent(o.id, "whatsapp");
-      } catch {
-        markFailed++;
-      }
-    }
+  // Bulk WhatsApp send. Previously fired every window.open() synchronously
+  // and used a null return value to decide which got "blocked" — proven
+  // wrong with a real browser test: window.open(url, "_blank",
+  // "noopener,noreferrer") returns null unconditionally (even on success),
+  // AND only the very first window.open() in one click reliably survives
+  // Chromium's user-activation rules regardless of what it returns —
+  // anything after it is a coin flip. So there's no way to tell, after the
+  // fact, which of several opened. Instead: open only the first target
+  // (the one the click actually guarantees) and queue the rest for
+  // one-real-click-each via the "Open next" banner — same honest model
+  // confirmGroupSend already used for groups.
+  function handleBulkWhatsappSend(targets: OutgoingRfq[]) {
+    const valid = targets.filter((o) => normalizePhone(o.suppliers?.whatsapp_number ?? ""));
+    const invalidCount = targets.length - valid.length;
 
     setSelected(new Set());
-    // Anything the popup blocker refused goes into a queue the user can
-    // step through one real click at a time (see the "N blocked" banner
-    // and continueWhatsappQueue below) instead of just being reported and
-    // otherwise lost.
-    if (blockedTargets.length > 0) setWhatsappRetryQueue((prev) => [...prev, ...blockedTargets]);
+    if (valid.length === 0) {
+      toast.error("None of the selected suppliers have a valid WhatsApp number.");
+      return;
+    }
 
-    const parts: string[] = [];
-    if (opened)       parts.push(`${opened} opened`);
-    if (blocked)      parts.push(`${blocked} blocked by your browser's pop-up blocker`);
-    if (invalidPhone) parts.push(`${invalidPhone} missing/invalid number`);
-    if (markFailed)   parts.push(`${markFailed} sent but couldn't be marked`);
-    const msg = blocked > 0
-      ? `WhatsApp: ${parts.join(", ")}. Use "Open next" below to send the blocked ones one at a time.`
-      : `WhatsApp: ${parts.join(", ")}.`;
-    if (blocked || invalidPhone || markFailed) toast.warning(msg, { duration: 8000 });
-    else toast.success(msg);
+    const [first, ...rest] = valid;
+    const phone = normalizePhone(first.suppliers!.whatsapp_number!);
+    window.open(buildWaUrl(phone, first.message_body), "_blank", "noopener,noreferrer");
+    markOutgoingSent(first.id, "whatsapp").catch(() => {
+      toast.error(`Opened but couldn't mark ${first.suppliers?.name ?? "this supplier"} as sent.`);
+    });
+
+    if (rest.length > 0) setWhatsappRetryQueue((prev) => [...prev, ...rest]);
+
+    const parts = [`1 opened`];
+    if (rest.length)     parts.push(`${rest.length} queued below — click "Open next" for each`);
+    if (invalidCount)    parts.push(`${invalidCount} missing/invalid number`);
+    toast.success(`WhatsApp: ${parts.join(", ")}.`, { duration: 6000 });
   }
 
   // Advances whatsappRetryQueue by exactly one — called from a real click,
-  // so unlike the batch above, window.open() here is never treated as a
-  // programmatic popup and won't be blocked.
+  // so (per the finding above) this one open is trustworthy the same way
+  // the first one in handleBulkWhatsappSend is.
   function continueWhatsappQueue() {
     setWhatsappRetryQueue((prev) => {
       if (prev.length === 0) return prev;
@@ -721,11 +717,7 @@ export default function RfqDetailClient({
         toast.error(`Skipped ${next.suppliers?.name ?? "a supplier"} — invalid WhatsApp number.`);
         return rest;
       }
-      const win = window.open(buildWaUrl(phone, next.message_body), "_blank", "noopener,noreferrer");
-      if (!win) {
-        toast.error(`Still blocked — allow pop-ups for this site, then click "Open next" again.`);
-        return prev;
-      }
+      window.open(buildWaUrl(phone, next.message_body), "_blank", "noopener,noreferrer");
       markOutgoingSent(next.id, "whatsapp").catch(() => {
         toast.error(`Opened but couldn't mark ${next.suppliers?.name ?? "this supplier"} as sent.`);
       });
