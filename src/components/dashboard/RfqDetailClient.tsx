@@ -56,6 +56,7 @@ type Item = {
   confidence?: number | null; warnings?: string[] | null; merged_from_count?: number | null;
   source_files?: string[] | null;
   colour?: string | null;
+  notes?: string | null;
 };
 
 type OutgoingRfq = {
@@ -430,6 +431,19 @@ export default function RfqDetailClient({
   // Group send modal
   const [groupModal, setGroupModal] = useState<{ outgoingId: string; groupLink: string; message: string; supplierName: string } | null>(null);
   const [copied, setCopied]         = useState(false);
+  // Remaining groups to step through after the one currently in groupModal —
+  // confirmGroupSend advances this automatically instead of the old
+  // "close the modal, go click the button again yourself" behaviour.
+  // groupQueueTotal is only for the "Group X of Y" progress label; 0 means
+  // "not a queued batch" (e.g. a single per-row send), so the label stays hidden.
+  const [groupQueue, setGroupQueue]           = useState<OutgoingRfq[]>([]);
+  const [groupQueueTotal, setGroupQueueTotal] = useState(0);
+  // Individual WhatsApp sends that a popup blocker refused to open during a
+  // bulk send — window.open() only reliably succeeds once per user click,
+  // so anything beyond the first tab in one batch can get silently blocked.
+  // These sit here so the user can advance through them one real click at a
+  // time (each click is its own user gesture, so it's never blocked).
+  const [whatsappRetryQueue, setWhatsappRetryQueue] = useState<OutgoingRfq[]>([]);
 
   // --- Update item category ---
   async function updateCategory(itemId: string, category: string) {
@@ -465,6 +479,28 @@ export default function RfqDetailClient({
     } catch {
       setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, colour: previous } : i));
       toast.error("Couldn't save colour — please try again");
+    }
+  }
+
+  // --- Update item notes (a free-text remark) — reuses the item PATCH
+  // endpoint, same optimistic-update-with-revert pattern as colour/category.
+  // Also used by ImageLightbox's "also save as a remark on this item"
+  // option, so a comment left on a photo can double as a remark visible
+  // directly in the items table, not just inside the image modal. ---
+  async function updateItemNotes(itemId: string, notes: string | null) {
+    const previous = items.find((i) => i.id === itemId)?.notes ?? null;
+    setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, notes } : i));
+    try {
+      const res = await fetch(`/api/rfqs/${rfq.id}/item`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId, notes }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+    } catch {
+      setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, notes: previous } : i));
+      toast.error("Couldn't save remark — please try again");
+      throw new Error("Save failed"); // let the caller (e.g. the lightbox) know so it can keep its modal open
     }
   }
 
@@ -574,15 +610,27 @@ export default function RfqDetailClient({
 
     try {
       await markOutgoingSent(outgoingId, "whatsapp");
-      setGroupModal(null);
     } catch (err) {
       // Group is open and the message is copied either way — only the
-      // "mark as sent" bookkeeping failed, so keep the modal open and let
-      // the user retry that specific step by clicking Open Group again.
+      // "mark as sent" bookkeeping failed, so keep the modal open (don't
+      // advance the queue) and let the user retry this one specifically.
       toast.error(
         `Group opened and message copied, but couldn't record it as sent: ${err instanceof Error ? err.message : "unknown error"}. Click Open Group to retry.`,
         { duration: 8000 }
       );
+      return;
+    }
+
+    // Step through to the next group in the queue automatically instead of
+    // closing — this is what turns "click Send to Groups, repeat manually
+    // for each supplier" into an actual walk-through.
+    if (groupQueue.length > 0) {
+      const [next, ...rest] = groupQueue;
+      setGroupQueue(rest);
+      openGroupModal(next.id, next.suppliers!.whatsapp_group_link!, next.message_body, next.suppliers!.name);
+    } else {
+      setGroupModal(null);
+      setGroupQueueTotal(0);
     }
   }
 
@@ -630,9 +678,10 @@ export default function RfqDetailClient({
     });
 
     let opened = 0, blocked = 0, invalidPhone = 0, markFailed = 0;
+    const blockedTargets: OutgoingRfq[] = [];
     for (const { o, win, invalid } of attempts) {
       if (invalid) { invalidPhone++; continue; }
-      if (!win) { blocked++; continue; }
+      if (!win) { blocked++; blockedTargets.push(o); continue; }
       opened++;
       try {
         await markOutgoingSent(o.id, "whatsapp");
@@ -642,14 +691,46 @@ export default function RfqDetailClient({
     }
 
     setSelected(new Set());
+    // Anything the popup blocker refused goes into a queue the user can
+    // step through one real click at a time (see the "N blocked" banner
+    // and continueWhatsappQueue below) instead of just being reported and
+    // otherwise lost.
+    if (blockedTargets.length > 0) setWhatsappRetryQueue((prev) => [...prev, ...blockedTargets]);
+
     const parts: string[] = [];
     if (opened)       parts.push(`${opened} opened`);
     if (blocked)      parts.push(`${blocked} blocked by your browser's pop-up blocker`);
     if (invalidPhone) parts.push(`${invalidPhone} missing/invalid number`);
     if (markFailed)   parts.push(`${markFailed} sent but couldn't be marked`);
-    const msg = `WhatsApp: ${parts.join(", ")}.`;
+    const msg = blocked > 0
+      ? `WhatsApp: ${parts.join(", ")}. Use "Open next" below to send the blocked ones one at a time.`
+      : `WhatsApp: ${parts.join(", ")}.`;
     if (blocked || invalidPhone || markFailed) toast.warning(msg, { duration: 8000 });
     else toast.success(msg);
+  }
+
+  // Advances whatsappRetryQueue by exactly one — called from a real click,
+  // so unlike the batch above, window.open() here is never treated as a
+  // programmatic popup and won't be blocked.
+  function continueWhatsappQueue() {
+    setWhatsappRetryQueue((prev) => {
+      if (prev.length === 0) return prev;
+      const [next, ...rest] = prev;
+      const phone = normalizePhone(next.suppliers?.whatsapp_number ?? "");
+      if (!phone) {
+        toast.error(`Skipped ${next.suppliers?.name ?? "a supplier"} — invalid WhatsApp number.`);
+        return rest;
+      }
+      const win = window.open(buildWaUrl(phone, next.message_body), "_blank", "noopener,noreferrer");
+      if (!win) {
+        toast.error(`Still blocked — allow pop-ups for this site, then click "Open next" again.`);
+        return prev;
+      }
+      markOutgoingSent(next.id, "whatsapp").catch(() => {
+        toast.error(`Opened but couldn't mark ${next.suppliers?.name ?? "this supplier"} as sent.`);
+      });
+      return rest;
+    });
   }
 
   function itemsForOutgoing(outgoingId: string): Item[] {
@@ -685,6 +766,11 @@ export default function RfqDetailClient({
               <div>
                 <p className="font-semibold text-gray-900">Send to WhatsApp Group</p>
                 <p className="text-sm text-gray-500">{groupModal.supplierName}</p>
+                {groupQueueTotal > 1 && (
+                  <p className="text-xs text-teal-600 font-semibold mt-0.5">
+                    Group {groupQueueTotal - groupQueue.length} of {groupQueueTotal}
+                  </p>
+                )}
               </div>
             </div>
 
@@ -692,6 +778,9 @@ export default function RfqDetailClient({
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
               <p className="font-semibold mb-1">WhatsApp groups don&apos;t support auto-fill</p>
               <p className="text-xs text-amber-700">Click <strong>Open Group</strong> — the message is auto-copied. When WhatsApp opens, click the text box and press <strong>Ctrl+V</strong> to paste, then send.</p>
+              {groupQueue.length > 0 && (
+                <p className="text-xs text-amber-700 mt-1.5">This will automatically move on to the next group ({groupQueue.length} more after this one) once opened.</p>
+              )}
               <p className="text-xs text-amber-700 mt-1.5">WhatsApp links can&apos;t auto-attach files — if this RFQ needs the original PDF/Excel attached, download it separately and attach it manually in WhatsApp before sending.</p>
             </div>
 
@@ -713,14 +802,14 @@ export default function RfqDetailClient({
                 onClick={confirmGroupSend}
                 className="flex-1 h-10 flex items-center justify-center gap-2 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-xl transition-colors"
               >
-                <ExternalLink className="w-4 h-4" /> Open Group
+                <ExternalLink className="w-4 h-4" /> {groupQueue.length > 0 ? "Open Group & Next" : "Open Group"}
               </button>
             </div>
             <button
-              onClick={() => setGroupModal(null)}
+              onClick={() => { setGroupModal(null); setGroupQueue([]); setGroupQueueTotal(0); }}
               className="w-full text-center text-xs text-gray-400 hover:text-gray-600"
             >
-              Cancel
+              {groupQueue.length > 0 ? `Cancel (stops the remaining ${groupQueue.length})` : "Cancel"}
             </button>
           </div>
         </div>
@@ -882,6 +971,12 @@ export default function RfqDetailClient({
                           ) : (item.merged_from_count ?? 1) > 1 && (
                             <p className="text-[10px] text-blue-500 mt-0.5">merged from {item.merged_from_count} source files</p>
                           )}
+                          {item.notes && (
+                            <p className="text-[10px] text-gray-500 mt-0.5 flex items-start gap-1 max-w-[220px]">
+                              <MessageCircle className="w-2.5 h-2.5 flex-shrink-0 mt-0.5" />
+                              <span className="truncate" title={item.notes}>{item.notes}</span>
+                            </p>
+                          )}
                         </div>
                         {item.warnings && item.warnings.length > 0 && (
                           <span title={item.warnings.join(" ")}>
@@ -1029,12 +1124,12 @@ export default function RfqDetailClient({
                         const groupOnes = outgoing.filter(o => selected.has(o.id) && isValidWhatsappGroupLink(o.suppliers?.whatsapp_group_link));
                         if (groupOnes.length === 0) { toast.error("None of the selected suppliers have a valid WhatsApp group link."); return; }
                         // Groups can't be auto-sent (no prefill support) — open the
-                        // first one and tell the user how many more to repeat for.
-                        const o = groupOnes[0];
-                        openGroupModal(o.id, o.suppliers!.whatsapp_group_link!, o.message_body, o.suppliers!.name);
-                        if (groupOnes.length > 1) {
-                          toast.info(`Opening group 1 of ${groupOnes.length} — repeat "Send to Groups" for the other ${groupOnes.length - 1} after this one.`, { duration: 8000 });
-                        }
+                        // first one; confirmGroupSend steps through the rest of the
+                        // queue automatically as each one is opened.
+                        const [first, ...rest] = groupOnes;
+                        setGroupQueue(rest);
+                        setGroupQueueTotal(groupOnes.length);
+                        openGroupModal(first.id, first.suppliers!.whatsapp_group_link!, first.message_body, first.suppliers!.name);
                         setSelected(new Set());
                       }}
                       className="bg-teal-600 hover:bg-teal-700 text-white gap-1.5 h-8 text-xs"
@@ -1052,6 +1147,34 @@ export default function RfqDetailClient({
                   </div>
                 )}
               </div>
+
+              {/* Blocked-by-popup-blocker queue — lets the user step through
+                  the rest one real click at a time instead of losing track
+                  of who wasn't actually sent. */}
+              {whatsappRetryQueue.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 flex items-center justify-between gap-3">
+                  <p className="text-sm text-amber-800">
+                    {whatsappRetryQueue.length} chat{whatsappRetryQueue.length > 1 ? "s" : ""} blocked by your browser&apos;s pop-up blocker — next up: <strong>{whatsappRetryQueue[0].suppliers?.name ?? "unknown"}</strong>
+                  </p>
+                  <div className="flex gap-2 flex-shrink-0">
+                    <Button
+                      size="sm"
+                      onClick={continueWhatsappQueue}
+                      className="bg-amber-600 hover:bg-amber-700 text-white gap-1.5 h-8 text-xs"
+                    >
+                      Open next ({whatsappRetryQueue.length} left)
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setWhatsappRetryQueue([])}
+                      className="h-8 text-xs"
+                    >
+                      Dismiss
+                    </Button>
+                  </div>
+                </div>
+              )}
 
               {outgoing.map((o) => {
                 const supplierItems = itemsForOutgoing(o.id);
@@ -1196,6 +1319,7 @@ export default function RfqDetailClient({
           image={lightboxImage}
           onClose={() => setLightboxImage(null)}
           onSave={updateImageMeta}
+          onSaveAsItemRemark={lightboxImage.item_id ? (notes) => updateItemNotes(lightboxImage.item_id!, notes) : undefined}
         />
       )}
     </main>
