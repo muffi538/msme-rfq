@@ -6,7 +6,7 @@ import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { Button } from "@/components/ui/button";
 import {
   Mail, Loader2, CheckCircle, AlertCircle, Sparkles,
-  ArrowRight, Clock, Send, Tag, X, ChevronDown, Trash2, AlertTriangle,
+  ArrowRight, Clock, Send, Tag, X, ChevronDown, Trash2, AlertTriangle, Search,
 } from "lucide-react";
 import { toast } from "sonner";
 import Link from "next/link";
@@ -250,6 +250,7 @@ export default function InboxPage() {
   // once this is toggled on via the trash-icon button in the pending-list
   // header, so the list isn't cluttered with selection UI most of the time.
   const [selectMode, setSelectMode] = useState(false);
+  const [search, setSearch] = useState("");
   const [batchRunning,  setBatchRunning]  = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ processed: number; total: number } | null>(null);
   const batchCancelRef = useRef(false);
@@ -908,8 +909,21 @@ export default function InboxPage() {
     spam:      Object.values(labels).filter((l) => l === "spam").length,
   };
 
+  /* ── Search — applied before every other filter below, so it narrows
+     whatever the view/label filters would otherwise show. Doesn't touch
+     the stats row above, which stays a true total regardless of search. */
+  const searchQuery = search.trim().toLowerCase();
+  const matchesSearch = (r: { rfq_code: string; buyer_name: string | null; buyer_email?: string | null; file_name?: string | null }) =>
+    !searchQuery
+    || r.rfq_code.toLowerCase().includes(searchQuery)
+    || !!r.buyer_name?.toLowerCase().includes(searchQuery)
+    || !!r.buyer_email?.toLowerCase().includes(searchQuery)
+    || !!r.file_name?.toLowerCase().includes(searchQuery);
+  const searchedPending = pending.filter(matchesSearch);
+  const searchedDone    = done.filter(matchesSearch);
+
   /* ── Label filter counts ──────────────────────────────── */
-  const allItems = [...pending.map((r) => r.id), ...done.map((r) => r.id)];
+  const allItems = [...searchedPending.map((r) => r.id), ...searchedDone.map((r) => r.id)];
   const filterCounts: Record<FilterTab, number> = {
     all:           allItems.length,
     important:     allItems.filter((id) => labels[id] === "important").length,
@@ -922,16 +936,16 @@ export default function InboxPage() {
   // Split pending into "new mail" (last 24h) vs "process it" (older backlog)
   const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
   const cutoff = Date.now() - TWENTY_FOUR_HOURS_MS;
-  const newMail   = pending.filter((r) => r.created_at && new Date(r.created_at).getTime() >= cutoff);
-  const processIt = pending.filter((r) => !(r.created_at && new Date(r.created_at).getTime() >= cutoff));
+  const newMail   = searchedPending.filter((r) => r.created_at && new Date(r.created_at).getTime() >= cutoff);
+  const processIt = searchedPending.filter((r) => !(r.created_at && new Date(r.created_at).getTime() >= cutoff));
 
   const filteredPending = activeFilter === "all"
-    ? pending
-    : pending.filter((r) => labels[r.id] === activeFilter);
+    ? searchedPending
+    : searchedPending.filter((r) => labels[r.id] === activeFilter);
 
   const filteredDone = activeFilter === "all"
-    ? done
-    : done.filter((r) => labels[r.id] === activeFilter);
+    ? searchedDone
+    : searchedDone.filter((r) => labels[r.id] === activeFilter);
 
   // What pending items show, given the view mode
   const pendingForView =
@@ -1151,6 +1165,20 @@ export default function InboxPage() {
             </div>
           )}
         </div>
+
+        {/* ── Search — filters by RFQ code, buyer name/email, or file name ── */}
+        {(pending.length > 0 || done.length > 0) && (
+          <div className="relative w-full sm:w-72">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Search RFQ code, buyer, file…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="h-9 w-full pl-9 pr-3 text-sm border border-border rounded-lg bg-card focus:outline-none focus:ring-2 focus:ring-[#1847F5] text-card-foreground placeholder:text-muted-foreground"
+            />
+          </div>
+        )}
 
         {/* ── View mode toggle (All / New mail / Process it / Processed) ── */}
         {(pending.length > 0 || done.length > 0) && (
@@ -1502,8 +1530,17 @@ export default function InboxPage() {
           </div>
         )}
 
+        {/* Empty state for search with no matches */}
+        {searchQuery && filteredPending.length === 0 && filteredDone.length === 0 && (
+          <div className="text-center py-16 text-muted-foreground">
+            <Search className="w-8 h-8 mx-auto mb-3 opacity-30" />
+            <p className="font-medium">No emails match &quot;{search}&quot;</p>
+            <button onClick={() => setSearch("")} className="text-[#1847F5] text-sm mt-1 hover:underline">Clear search</button>
+          </div>
+        )}
+
         {/* Empty state for filtered view */}
-        {activeFilter !== "all" && filteredPending.length === 0 && filteredDone.length === 0 && (
+        {!searchQuery && activeFilter !== "all" && filteredPending.length === 0 && filteredDone.length === 0 && (
           <div className="text-center py-16 text-muted-foreground">
             <Tag className="w-8 h-8 mx-auto mb-3 opacity-30" />
             <p className="font-medium">No emails labelled &quot;{LABELS.find((l) => l.value === activeFilter)?.label}&quot;</p>
