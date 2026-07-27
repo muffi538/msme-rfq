@@ -6,7 +6,7 @@ import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { Button } from "@/components/ui/button";
 import {
   Mail, Loader2, CheckCircle, AlertCircle, Sparkles,
-  ArrowRight, Clock, Send, Tag, X, ChevronDown, Trash2, AlertTriangle,
+  ArrowRight, Clock, Send, Tag, X, ChevronDown, Trash2, AlertTriangle, Search,
 } from "lucide-react";
 import { toast } from "sonner";
 import Link from "next/link";
@@ -246,6 +246,11 @@ export default function InboxPage() {
   const [deleteTarget, setDeleteTarget] = useState<PendingRfq | null>(null);
   const [deletingEmail, setDeletingEmail] = useState(false);
   const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set());
+  // Checkboxes (and the "select all" one) are hidden by default — only shown
+  // once this is toggled on via the trash-icon button in the pending-list
+  // header, so the list isn't cluttered with selection UI most of the time.
+  const [selectMode, setSelectMode] = useState(false);
+  const [search, setSearch] = useState("");
   const [batchRunning,  setBatchRunning]  = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ processed: number; total: number } | null>(null);
   const batchCancelRef = useRef(false);
@@ -904,8 +909,21 @@ export default function InboxPage() {
     spam:      Object.values(labels).filter((l) => l === "spam").length,
   };
 
+  /* ── Search — applied before every other filter below, so it narrows
+     whatever the view/label filters would otherwise show. Doesn't touch
+     the stats row above, which stays a true total regardless of search. */
+  const searchQuery = search.trim().toLowerCase();
+  const matchesSearch = (r: { rfq_code: string; buyer_name: string | null; buyer_email?: string | null; file_name?: string | null }) =>
+    !searchQuery
+    || r.rfq_code.toLowerCase().includes(searchQuery)
+    || !!r.buyer_name?.toLowerCase().includes(searchQuery)
+    || !!r.buyer_email?.toLowerCase().includes(searchQuery)
+    || !!r.file_name?.toLowerCase().includes(searchQuery);
+  const searchedPending = pending.filter(matchesSearch);
+  const searchedDone    = done.filter(matchesSearch);
+
   /* ── Label filter counts ──────────────────────────────── */
-  const allItems = [...pending.map((r) => r.id), ...done.map((r) => r.id)];
+  const allItems = [...searchedPending.map((r) => r.id), ...searchedDone.map((r) => r.id)];
   const filterCounts: Record<FilterTab, number> = {
     all:           allItems.length,
     important:     allItems.filter((id) => labels[id] === "important").length,
@@ -918,16 +936,16 @@ export default function InboxPage() {
   // Split pending into "new mail" (last 24h) vs "process it" (older backlog)
   const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
   const cutoff = Date.now() - TWENTY_FOUR_HOURS_MS;
-  const newMail   = pending.filter((r) => r.created_at && new Date(r.created_at).getTime() >= cutoff);
-  const processIt = pending.filter((r) => !(r.created_at && new Date(r.created_at).getTime() >= cutoff));
+  const newMail   = searchedPending.filter((r) => r.created_at && new Date(r.created_at).getTime() >= cutoff);
+  const processIt = searchedPending.filter((r) => !(r.created_at && new Date(r.created_at).getTime() >= cutoff));
 
   const filteredPending = activeFilter === "all"
-    ? pending
-    : pending.filter((r) => labels[r.id] === activeFilter);
+    ? searchedPending
+    : searchedPending.filter((r) => labels[r.id] === activeFilter);
 
   const filteredDone = activeFilter === "all"
-    ? done
-    : done.filter((r) => labels[r.id] === activeFilter);
+    ? searchedDone
+    : searchedDone.filter((r) => labels[r.id] === activeFilter);
 
   // What pending items show, given the view mode
   const pendingForView =
@@ -1148,6 +1166,20 @@ export default function InboxPage() {
           )}
         </div>
 
+        {/* ── Search — filters by RFQ code, buyer name/email, or file name ── */}
+        {(pending.length > 0 || done.length > 0) && (
+          <div className="relative w-full sm:w-72">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Search RFQ code, buyer, file…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="h-9 w-full pl-9 pr-3 text-sm border border-border rounded-lg bg-card focus:outline-none focus:ring-2 focus:ring-[#1847F5] text-card-foreground placeholder:text-muted-foreground"
+            />
+          </div>
+        )}
+
         {/* ── View mode toggle (All / New mail / Process it / Processed) ── */}
         {(pending.length > 0 || done.length > 0) && (
           <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-full w-fit overflow-x-auto no-scrollbar">
@@ -1245,22 +1277,40 @@ export default function InboxPage() {
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
             <div className="px-5 py-4 border-b border-border flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
-                  checked={visiblePending.length > 0 && visiblePending.every((r) => batchSelected.has(r.id))}
-                  onChange={(e) => {
-                    setBatchSelected((prev) => {
-                      const next = new Set(prev);
-                      if (e.target.checked) visiblePending.forEach((r) => next.add(r.id));
-                      else visiblePending.forEach((r) => next.delete(r.id));
-                      return next;
-                    });
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectMode((v) => !v);
+                    setBatchSelected(new Set()); // leaving OR entering select mode both start from a clean slate
                   }}
-                  title="Select all"
-                  disabled={batchRunning}
-                />
-                <div className="h-4 w-px bg-orange-400" />
+                  title={selectMode ? "Exit select mode" : "Select emails to delete"}
+                  className={cn(
+                    "w-7 h-7 flex items-center justify-center rounded-full transition-colors flex-shrink-0",
+                    selectMode ? "bg-red-50 text-red-600" : "text-muted-foreground hover:bg-muted/60 hover:text-red-500"
+                  )}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+                {selectMode && (
+                  <>
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
+                      checked={visiblePending.length > 0 && visiblePending.every((r) => batchSelected.has(r.id))}
+                      onChange={(e) => {
+                        setBatchSelected((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) visiblePending.forEach((r) => next.add(r.id));
+                          else visiblePending.forEach((r) => next.delete(r.id));
+                          return next;
+                        });
+                      }}
+                      title="Select all"
+                      disabled={batchRunning}
+                    />
+                    <div className="h-4 w-px bg-orange-400" />
+                  </>
+                )}
                 <Sparkles className="w-3.5 h-3.5 text-orange-500" />
                 <span className="font-semibold text-card-foreground text-sm tracking-tight">
                   {viewMode === "new" ? "New Mail (last 24h)" : viewMode === "process" ? "Process it (older)" : "Needs processing"}
@@ -1280,8 +1330,11 @@ export default function InboxPage() {
                     // Shift/Ctrl+click anywhere on the row selects a range or
                     // toggles this one row; a plain click does nothing here —
                     // the checkbox handles that so other row controls (label,
-                    // process, delete) keep working normally.
-                    if (!e.shiftKey && !(e.ctrlKey || e.metaKey)) return;
+                    // process, delete) keep working normally. Only active in
+                    // select mode — otherwise a stray ctrl/shift+click could
+                    // populate a selection with no checkboxes visible to show
+                    // (or clear) it.
+                    if (!selectMode || (!e.shiftKey && !(e.ctrlKey || e.metaKey))) return;
                     e.preventDefault();
                     if (e.shiftKey && lastClickedIndexRef.current !== null) {
                       const [start, end] = [lastClickedIndexRef.current, idx].sort((a, b) => a - b);
@@ -1307,21 +1360,23 @@ export default function InboxPage() {
                     labels[rfq.id] === "spam" && "opacity-60"
                   )}
                 >
-                  <input
-                    type="checkbox"
-                    className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
-                    checked={batchSelected.has(rfq.id)}
-                    disabled={batchRunning || processing[rfq.id]}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => {
-                      setBatchSelected((prev) => {
-                        const next = new Set(prev);
-                        if (e.target.checked) next.add(rfq.id); else next.delete(rfq.id);
-                        return next;
-                      });
-                      lastClickedIndexRef.current = idx;
-                    }}
-                  />
+                  {selectMode && (
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
+                      checked={batchSelected.has(rfq.id)}
+                      disabled={batchRunning || processing[rfq.id]}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => {
+                        setBatchSelected((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(rfq.id); else next.delete(rfq.id);
+                          return next;
+                        });
+                        lastClickedIndexRef.current = idx;
+                      }}
+                    />
+                  )}
                   {/* Content */}
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -1409,7 +1464,7 @@ export default function InboxPage() {
                         >
                           {processing[rfq.id]
                             ? <ProcessingIndicator progress={processProgress[rfq.id]} startedAt={processStartedAtRef.current[rfq.id]} />
-                            : <><Sparkles className="w-3 h-3" />Process it<ArrowRight className="w-3 h-3" /></>}
+                            : <>Process it<ArrowRight className="w-3 h-3" /></>}
                         </Button>
                       </>
                     )}
@@ -1475,8 +1530,17 @@ export default function InboxPage() {
           </div>
         )}
 
+        {/* Empty state for search with no matches */}
+        {searchQuery && filteredPending.length === 0 && filteredDone.length === 0 && (
+          <div className="text-center py-16 text-muted-foreground">
+            <Search className="w-8 h-8 mx-auto mb-3 opacity-30" />
+            <p className="font-medium">No emails match &quot;{search}&quot;</p>
+            <button onClick={() => setSearch("")} className="text-[#1847F5] text-sm mt-1 hover:underline">Clear search</button>
+          </div>
+        )}
+
         {/* Empty state for filtered view */}
-        {activeFilter !== "all" && filteredPending.length === 0 && filteredDone.length === 0 && (
+        {!searchQuery && activeFilter !== "all" && filteredPending.length === 0 && filteredDone.length === 0 && (
           <div className="text-center py-16 text-muted-foreground">
             <Tag className="w-8 h-8 mx-auto mb-3 opacity-30" />
             <p className="font-medium">No emails labelled &quot;{LABELS.find((l) => l.value === activeFilter)?.label}&quot;</p>

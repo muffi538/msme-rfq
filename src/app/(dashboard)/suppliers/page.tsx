@@ -6,7 +6,7 @@ import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Trash2, Users, Pencil, X, AlertTriangle, Check } from "lucide-react";
+import { Plus, Trash2, Users, Pencil, X, AlertTriangle, Check, Search } from "lucide-react";
 import { toast } from "sonner";
 import { isValidWhatsappGroupLink, buildWaLink } from "@/lib/whatsapp";
 import { validateSupplier } from "@/lib/suppliers";
@@ -60,6 +60,7 @@ export default function SuppliersPage() {
   const [suppliers, setSuppliers]   = useState<Supplier[]>([]);
   const [loading, setLoading]       = useState(true);
   const [saving, setSaving]         = useState(false);
+  const [search, setSearch]         = useState("");
 
   // Form state — null = closed, "add" = adding, supplier id = editing
   const [formMode, setFormMode]     = useState<null | "add" | string>(null);
@@ -72,7 +73,10 @@ export default function SuppliersPage() {
   const [deleteId, setDeleteId]     = useState<string | null>(null);
   const [deleting, setDeleting]     = useState(false);
 
-  // Bulk select/delete
+  // Bulk select/delete — checkboxes stay hidden until this is toggled on via
+  // the trash-icon button in the top bar, so they don't clutter the table
+  // the rest of the time.
+  const [selectMode, setSelectMode]           = useState(false);
   const [selectedIds, setSelectedIds]         = useState<Set<string>>(new Set());
   const [bulkDeleteOpen, setBulkDeleteOpen]   = useState(false);
   const [bulkDeleting, setBulkDeleting]       = useState(false);
@@ -402,8 +406,11 @@ export default function SuppliersPage() {
   }
 
   function toggleSelectAll() {
+    // Selects/clears only what's currently visible (post-search), not the
+    // whole underlying list — matches what the checkbox actually looks like
+    // it's selecting.
     setSelectedIds((prev) =>
-      prev.size === suppliers.length ? new Set() : new Set(suppliers.map((s) => s.id))
+      prev.size === filteredSuppliers.length ? new Set() : new Set(filteredSuppliers.map((s) => s.id))
     );
   }
 
@@ -429,6 +436,17 @@ export default function SuppliersPage() {
   const editingSupplier = typeof formMode === "string" && formMode !== "add"
     ? suppliers.find((s) => s.id === formMode)
     : null;
+
+  const filteredSuppliers = (() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return suppliers;
+    return suppliers.filter((s) =>
+      [s.name, s.company_name, s.contact_person, s.email, s.whatsapp_number, s.phone_number, s.city, s.state, s.country, s.gst_number]
+        .some((v) => v?.toLowerCase().includes(q))
+      || s.categories.some((c) => c.toLowerCase().includes(q))
+      || (s.brands ?? []).some((b) => b.toLowerCase().includes(q))
+    );
+  })();
 
   return (
     <>
@@ -508,20 +526,44 @@ export default function SuppliersPage() {
         )}
 
         {/* Top bar */}
-        <div className="flex items-center justify-between">
-          <p className="text-gray-500 text-sm">
-            {suppliers.length} suppliers · {customCategories.length} custom categor{customCategories.length === 1 ? "y" : "ies"}
-          </p>
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-3">
+            <p className="text-gray-500 text-sm whitespace-nowrap">
+              {filteredSuppliers.length}{search.trim() ? ` of ${suppliers.length}` : ""} suppliers · {customCategories.length} custom categor{customCategories.length === 1 ? "y" : "ies"}
+            </p>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search suppliers…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="h-9 pl-8 pr-3 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-56"
+              />
+            </div>
+          </div>
           <div className="flex items-center gap-2">
-            {selectedIds.size > 0 && (
+            {selectMode && selectedIds.size > 0 && (
               <Button
                 onClick={() => setBulkDeleteOpen(true)}
-                variant="outline"
-                className="border-red-200 text-red-600 hover:bg-red-50 gap-2"
+                className="bg-red-600 hover:bg-red-700 text-white gap-2"
               >
                 <Trash2 className="w-4 h-4" /> Delete {selectedIds.size} selected
               </Button>
             )}
+            <button
+              type="button"
+              onClick={() => {
+                setSelectMode((v) => !v);
+                setSelectedIds(new Set()); // leaving OR entering select mode both start from a clean slate
+              }}
+              title={selectMode ? "Exit select mode" : "Select suppliers to delete"}
+              className={`w-9 h-9 flex items-center justify-center rounded-lg border transition-colors ${
+                selectMode ? "bg-red-50 border-red-200 text-red-600" : "border-gray-200 text-gray-400 hover:text-red-500 hover:border-red-200"
+              }`}
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
             <Button
               onClick={() => setCategoriesModalOpen(true)}
               variant="outline"
@@ -875,22 +917,30 @@ export default function SuppliersPage() {
               <p className="text-gray-400 font-medium">No suppliers yet</p>
               <p className="text-gray-400 text-sm mt-1">Add your first supplier above</p>
             </div>
+          ) : filteredSuppliers.length === 0 ? (
+            <div className="flex flex-col items-center py-20 text-center">
+              <Search className="w-10 h-10 text-gray-200 mb-3" />
+              <p className="text-gray-400 font-medium">No suppliers match &quot;{search}&quot;</p>
+              <button onClick={() => setSearch("")} className="text-blue-600 text-sm mt-1 hover:underline">Clear search</button>
+            </div>
           ) : (
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50">
-                  <th className="px-6 py-3 w-10">
-                    <input
-                      type="checkbox"
-                      checked={suppliers.length > 0 && selectedIds.size === suppliers.length}
-                      ref={(el) => {
-                        if (el) el.indeterminate = selectedIds.size > 0 && selectedIds.size < suppliers.length;
-                      }}
-                      onChange={toggleSelectAll}
-                      className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                      aria-label="Select all suppliers"
-                    />
-                  </th>
+                  {selectMode && (
+                    <th className="px-6 py-3 w-10">
+                      <input
+                        type="checkbox"
+                        checked={filteredSuppliers.length > 0 && selectedIds.size === filteredSuppliers.length}
+                        ref={(el) => {
+                          if (el) el.indeterminate = selectedIds.size > 0 && selectedIds.size < filteredSuppliers.length;
+                        }}
+                        onChange={toggleSelectAll}
+                        className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        aria-label="Select all suppliers"
+                      />
+                    </th>
+                  )}
                   <th className="px-6 py-3">Name</th>
                   <th className="px-6 py-3">Contact</th>
                   <th className="px-6 py-3">WhatsApp</th>
@@ -900,17 +950,19 @@ export default function SuppliersPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {suppliers.map((s) => (
+                {filteredSuppliers.map((s) => (
                   <tr key={s.id} className={`hover:bg-gray-50 ${selectedIds.has(s.id) ? "bg-blue-50/50" : ""}`}>
-                    <td className="px-6 py-3">
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(s.id)}
-                        onChange={() => toggleSelect(s.id)}
-                        className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                        aria-label={`Select ${s.name}`}
-                      />
-                    </td>
+                    {selectMode && (
+                      <td className="px-6 py-3">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(s.id)}
+                          onChange={() => toggleSelect(s.id)}
+                          className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          aria-label={`Select ${s.name}`}
+                        />
+                      </td>
+                    )}
                     <td className="px-6 py-3 font-medium text-gray-900">{s.name}</td>
                     <td className="px-6 py-3 text-gray-500">{s.contact_person ?? "—"}</td>
                     <td className="px-6 py-3 text-gray-500">{s.whatsapp_number ?? "—"}</td>
