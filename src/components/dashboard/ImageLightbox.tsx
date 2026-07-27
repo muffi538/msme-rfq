@@ -12,6 +12,7 @@ const CATEGORY_NONE = "__NONE__";
 
 export type LightboxImage = {
   id: string;
+  item_id?: string | null;
   signedUrl: string | null;
   source_file_name: string | null;
   category?: string | null;
@@ -27,14 +28,20 @@ export function ImageLightbox({
   image,
   onClose,
   onSave,
+  onSaveAsItemRemark,
 }: {
   image: LightboxImage;
   onClose: () => void;
   onSave: (id: string, patch: { category?: string | null; brand?: string | null; comment?: string | null }) => Promise<void>;
+  // Only provided when this image is linked to a line item — lets the
+  // comment also be saved as that item's own remark, so it shows up
+  // directly in the items table instead of staying buried in this modal.
+  onSaveAsItemRemark?: (notes: string) => Promise<void>;
 }) {
   const [category, setCategory] = useState(image.category ?? "");
   const [brand, setBrand] = useState(image.brand ?? "");
   const [comment, setComment] = useState(image.comment ?? "");
+  const [alsoSaveAsRemark, setAlsoSaveAsRemark] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const dirty = category !== (image.category ?? "") || brand !== (image.brand ?? "") || comment !== (image.comment ?? "");
@@ -43,6 +50,9 @@ export function ImageLightbox({
     setSaving(true);
     try {
       await onSave(image.id, { category: category || null, brand: brand || null, comment: comment || null });
+      if (alsoSaveAsRemark && onSaveAsItemRemark && comment.trim()) {
+        await onSaveAsItemRemark(comment.trim());
+      }
       onClose();
     } catch {
       // onSave already shows its own toast on failure — keep the modal
@@ -126,6 +136,19 @@ export function ImageLightbox({
               className="text-xs min-h-24 resize-y"
             />
           </div>
+
+          {onSaveAsItemRemark && (
+            <label className="flex items-start gap-2 text-xs text-gray-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={alsoSaveAsRemark}
+                onChange={(e) => setAlsoSaveAsRemark(e.target.checked)}
+                disabled={!comment.trim()}
+                className="mt-0.5 w-3.5 h-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              />
+              Also save this comment as a remark on the linked item
+            </label>
+          )}
 
           <Button
             onClick={handleSave}

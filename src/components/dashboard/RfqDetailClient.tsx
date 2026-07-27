@@ -56,6 +56,7 @@ type Item = {
   confidence?: number | null; warnings?: string[] | null; merged_from_count?: number | null;
   source_files?: string[] | null;
   colour?: string | null;
+  notes?: string | null;
 };
 
 type OutgoingRfq = {
@@ -465,6 +466,28 @@ export default function RfqDetailClient({
     } catch {
       setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, colour: previous } : i));
       toast.error("Couldn't save colour — please try again");
+    }
+  }
+
+  // --- Update item notes (a free-text remark) — reuses the item PATCH
+  // endpoint, same optimistic-update-with-revert pattern as colour/category.
+  // Also used by ImageLightbox's "also save as a remark on this item"
+  // option, so a comment left on a photo can double as a remark visible
+  // directly in the items table, not just inside the image modal. ---
+  async function updateItemNotes(itemId: string, notes: string | null) {
+    const previous = items.find((i) => i.id === itemId)?.notes ?? null;
+    setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, notes } : i));
+    try {
+      const res = await fetch(`/api/rfqs/${rfq.id}/item`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId, notes }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+    } catch {
+      setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, notes: previous } : i));
+      toast.error("Couldn't save remark — please try again");
+      throw new Error("Save failed"); // let the caller (e.g. the lightbox) know so it can keep its modal open
     }
   }
 
@@ -882,6 +905,12 @@ export default function RfqDetailClient({
                           ) : (item.merged_from_count ?? 1) > 1 && (
                             <p className="text-[10px] text-blue-500 mt-0.5">merged from {item.merged_from_count} source files</p>
                           )}
+                          {item.notes && (
+                            <p className="text-[10px] text-gray-500 mt-0.5 flex items-start gap-1 max-w-[220px]">
+                              <MessageCircle className="w-2.5 h-2.5 flex-shrink-0 mt-0.5" />
+                              <span className="truncate" title={item.notes}>{item.notes}</span>
+                            </p>
+                          )}
                         </div>
                         {item.warnings && item.warnings.length > 0 && (
                           <span title={item.warnings.join(" ")}>
@@ -1196,6 +1225,7 @@ export default function RfqDetailClient({
           image={lightboxImage}
           onClose={() => setLightboxImage(null)}
           onSave={updateImageMeta}
+          onSaveAsItemRemark={lightboxImage.item_id ? (notes) => updateItemNotes(lightboxImage.item_id!, notes) : undefined}
         />
       )}
     </main>
