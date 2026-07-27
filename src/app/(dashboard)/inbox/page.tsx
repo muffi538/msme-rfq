@@ -246,6 +246,10 @@ export default function InboxPage() {
   const [deleteTarget, setDeleteTarget] = useState<PendingRfq | null>(null);
   const [deletingEmail, setDeletingEmail] = useState(false);
   const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set());
+  // Checkboxes (and the "select all" one) are hidden by default — only shown
+  // once this is toggled on via the trash-icon button in the pending-list
+  // header, so the list isn't cluttered with selection UI most of the time.
+  const [selectMode, setSelectMode] = useState(false);
   const [batchRunning,  setBatchRunning]  = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ processed: number; total: number } | null>(null);
   const batchCancelRef = useRef(false);
@@ -1245,22 +1249,40 @@ export default function InboxPage() {
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
             <div className="px-5 py-4 border-b border-border flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
-                  checked={visiblePending.length > 0 && visiblePending.every((r) => batchSelected.has(r.id))}
-                  onChange={(e) => {
-                    setBatchSelected((prev) => {
-                      const next = new Set(prev);
-                      if (e.target.checked) visiblePending.forEach((r) => next.add(r.id));
-                      else visiblePending.forEach((r) => next.delete(r.id));
-                      return next;
-                    });
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectMode((v) => !v);
+                    setBatchSelected(new Set()); // leaving OR entering select mode both start from a clean slate
                   }}
-                  title="Select all"
-                  disabled={batchRunning}
-                />
-                <div className="h-4 w-px bg-orange-400" />
+                  title={selectMode ? "Exit select mode" : "Select emails to delete"}
+                  className={cn(
+                    "w-7 h-7 flex items-center justify-center rounded-full transition-colors flex-shrink-0",
+                    selectMode ? "bg-red-50 text-red-600" : "text-muted-foreground hover:bg-muted/60 hover:text-red-500"
+                  )}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+                {selectMode && (
+                  <>
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
+                      checked={visiblePending.length > 0 && visiblePending.every((r) => batchSelected.has(r.id))}
+                      onChange={(e) => {
+                        setBatchSelected((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) visiblePending.forEach((r) => next.add(r.id));
+                          else visiblePending.forEach((r) => next.delete(r.id));
+                          return next;
+                        });
+                      }}
+                      title="Select all"
+                      disabled={batchRunning}
+                    />
+                    <div className="h-4 w-px bg-orange-400" />
+                  </>
+                )}
                 <Sparkles className="w-3.5 h-3.5 text-orange-500" />
                 <span className="font-semibold text-card-foreground text-sm tracking-tight">
                   {viewMode === "new" ? "New Mail (last 24h)" : viewMode === "process" ? "Process it (older)" : "Needs processing"}
@@ -1280,8 +1302,11 @@ export default function InboxPage() {
                     // Shift/Ctrl+click anywhere on the row selects a range or
                     // toggles this one row; a plain click does nothing here —
                     // the checkbox handles that so other row controls (label,
-                    // process, delete) keep working normally.
-                    if (!e.shiftKey && !(e.ctrlKey || e.metaKey)) return;
+                    // process, delete) keep working normally. Only active in
+                    // select mode — otherwise a stray ctrl/shift+click could
+                    // populate a selection with no checkboxes visible to show
+                    // (or clear) it.
+                    if (!selectMode || (!e.shiftKey && !(e.ctrlKey || e.metaKey))) return;
                     e.preventDefault();
                     if (e.shiftKey && lastClickedIndexRef.current !== null) {
                       const [start, end] = [lastClickedIndexRef.current, idx].sort((a, b) => a - b);
@@ -1307,21 +1332,23 @@ export default function InboxPage() {
                     labels[rfq.id] === "spam" && "opacity-60"
                   )}
                 >
-                  <input
-                    type="checkbox"
-                    className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
-                    checked={batchSelected.has(rfq.id)}
-                    disabled={batchRunning || processing[rfq.id]}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => {
-                      setBatchSelected((prev) => {
-                        const next = new Set(prev);
-                        if (e.target.checked) next.add(rfq.id); else next.delete(rfq.id);
-                        return next;
-                      });
-                      lastClickedIndexRef.current = idx;
-                    }}
-                  />
+                  {selectMode && (
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
+                      checked={batchSelected.has(rfq.id)}
+                      disabled={batchRunning || processing[rfq.id]}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => {
+                        setBatchSelected((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(rfq.id); else next.delete(rfq.id);
+                          return next;
+                        });
+                        lastClickedIndexRef.current = idx;
+                      }}
+                    />
+                  )}
                   {/* Content */}
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -1409,7 +1436,7 @@ export default function InboxPage() {
                         >
                           {processing[rfq.id]
                             ? <ProcessingIndicator progress={processProgress[rfq.id]} startedAt={processStartedAtRef.current[rfq.id]} />
-                            : <><Sparkles className="w-3 h-3" />Process it<ArrowRight className="w-3 h-3" /></>}
+                            : <>Process it<ArrowRight className="w-3 h-3" /></>}
                         </Button>
                       </>
                     )}
