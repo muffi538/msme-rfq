@@ -2,19 +2,32 @@ import * as XLSX from "xlsx";
 
 export type ParsedSupplier = {
   name: string;
+  company: string;
   contact: string;
   email: string;
   phone: string;
+  whatsapp: string;
   gst: string;
   address: string;
+  city: string;
+  state: string;
+  country: string;
 };
 
-const NAME_HEADERS    = ["supplier", "supplier name", "party name", "ledger name", "name", "vendor", "vendor name", "particulars", "party"];
-const CONTACT_HEADERS = ["contact", "contact person", "contact name"];
-const EMAIL_HEADERS   = ["email", "email id", "e-mail", "email address"];
-const PHONE_HEADERS   = ["phone", "mobile", "mobile number", "contact number", "whatsapp", "whatsapp number", "phone number"];
-const GST_HEADERS     = ["gst", "gstin", "gst no", "gst number"];
-const ADDRESS_HEADERS = ["address"];
+const NAME_HEADERS     = ["supplier", "supplier name", "party name", "ledger name", "name", "vendor", "vendor name", "particulars", "party"];
+const COMPANY_HEADERS  = ["company", "company name", "organisation", "organization", "firm", "firm name"];
+const CONTACT_HEADERS  = ["contact", "contact person", "contact name"];
+const EMAIL_HEADERS    = ["email", "email id", "e-mail", "email address"];
+// Deliberately excludes "whatsapp"/"whatsapp number" — those get their own
+// column below so a sheet with BOTH a phone and a WhatsApp column keeps
+// them distinct instead of one silently winning.
+const PHONE_HEADERS    = ["phone", "mobile", "mobile number", "contact number", "phone number"];
+const WHATSAPP_HEADERS = ["whatsapp", "whatsapp number", "whatsapp no"];
+const GST_HEADERS      = ["gst", "gstin", "gst no", "gst number"];
+const ADDRESS_HEADERS  = ["address"];
+const CITY_HEADERS     = ["city"];
+const STATE_HEADERS    = ["state"];
+const COUNTRY_HEADERS  = ["country"];
 
 function normalize(h: unknown): string {
   return String(h ?? "").trim().toLowerCase();
@@ -65,12 +78,17 @@ export async function parseSupplierExcel(file: File): Promise<ParsedSupplier[]> 
   }
   if (headerRowIndex === -1) throw new Error("No supplier column found");
 
-  const headerRow = rows[headerRowIndex];
-  const contactCol = findColumn(headerRow, CONTACT_HEADERS);
-  const emailCol   = findColumn(headerRow, EMAIL_HEADERS);
-  const phoneCol   = findColumn(headerRow, PHONE_HEADERS);
-  const gstCol     = findColumn(headerRow, GST_HEADERS);
-  const addressCol = findColumn(headerRow, ADDRESS_HEADERS);
+  const headerRow  = rows[headerRowIndex];
+  const companyCol  = findColumn(headerRow, COMPANY_HEADERS);
+  const contactCol  = findColumn(headerRow, CONTACT_HEADERS);
+  const emailCol    = findColumn(headerRow, EMAIL_HEADERS);
+  const phoneCol    = findColumn(headerRow, PHONE_HEADERS);
+  const whatsappCol = findColumn(headerRow, WHATSAPP_HEADERS);
+  const gstCol      = findColumn(headerRow, GST_HEADERS);
+  const addressCol  = findColumn(headerRow, ADDRESS_HEADERS);
+  const cityCol     = findColumn(headerRow, CITY_HEADERS);
+  const stateCol    = findColumn(headerRow, STATE_HEADERS);
+  const countryCol  = findColumn(headerRow, COUNTRY_HEADERS);
 
   const cell = (row: unknown[], col: number) => (col >= 0 ? String(row[col] ?? "").trim() : "");
 
@@ -85,15 +103,24 @@ export async function parseSupplierExcel(file: File): Promise<ParsedSupplier[]> 
     if (!name) continue; // blank name cell
 
     const key = name.toLowerCase();
-    if (seen.has(key)) continue; // duplicate
+    if (seen.has(key)) continue; // duplicate within this file
     seen.add(key);
 
+    const phone = cell(row, phoneCol);
     suppliers.push({
       name,
+      company: cell(row, companyCol),
       contact: cell(row, contactCol),
       email:   cell(row, emailCol),
-      phone:   cell(row, phoneCol),
-      gst:     cell(row, gstCol),
+      phone,
+      // Falls back to the phone/mobile column when the sheet has no
+      // dedicated WhatsApp column — the common case for a plain contact
+      // list where one number serves both purposes.
+      whatsapp: cell(row, whatsappCol) || phone,
+      gst:      cell(row, gstCol),
+      city:     cell(row, cityCol),
+      state:    cell(row, stateCol),
+      country:  cell(row, countryCol),
       address: cell(row, addressCol),
     });
   }

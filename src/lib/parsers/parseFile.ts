@@ -30,22 +30,23 @@ export type ParsedFile = {
   text: string;
   error: string | null;
   usedOcr: boolean;
+  truncated: boolean;
 };
 
 // Parses one file into text. Never throws — a failure is recorded on the
 // result so a batch can continue with the remaining files ("continue
 // processing remaining files/attachments if one fails").
 export async function parseOneFile(name: string, type: FileType, buffer: Buffer, mime: string): Promise<ParsedFile> {
-  const base = { name, type, buffer, mime, text: "", error: null as string | null, usedOcr: false };
+  const base = { name, type, buffer, mime, text: "", error: null as string | null, usedOcr: false, truncated: false };
   const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "(none)";
   console.log(`[parseOneFile] START PARSE file="${name}" type=${type} mime=${mime || "(none)"} ext=${ext} bytes=${buffer.length}`);
   try {
     switch (type) {
       case "pdf": {
         try {
-          const text = await parsePdf(buffer);
-          console.log(`[parseOneFile] PARSE COMPLETE file="${name}"`);
-          return { ...base, text };
+          const { text, truncated } = await parsePdf(buffer);
+          console.log(`[parseOneFile] PARSE COMPLETE file="${name}" truncated=${truncated}`);
+          return { ...base, text, truncated };
         } catch (err) {
           // Malformed/scanned PDF — fall back to OpenAI, which handles any PDF
           // via base64. Vision/OCR calls are network-dependent and prone to

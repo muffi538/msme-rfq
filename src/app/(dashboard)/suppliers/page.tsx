@@ -8,7 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Plus, Trash2, Users, Pencil, X, AlertTriangle, Check } from "lucide-react";
 import { toast } from "sonner";
-import { isValidWhatsappGroupLink } from "@/lib/whatsapp";
+import { isValidWhatsappGroupLink, buildWaLink } from "@/lib/whatsapp";
+import { validateSupplier } from "@/lib/suppliers";
 import { MultiSelectSearch } from "@/components/ui/multi-select-search";
 import { BUILT_IN_CATEGORIES } from "@/lib/categories";
 
@@ -30,17 +31,27 @@ function normalizeCategory(raw: string): string {
 type Supplier = {
   id: string;
   name: string;
+  company_name: string | null;
   contact_person: string | null;
   email: string | null;
   whatsapp_number: string | null;
+  whatsapp_link: string | null;
   whatsapp_group_link: string | null;
+  phone_number: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  gst_number: string | null;
   categories: string[];
   brands: string[];
   updated_at: string;
 };
 
 const emptyForm = {
-  name: "", contact_person: "", email: "", whatsapp_number: "", whatsapp_group_link: "",
+  name: "", company_name: "", contact_person: "", email: "",
+  whatsapp_number: "", whatsapp_group_link: "", phone_number: "",
+  address: "", city: "", state: "", country: "", gst_number: "",
   categories: [] as string[], brands: [] as string[],
 };
 
@@ -60,6 +71,11 @@ export default function SuppliersPage() {
   // Delete confirm
   const [deleteId, setDeleteId]     = useState<string | null>(null);
   const [deleting, setDeleting]     = useState(false);
+
+  // Bulk select/delete
+  const [selectedIds, setSelectedIds]         = useState<Set<string>>(new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen]   = useState(false);
+  const [bulkDeleting, setBulkDeleting]       = useState(false);
 
   // Custom categories (user-defined, persisted to user_settings)
   const [customCategories, setCustomCategories] = useState<string[]>([]);
@@ -228,10 +244,17 @@ export default function SuppliersPage() {
   function openEdit(s: Supplier) {
     setForm({
       name:                s.name,
+      company_name:        s.company_name ?? "",
       contact_person:      s.contact_person ?? "",
       email:               s.email ?? "",
       whatsapp_number:     s.whatsapp_number ?? "",
       whatsapp_group_link: s.whatsapp_group_link ?? "",
+      phone_number:        s.phone_number ?? "",
+      address:             s.address ?? "",
+      city:                s.city ?? "",
+      state:               s.state ?? "",
+      country:             s.country ?? "",
+      gst_number:          s.gst_number ?? "",
       categories:          s.categories ?? [],
       brands:              s.brands ?? [],
     });
@@ -255,7 +278,13 @@ export default function SuppliersPage() {
   }
 
   async function handleSave() {
-    if (!form.name.trim()) return;
+    const validationErrors = validateSupplier({
+      name: form.name, email: form.email, whatsapp_number: form.whatsapp_number, phone_number: form.phone_number,
+    });
+    if (validationErrors.length > 0) {
+      toast.error(validationErrors[0]);
+      return;
+    }
     if (form.whatsapp_group_link.trim() && !isValidWhatsappGroupLink(form.whatsapp_group_link.trim())) {
       toast.error("WhatsApp group link should look like https://chat.whatsapp.com/xxxxx");
       return;
@@ -263,17 +292,29 @@ export default function SuppliersPage() {
     setSaving(true);
     const { data: { user } } = await supabase.auth.getUser();
 
+    // Shared by both insert and update — the wa.me link is always derived
+    // from whatsapp_number, never entered separately, so it can't drift out
+    // of sync with the number it's supposed to represent.
+    const payload = {
+      name:                 form.name,
+      company_name:         form.company_name || null,
+      contact_person:       form.contact_person || null,
+      email:                form.email || null,
+      whatsapp_number:      form.whatsapp_number || null,
+      whatsapp_link:        form.whatsapp_number ? buildWaLink(form.whatsapp_number) : null,
+      whatsapp_group_link:  form.whatsapp_group_link || null,
+      phone_number:         form.phone_number || null,
+      address:              form.address || null,
+      city:                 form.city || null,
+      state:                form.state || null,
+      country:              form.country || null,
+      gst_number:           form.gst_number || null,
+      categories:           form.categories,
+      brands:               form.brands,
+    };
+
     if (formMode === "add") {
-      const { error } = await supabase.from("suppliers").insert({
-        user_id:              user!.id,
-        name:                 form.name,
-        contact_person:       form.contact_person || null,
-        email:                form.email || null,
-        whatsapp_number:      form.whatsapp_number || null,
-        whatsapp_group_link:  form.whatsapp_group_link || null,
-        categories:           form.categories,
-        brands:               form.brands,
-      });
+      const { error } = await supabase.from("suppliers").insert({ user_id: user!.id, ...payload });
       setSaving(false);
       if (error) {
         console.error("[suppliers] save failed", error);
@@ -290,15 +331,6 @@ export default function SuppliersPage() {
 
     // Editing — optimistic concurrency check: only apply the update if
     // nobody else has saved a change to this row since we opened the form.
-    const payload = {
-      name:                 form.name,
-      contact_person:       form.contact_person || null,
-      email:                form.email || null,
-      whatsapp_number:      form.whatsapp_number || null,
-      whatsapp_group_link:  form.whatsapp_group_link || null,
-      categories:           form.categories,
-      brands:               form.brands,
-    };
 
     let query = supabase.from("suppliers").update(payload).eq("id", formMode!);
     if (editingUpdatedAt) query = query.eq("updated_at", editingUpdatedAt);
@@ -361,6 +393,39 @@ export default function SuppliersPage() {
     setDeleteId(null);
   }
 
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds((prev) =>
+      prev.size === suppliers.length ? new Set() : new Set(suppliers.map((s) => s.id))
+    );
+  }
+
+  async function confirmBulkDelete() {
+    if (selectedIds.size === 0) return;
+    setBulkDeleting(true);
+    const ids = [...selectedIds];
+    const { error } = await supabase.from("suppliers").delete().in("id", ids);
+    setBulkDeleting(false);
+
+    if (error) {
+      console.error("[suppliers] bulk delete failed", error);
+      toast.error(`Couldn't delete suppliers: ${error.message}`);
+      return;
+    }
+
+    toast.success(`Deleted ${ids.length} supplier${ids.length === 1 ? "" : "s"}.`);
+    setSuppliers((prev) => prev.filter((s) => !selectedIds.has(s.id)));
+    setSelectedIds(new Set());
+    setBulkDeleteOpen(false);
+  }
+
   const editingSupplier = typeof formMode === "string" && formMode !== "add"
     ? suppliers.find((s) => s.id === formMode)
     : null;
@@ -406,12 +471,57 @@ export default function SuppliersPage() {
           </div>
         )}
 
+        {/* Bulk delete confirmation modal */}
+        {bulkDeleteOpen && (
+          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-xl p-6 max-w-sm w-full space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center flex-shrink-0">
+                  <AlertTriangle className="w-5 h-5 text-red-600" />
+                </div>
+                <div>
+                  <p className="font-semibold text-gray-900">Delete {selectedIds.size} supplier{selectedIds.size === 1 ? "" : "s"}?</p>
+                  <p className="text-sm text-gray-500 mt-0.5">
+                    This will permanently remove {selectedIds.size === 1 ? "this supplier" : "these suppliers"}. This can&apos;t be undone.
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-3">
+                <Button
+                  onClick={confirmBulkDelete}
+                  disabled={bulkDeleting}
+                  className="flex-1 bg-red-600 hover:bg-red-700 text-white"
+                >
+                  {bulkDeleting ? "Deleting..." : `Yes, delete ${selectedIds.size}`}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => setBulkDeleteOpen(false)}
+                  disabled={bulkDeleting}
+                  className="flex-1"
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Top bar */}
         <div className="flex items-center justify-between">
           <p className="text-gray-500 text-sm">
             {suppliers.length} suppliers · {customCategories.length} custom categor{customCategories.length === 1 ? "y" : "ies"}
           </p>
           <div className="flex items-center gap-2">
+            {selectedIds.size > 0 && (
+              <Button
+                onClick={() => setBulkDeleteOpen(true)}
+                variant="outline"
+                className="border-red-200 text-red-600 hover:bg-red-50 gap-2"
+              >
+                <Trash2 className="w-4 h-4" /> Delete {selectedIds.size} selected
+              </Button>
+            )}
             <Button
               onClick={() => setCategoriesModalOpen(true)}
               variant="outline"
@@ -552,12 +662,20 @@ export default function SuppliersPage() {
                 <p className="text-[11px] font-semibold tracking-widest text-gray-400 uppercase">Company info</p>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1.5">
-                    <Label className="text-xs text-gray-500 font-medium">Company name *</Label>
+                    <Label className="text-xs text-gray-500 font-medium">Supplier name *</Label>
                     <Input placeholder="Sharma Traders" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-gray-500 font-medium">Company name</Label>
+                    <Input placeholder="Sharma Enterprises Pvt Ltd" value={form.company_name} onChange={(e) => setForm({ ...form, company_name: e.target.value })} />
                   </div>
                   <div className="space-y-1.5">
                     <Label className="text-xs text-gray-500 font-medium">Contact person</Label>
                     <Input placeholder="Ramesh Sharma" value={form.contact_person} onChange={(e) => setForm({ ...form, contact_person: e.target.value })} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-gray-500 font-medium">GST number</Label>
+                    <Input placeholder="27ABCDE1234F1Z5" value={form.gst_number} onChange={(e) => setForm({ ...form, gst_number: e.target.value })} />
                   </div>
                 </div>
               </section>
@@ -569,6 +687,10 @@ export default function SuppliersPage() {
                   <div className="space-y-1.5">
                     <Label className="text-xs text-gray-500 font-medium">Email</Label>
                     <Input placeholder="ramesh@sharma.com" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-gray-500 font-medium">Phone number</Label>
+                    <Input placeholder="+91 98765 43210" value={form.phone_number} onChange={(e) => setForm({ ...form, phone_number: e.target.value })} />
                   </div>
                   <div className="space-y-1.5">
                     <Label className="text-xs text-gray-500 font-medium">WhatsApp number</Label>
@@ -587,6 +709,31 @@ export default function SuppliersPage() {
                     <p className="text-[11px] text-gray-400">
                       WhatsApp → Group → Invite via link → Copy link
                     </p>
+                  </div>
+                </div>
+              </section>
+
+              {/* ── Section 2b: Address ──────────────── */}
+              <section className="space-y-3">
+                <p className="text-[11px] font-semibold tracking-widest text-gray-400 uppercase">
+                  Address <span className="text-gray-300 normal-case tracking-normal">(optional)</span>
+                </p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5 col-span-2">
+                    <Label className="text-xs text-gray-500 font-medium">Address</Label>
+                    <Input placeholder="123 Industrial Estate" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-gray-500 font-medium">City</Label>
+                    <Input placeholder="Mumbai" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-gray-500 font-medium">State</Label>
+                    <Input placeholder="Maharashtra" value={form.state} onChange={(e) => setForm({ ...form, state: e.target.value })} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-gray-500 font-medium">Country</Label>
+                    <Input placeholder="India" value={form.country} onChange={(e) => setForm({ ...form, country: e.target.value })} />
                   </div>
                 </div>
               </section>
@@ -732,6 +879,18 @@ export default function SuppliersPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50">
+                  <th className="px-6 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={suppliers.length > 0 && selectedIds.size === suppliers.length}
+                      ref={(el) => {
+                        if (el) el.indeterminate = selectedIds.size > 0 && selectedIds.size < suppliers.length;
+                      }}
+                      onChange={toggleSelectAll}
+                      className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      aria-label="Select all suppliers"
+                    />
+                  </th>
                   <th className="px-6 py-3">Name</th>
                   <th className="px-6 py-3">Contact</th>
                   <th className="px-6 py-3">WhatsApp</th>
@@ -742,7 +901,16 @@ export default function SuppliersPage() {
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {suppliers.map((s) => (
-                  <tr key={s.id} className="hover:bg-gray-50">
+                  <tr key={s.id} className={`hover:bg-gray-50 ${selectedIds.has(s.id) ? "bg-blue-50/50" : ""}`}>
+                    <td className="px-6 py-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(s.id)}
+                        onChange={() => toggleSelect(s.id)}
+                        className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        aria-label={`Select ${s.name}`}
+                      />
+                    </td>
                     <td className="px-6 py-3 font-medium text-gray-900">{s.name}</td>
                     <td className="px-6 py-3 text-gray-500">{s.contact_person ?? "—"}</td>
                     <td className="px-6 py-3 text-gray-500">{s.whatsapp_number ?? "—"}</td>

@@ -48,8 +48,12 @@ async function runUploadJob(
     const uploadResults = await mapWithConcurrency(
       files,
       FILE_CONCURRENCY,
-      async (f) => {
-        const path = `${userId}/${Date.now()}-${f.name}`;
+      async (f, i) => {
+        // Index included so two files with the SAME name in one upload
+        // batch never collide on the same millisecond-granularity path —
+        // see the matching comment/fix in lib/email/sync.ts, where this was
+        // confirmed to actually happen under concurrent upload.
+        const path = `${userId}/${Date.now()}-${i}-${f.name}`;
         try {
           await withRetry(
             async () => {
@@ -152,7 +156,7 @@ async function runUploadJob(
     // reported as a normal failed chunk instead of taking every other
     // chunk's already-succeeded results down with it — see
     // normalizeAndCategorizeMulti's docstring.
-    const { meta, items, truncated, failedFiles, failedFileReasons } = await normalizeAndCategorizeMulti(multiInput, undefined, jobDeadline);
+    const { meta, items, truncated, failedFiles, failedFileReasons, truncatedFiles } = await normalizeAndCategorizeMulti(multiInput, undefined, jobDeadline);
 
     const rfqWarnings: string[] = failed.map((f) => f.error!).filter(Boolean);
     if (!meta.source_rfq_number) rfqWarnings.push("No RFQ number was found in the uploaded document(s).");
@@ -173,6 +177,19 @@ async function runUploadJob(
     }
     if (truncated && failedFiles.length === 0) {
       rfqWarnings.push("The AI response was very large and got cut off — some items near the end may be missing. Consider splitting this RFQ into smaller uploads.");
+    }
+    // Files that didn't fully fit in the shared per-RFQ content budget —
+    // some of that file WAS sent and may have contributed items, unlike
+    // failedFiles above where nothing from the file made it to the AI.
+    const stillTruncated = truncatedFiles.filter((f) => !failedFiles.includes(f));
+    if (stillTruncated.length > 0) {
+      rfqWarnings.push(`Some content from ${stillTruncated.join(", ")} didn't fit alongside the other attachment(s) and was skipped — please double-check for missing items, or upload it separately.`);
+    }
+    // PDF_MAX_PAGES in parsers/pdf.ts caps how many pages get parsed — a
+    // file that hit that cap only had its first pages read.
+    const pageTruncated = parsed.filter((f) => f.truncated).map((f) => f.name);
+    if (pageTruncated.length > 0) {
+      rfqWarnings.push(`${pageTruncated.join(", ")} has more pages than we can process in one go — only the first pages were read. Consider splitting it into smaller files.`);
     }
 
     let insertedItems: { id: string; name: string; brand: string | null; spec: string | null }[] = [];

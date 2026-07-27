@@ -4,6 +4,7 @@ import type { BuyerReplyLog } from "@/lib/rfq-lifecycle";
 type RfqImageRow = {
   id: string; item_id: string | null; file_url: string;
   source_file_name: string | null; match_confidence: number | null;
+  category: string | null; brand: string | null; comment: string | null;
 };
 
 // Client-side port of the exact fetch logic in

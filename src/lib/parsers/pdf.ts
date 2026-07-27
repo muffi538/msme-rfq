@@ -2,7 +2,7 @@ import { withTimeout } from "@/lib/timeout";
 
 // pdf-parse v1 requires CJS require in Next.js (no default ESM export)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const pdfParse = require("pdf-parse") as (buf: Buffer, opts?: { max?: number }) => Promise<{ text: string }>;
+const pdfParse = require("pdf-parse") as (buf: Buffer, opts?: { max?: number }) => Promise<{ text: string; numpages: number; numrender: number }>;
 
 // Root cause of RFQs hanging indefinitely at the "Parsing" stage: pdf-parse
 // v1.1.1 bundles a pinned, very old PDF.js build (v1.10.100, see
@@ -19,7 +19,13 @@ const pdfParse = require("pdf-parse") as (buf: Buffer, opts?: { max?: number }) 
 const PDF_PARSE_TIMEOUT_MS = 20_000;
 const PDF_MAX_PAGES = 50;
 
-export async function parsePdf(buffer: Buffer): Promise<string> {
+export async function parsePdf(buffer: Buffer): Promise<{ text: string; truncated: boolean }> {
   const data = await withTimeout(pdfParse(buffer, { max: PDF_MAX_PAGES }), PDF_PARSE_TIMEOUT_MS, "PDF parsing");
-  return data.text;
+  // PDF_MAX_PAGES caps how many pages pdf-parse renders, but it does so
+  // silently — no error, no indication in `data.text` itself — so a
+  // >50-page PDF was quietly losing every item past page 50 with nothing
+  // in the pipeline ever noticing. numrender < numpages is the only signal
+  // that happened; surface it so the caller can warn instead of the RFQ
+  // just looking like it "only read some of the items."
+  return { text: data.text, truncated: data.numrender < data.numpages };
 }
