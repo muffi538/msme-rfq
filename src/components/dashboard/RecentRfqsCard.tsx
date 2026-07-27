@@ -21,15 +21,29 @@ const statusStyle: Record<string, string> = {
   sent:       "bg-gray-100 text-gray-600 border border-gray-200",
 };
 
-// Client component so the Recent RFQs card can offer a quick search over the
-// handful of rows the dashboard already loaded — dashboard/page.tsx itself
-// stays a server component; only this card needs interactivity.
+// This card's query (dashboard/page.tsx) already excludes pending/
+// needs_processing RFQs — those live in the Inbox, not here — so there's
+// no "Pending" group to offer; only what can actually appear in this list.
+const STATUS_GROUPS: { key: string; label: string; statuses: string[] }[] = [
+  { key: "in_progress", label: "In Progress", statuses: ["processing"] },
+  { key: "completed",   label: "Completed",   statuses: ["processed", "approved", "sent"] },
+  { key: "failed",      label: "Failed",      statuses: ["failed", "cancelled"] },
+];
+
+// Client component so the Recent RFQs card can offer a quick search/filter
+// over the handful of rows the dashboard already loaded — dashboard/page.tsx
+// itself stays a server component; only this card needs interactivity.
 export default function RecentRfqsCard({ rfqs }: { rfqs: RecentRfq[] }) {
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const q = search.trim().toLowerCase();
-  const filtered = q
-    ? rfqs.filter((r) => r.rfq_code.toLowerCase().includes(q) || r.buyer_name?.toLowerCase().includes(q))
-    : rfqs;
+  const activeGroup = STATUS_GROUPS.find((g) => g.key === statusFilter);
+  const filtered = rfqs.filter((r) => {
+    if (q && !(r.rfq_code.toLowerCase().includes(q) || r.buyer_name?.toLowerCase().includes(q))) return false;
+    if (activeGroup && !activeGroup.statuses.includes(r.status)) return false;
+    return true;
+  });
+  const hasActiveFilter = q || statusFilter;
 
   return (
     <div className="bg-card border border-border rounded-2xl overflow-hidden">
@@ -42,16 +56,36 @@ export default function RecentRfqsCard({ rfqs }: { rfqs: RecentRfq[] }) {
         </div>
         <div className="flex items-center gap-3">
           {rfqs.length > 0 && (
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-              <input
-                type="text"
-                placeholder="Search RFQ code or buyer…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="h-8 pl-8 pr-3 text-xs border border-border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-[#1847F5] w-48"
-              />
-            </div>
+            <>
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+                <input
+                  type="text"
+                  placeholder="Search RFQ code or buyer…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="h-8 pl-8 pr-3 text-xs border border-border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-[#1847F5] w-48"
+                />
+              </div>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="h-8 px-2.5 text-xs border border-border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-[#1847F5] text-card-foreground"
+              >
+                <option value="">All statuses</option>
+                {STATUS_GROUPS.map((g) => (
+                  <option key={g.key} value={g.key}>{g.label}</option>
+                ))}
+              </select>
+              {hasActiveFilter && (
+                <button
+                  onClick={() => { setSearch(""); setStatusFilter(""); }}
+                  className="text-xs text-muted-foreground hover:text-[#1847F5] transition-colors whitespace-nowrap"
+                >
+                  Clear
+                </button>
+              )}
+            </>
           )}
           <Link
             href="/rfqs"
@@ -77,8 +111,10 @@ export default function RecentRfqsCard({ rfqs }: { rfqs: RecentRfq[] }) {
       ) : filtered.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <Search className="w-8 h-8 text-muted-foreground/30 mb-3" />
-          <p className="text-muted-foreground font-medium text-sm">No RFQs match &quot;{search}&quot;</p>
-          <button onClick={() => setSearch("")} className="text-[#1847F5] text-xs mt-1 hover:underline">Clear search</button>
+          <p className="text-muted-foreground font-medium text-sm">
+            {q && activeGroup ? `No "${activeGroup.label}" RFQs match "${search}"` : q ? `No RFQs match "${search}"` : `No "${activeGroup?.label}" RFQs`}
+          </p>
+          <button onClick={() => { setSearch(""); setStatusFilter(""); }} className="text-[#1847F5] text-xs mt-1 hover:underline">Clear filters</button>
         </div>
       ) : (
         <table className="w-full text-sm">
