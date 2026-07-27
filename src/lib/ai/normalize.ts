@@ -241,7 +241,7 @@ const EXTRACTION_JSON_SCHEMA = {
             delivery: { anyOf: [{ type: "string" }, { type: "null" }] },
             cat:      { type: "string", enum: [...CATEGORIES] },
             conf:     { type: "number" },
-            file:     { type: "string" },
+            file:     { type: "integer" },
           },
           required: ["n", "name", "qty", "unit", "brand", "spec", "part", "delivery", "cat", "conf", "file"],
           additionalProperties: false,
@@ -365,11 +365,11 @@ async function callAndParseOnce(labeled: string, useStructuredOutput: boolean): 
             role: "user",
             content: `Return JSON:
 {"rfq_number": "..." or null, "supplier": "..." or null, "date": "..." or null,
- "items": [{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"part":null,"delivery":null,"cat":"POWER_TOOLS","conf":0.9,"file":"exact FILE name this item came from"},...]}
+ "items": [{"n":1,"name":"item name","qty":5,"unit":"pcs","brand":null,"spec":null,"part":null,"delivery":null,"cat":"POWER_TOOLS","conf":0.9,"file":1},...]}
 
 Categories: ${CATEGORIES_PROMPT_LIST}
 
-Field meanings: "supplier" = whoever authored/sent this RFQ document (their company name, if stated). "part" = part number / SKU / model code, if printed. "delivery" = any delivery location, date, or lead-time text tied to that item or the whole order. "conf" = your confidence (0-1) in the overall accuracy of that item's extracted fields, not just its category. "file" = copy the exact name from the "--- FILE: ... ---" heading this item was found under.
+Field meanings: "supplier" = whoever authored/sent this RFQ document (their company name, if stated). "part" = part number / SKU / model code, if printed. "delivery" = any delivery location, date, or lead-time text tied to that item or the whole order. "conf" = your confidence (0-1) in the overall accuracy of that item's extracted fields, not just its category. "file" = the NUMBER (not the name) from the "--- FILE N: ... ---" heading this item was found under, e.g. 1 for "--- FILE 1: ... ---".
 
 Rules: skip headers/totals/page numbers. If the same item is described in more than one FILE section, still list it once per FILE section — a later merge step deduplicates. Normalize Hindi to English. SS=Stainless Steel, GI=Galvanized Iron, MS=Mild Steel. qty=null if missing.
 
@@ -530,36 +530,71 @@ function allocateFileBudget(files: MultiFileInput[]): Map<string, number> {
   return allocated;
 }
 
+// Headers are "--- FILE N: name ---" with N a 1-based index LOCAL TO EACH
+// CHUNK (not a global file id) — the model is asked to echo back just that
+// number (see EXTRACTION_JSON_SCHEMA/the prompt above), which is then
+// resolved back to the real filename via that chunk's own fileNames array
+// (see resolveSourceFile below), not by string-matching. Root cause this
+// replaced: the model was previously asked to copy the exact filename
+// string back, and for near-identical names (e.g. "RFQ_Sample_1.pdf" vs
+// "RFQ_Sample_2.pdf" — confirmed as a real, reported case, both files
+// present in the same multi-attachment email), a small model would
+// sometimes mistranscribe which of the two it meant. Because that
+// mistranscription still produced another VALID, KNOWN filename, the old
+// fuzzy string-matching resolver had no way to detect the error — it
+// would confidently attribute an item to the wrong (but real) file,
+// making the other file's content look entirely missing even though it
+// had been extracted correctly. An integer index the model can only get
+// right or obviously-out-of-range-wrong removes that failure mode.
 function chunkLabeledFiles(files: MultiFileInput[]): { chunks: LabeledChunk[]; truncatedFiles: string[] } {
   const budget = allocateFileBudget(files);
   const truncatedFiles: string[] = [];
   const chunks: LabeledChunk[] = [];
   let current = "";
   let currentFiles: string[] = [];
+
+  function flush() {
+    if (current) { chunks.push({ text: current, fileNames: currentFiles }); current = ""; currentFiles = []; }
+  }
+
   for (const f of files) {
     const cap = budget.get(f.fileName)!;
     if (cap < f.text.length) truncatedFiles.push(f.fileName);
     if (cap === 0) continue;
-    const labeled = `--- FILE: ${f.fileName} ---\n${f.text.slice(0, cap)}`;
+    const body = f.text.slice(0, cap);
 
-    if (labeled.length > CHUNK_CHAR_LIMIT) {
-      if (current) { chunks.push({ text: current, fileNames: currentFiles }); current = ""; currentFiles = []; }
-      for (let i = 0; i < labeled.length; i += CHUNK_CHAR_LIMIT) {
-        chunks.push({ text: labeled.slice(i, i + CHUNK_CHAR_LIMIT), fileNames: [f.fileName] });
+    // Tentative index assuming this file joins the chunk already being
+    // built — only used to measure size; recomputed below once we know
+    // whether it actually joins that chunk or starts a fresh one.
+    const tentativeLabeled = `--- FILE ${currentFiles.length + 1}: ${f.fileName} ---\n${body}`;
+
+    if (tentativeLabeled.length > CHUNK_CHAR_LIMIT) {
+      // Oversized single file — gets its own dedicated chunk(s), always
+      // index 1, since every sub-chunk here covers exactly this one file
+      // (no ambiguity to resolve regardless of what index comes back).
+      flush();
+      const header = `--- FILE 1: ${f.fileName} ---\n`;
+      const firstBody = body.slice(0, Math.max(0, CHUNK_CHAR_LIMIT - header.length));
+      chunks.push({ text: header + firstBody, fileNames: [f.fileName] });
+      for (let i = firstBody.length; i < body.length; i += CHUNK_CHAR_LIMIT) {
+        chunks.push({ text: body.slice(i, i + CHUNK_CHAR_LIMIT), fileNames: [f.fileName] });
       }
       continue;
     }
+
     const sepLen = current ? 2 : 0;
-    if (current && current.length + sepLen + labeled.length > CHUNK_CHAR_LIMIT) {
-      chunks.push({ text: current, fileNames: currentFiles });
-      current = labeled;
+    if (current && current.length + sepLen + tentativeLabeled.length > CHUNK_CHAR_LIMIT) {
+      // Doesn't fit alongside what's already queued — starts a new chunk,
+      // so it becomes index 1 there instead of the tentative index above.
+      flush();
+      current = `--- FILE 1: ${f.fileName} ---\n${body}`;
       currentFiles = [f.fileName];
     } else {
-      current = current ? `${current}\n\n${labeled}` : labeled;
+      current = current ? `${current}\n\n${tentativeLabeled}` : tentativeLabeled;
       currentFiles.push(f.fileName);
     }
   }
-  if (current) chunks.push({ text: current, fileNames: currentFiles });
+  flush();
   return { chunks, truncatedFiles };
 }
 
@@ -830,17 +865,18 @@ export async function normalizeAndCategorizeMulti(
     if (meta.source_date       === null && r.data.date)       meta.source_date       = String(r.data.date);
   }
 
-  // The model is asked to echo the exact FILE label back, but LLMs
-  // paraphrase — resolve to a known filename by substring match either
-  // direction rather than trusting an exact string match.
-  const knownFiles = files.map((f) => f.fileName);
-  function resolveSourceFile(raw: unknown): string[] {
-    if (!raw) return [];
-    const s = String(raw).trim().toLowerCase();
-    if (!s) return [];
-    const match = knownFiles.find((f) => f.toLowerCase() === s)
-      ?? knownFiles.find((f) => f.toLowerCase().includes(s) || s.includes(f.toLowerCase()));
-    return match ? [match] : [];
+  // The model echoes back a chunk-local FILE NUMBER (see chunkLabeledFiles'
+  // docstring for why this replaced asking it to copy the filename
+  // itself), resolved here via that SAME chunk's own fileNames array —
+  // deterministic, not a guess. A single-file chunk is unambiguous
+  // regardless of what number comes back; a multi-file chunk falls back to
+  // "unattributed" (empty array) rather than silently guessing wrong on an
+  // out-of-range or missing index.
+  function resolveSourceFile(rawFileIndex: unknown, chunkFileNames: string[]): string[] {
+    if (chunkFileNames.length === 1) return [chunkFileNames[0]];
+    const idx = Number(rawFileIndex);
+    if (Number.isInteger(idx) && idx >= 1 && idx <= chunkFileNames.length) return [chunkFileNames[idx - 1]];
+    return [];
   }
 
   // A running counter across ALL chunks (not reset per chunk), and used
@@ -883,7 +919,7 @@ export async function normalizeAndCategorizeMulti(
         category_source:     "llm" as const,
         category_confidence: Number(item.conf ?? 0.8),
         confidence:          conf,
-        source_files:        resolveSourceFile(item.file),
+        source_files:        resolveSourceFile(item.file, r.fileNames),
         warnings,
         merged_from_count:   1,
       };
