@@ -471,15 +471,33 @@ const CHUNK_CONCURRENCY = 3; // parallel AI calls per RFQ — bounded so a many-
 type LabeledChunk = { text: string; fileNames: string[] };
 
 // Splits the source text into per-call chunks small enough that no single
-// AI call has to generate a huge JSON response. File boundaries are kept
-// intact where possible (each chunk holds one or more WHOLE files) so the
-// "file" field the model echoes back stays accurate; only a genuinely
-// oversized single file is further sub-split by raw character count. Total
-// content is still capped at MAX_COMBINED_CHARS, same bound as before —
-// this only changes HOW that budget is sent to the AI (parallel small
-// calls instead of one large serial one), not how much content is used.
+// AI call has to generate a huge JSON response. Every chunk covers EXACTLY
+// ONE source file — files are never packed together into the same AI call,
+// even when their combined text would easily fit under CHUNK_CHAR_LIMIT. A
+// file only ever spans MULTIPLE chunks if it alone is too large for one
+// call (sub-split by raw character count). Total content is still capped
+// at MAX_COMBINED_CHARS, same bound as before.
 //
-// Each chunk tracks WHICH source file(s) it covers. This matters because
+// Root cause this fixes, confirmed as a real production case: an email
+// with two PDFs whose combined text fit comfortably in one chunk got sent
+// to gpt-4o-mini as a single prompt with "--- FILE 1 ---" / "--- FILE 2
+// ---" sections. The model would sometimes read only ONE of the two
+// sections and return items for just that file — not a code bug (the
+// merge/accumulation logic below is correct and was verified independently
+// via a real executed test), but a small model failing to fully attend to
+// a multi-file prompt. No amount of post-hoc attribution fixing can
+// recover items the model never generated in the first place. Giving every
+// file its own dedicated call makes this failure mode structurally
+// impossible: the model is never shown two files at once, so it can never
+// silently drop one of them. Costs more AI calls for a many-small-file RFQ
+// (traded deliberately for correctness), but CHUNK_CONCURRENCY below still
+// bounds how many run at once, and MAX_FILES (10, see upload/process
+// routes) bounds the worst case.
+//
+// Each chunk still tracks WHICH source file it covers (always a single-
+// element array now) purely so downstream code (resolveSourceFile,
+// failedFiles/failedFileReasons reporting) keeps working unchanged. This
+// matters because
 // two attachments on the same email are not always duplicates of the same
 // order — a real case that motivated this: two separate purchase
 // requisition PDFs for two different projects, attached to one email.
@@ -530,32 +548,20 @@ function allocateFileBudget(files: MultiFileInput[]): Map<string, number> {
   return allocated;
 }
 
-// Headers are "--- FILE N: name ---" with N a 1-based index LOCAL TO EACH
-// CHUNK (not a global file id) — the model is asked to echo back just that
-// number (see EXTRACTION_JSON_SCHEMA/the prompt above), which is then
-// resolved back to the real filename via that chunk's own fileNames array
-// (see resolveSourceFile below), not by string-matching. Root cause this
-// replaced: the model was previously asked to copy the exact filename
-// string back, and for near-identical names (e.g. "RFQ_Sample_1.pdf" vs
-// "RFQ_Sample_2.pdf" — confirmed as a real, reported case, both files
-// present in the same multi-attachment email), a small model would
-// sometimes mistranscribe which of the two it meant. Because that
-// mistranscription still produced another VALID, KNOWN filename, the old
-// fuzzy string-matching resolver had no way to detect the error — it
-// would confidently attribute an item to the wrong (but real) file,
-// making the other file's content look entirely missing even though it
-// had been extracted correctly. An integer index the model can only get
-// right or obviously-out-of-range-wrong removes that failure mode.
+// Headers are "--- FILE 1: name ---" — always index 1, since a chunk now
+// only ever covers one file, so there is never a second file to
+// disambiguate against. The model still echoes back a "file" number (see
+// EXTRACTION_JSON_SCHEMA/the prompt above) purely as a generation aid;
+// resolveSourceFile below resolves it via chunkFileNames.length === 1
+// unconditionally, so whatever number the model actually returns is
+// irrelevant to correctness — there is only ever one possible file to
+// attribute to. This is what makes attribution (and, more importantly,
+// extraction completeness — see the comment above this function) immune to
+// the model mishandling multi-file prompts: it never receives one.
 function chunkLabeledFiles(files: MultiFileInput[]): { chunks: LabeledChunk[]; truncatedFiles: string[] } {
   const budget = allocateFileBudget(files);
   const truncatedFiles: string[] = [];
   const chunks: LabeledChunk[] = [];
-  let current = "";
-  let currentFiles: string[] = [];
-
-  function flush() {
-    if (current) { chunks.push({ text: current, fileNames: currentFiles }); current = ""; currentFiles = []; }
-  }
 
   for (const f of files) {
     const cap = budget.get(f.fileName)!;
@@ -563,38 +569,18 @@ function chunkLabeledFiles(files: MultiFileInput[]): { chunks: LabeledChunk[]; t
     if (cap === 0) continue;
     const body = f.text.slice(0, cap);
 
-    // Tentative index assuming this file joins the chunk already being
-    // built — only used to measure size; recomputed below once we know
-    // whether it actually joins that chunk or starts a fresh one.
-    const tentativeLabeled = `--- FILE ${currentFiles.length + 1}: ${f.fileName} ---\n${body}`;
-
-    if (tentativeLabeled.length > CHUNK_CHAR_LIMIT) {
-      // Oversized single file — gets its own dedicated chunk(s), always
-      // index 1, since every sub-chunk here covers exactly this one file
-      // (no ambiguity to resolve regardless of what index comes back).
-      flush();
-      const header = `--- FILE 1: ${f.fileName} ---\n`;
-      const firstBody = body.slice(0, Math.max(0, CHUNK_CHAR_LIMIT - header.length));
-      chunks.push({ text: header + firstBody, fileNames: [f.fileName] });
-      for (let i = firstBody.length; i < body.length; i += CHUNK_CHAR_LIMIT) {
-        chunks.push({ text: body.slice(i, i + CHUNK_CHAR_LIMIT), fileNames: [f.fileName] });
-      }
-      continue;
-    }
-
-    const sepLen = current ? 2 : 0;
-    if (current && current.length + sepLen + tentativeLabeled.length > CHUNK_CHAR_LIMIT) {
-      // Doesn't fit alongside what's already queued — starts a new chunk,
-      // so it becomes index 1 there instead of the tentative index above.
-      flush();
-      current = `--- FILE 1: ${f.fileName} ---\n${body}`;
-      currentFiles = [f.fileName];
-    } else {
-      current = current ? `${current}\n\n${tentativeLabeled}` : tentativeLabeled;
-      currentFiles.push(f.fileName);
+    // First chunk of this file carries the header; if the file is small
+    // enough (the common case), this is its only chunk. A file too large
+    // for one call is split into further same-file chunks below, none of
+    // which need the header repeated — resolveSourceFile already resolves
+    // every chunk of a single-file split to that one file regardless.
+    const header = `--- FILE 1: ${f.fileName} ---\n`;
+    const firstBody = body.slice(0, Math.max(0, CHUNK_CHAR_LIMIT - header.length));
+    chunks.push({ text: header + firstBody, fileNames: [f.fileName] });
+    for (let i = firstBody.length; i < body.length; i += CHUNK_CHAR_LIMIT) {
+      chunks.push({ text: body.slice(i, i + CHUNK_CHAR_LIMIT), fileNames: [f.fileName] });
     }
   }
-  flush();
   return { chunks, truncatedFiles };
 }
 
@@ -754,10 +740,8 @@ async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) 
 //
 // `deadlineAt`, if given, is the caller's own overall job deadline (e.g.
 // JOB_DEADLINE_MS in process/route.ts) — NOT a new/extra timeout. Root
-// cause this closes: chunkLabeledFiles keeps whole files together where
-// possible, but files in roughly the 3000-6000 char range (a realistic
-// size for one OCR'd screenshot or scanned page) can't pair up under
-// CHUNK_CHAR_LIMIT, so 4+ such files produce 4+ chunks — MORE than
+// cause this closes: chunkLabeledFiles gives every file its own chunk, so
+// an RFQ with 4+ attachments produces 4+ chunks — MORE than
 // CHUNK_CONCURRENCY (3). The extra chunk(s) then queue for a free
 // concurrency slot, which can push total wall-clock time past the job's
 // own deadline. Previously that meant the caller's OWN outer deadline
@@ -777,7 +761,8 @@ export async function normalizeAndCategorizeMulti(
   if (truncatedFiles.length > 0) {
     console.log(`[normalize] combined-budget truncation: ${truncatedFiles.join(", ")} did not fully fit in MAX_COMBINED_CHARS=${MAX_COMBINED_CHARS} and were only partially sent to the AI`);
   }
-  console.log(`[normalize] split ${files.length} file(s) into ${chunks.length} AI extraction chunk(s)`);
+  console.log(`[normalize] uploaded ${files.length} file(s): ${files.map((f) => f.fileName).join(", ")}`);
+  console.log(`[normalize] split ${files.length} file(s) into ${chunks.length} AI extraction chunk(s) — one file per chunk unless a single file needed further splitting`);
   if (chunks.length > CHUNK_CONCURRENCY) {
     console.log(`[normalize] ${chunks.length} chunks exceed CHUNK_CONCURRENCY=${CHUNK_CONCURRENCY} — some will queue for a free slot, extending total wall-clock time`);
   }
@@ -810,6 +795,17 @@ export async function normalizeAndCategorizeMulti(
     }
   );
   const succeeded = results.filter((r): r is ChunkOutcome & { failed: false } => !r.failed);
+
+  // Per-file extraction outcome — kept as permanent observability (this
+  // module has no test runner, only production logs), so a file silently
+  // contributing zero items is always visible here instead of only
+  // showing up as a suspiciously low final total with no way to tell which
+  // file(s) it's missing from.
+  for (const r of results) {
+    const label = r.fileNames.join(", ");
+    if (r.failed) console.log(`[normalize] FILE "${label}" → FAILED: ${r.reason}`);
+    else console.log(`[normalize] FILE "${label}" → ${(r.data.items ?? []).length} item(s) extracted`);
+  }
 
   if (succeeded.length === 0) {
     // Include the ACTUAL reason(s) each chunk failed, not just a count —
@@ -926,5 +922,13 @@ export async function normalizeAndCategorizeMulti(
     });
   }).filter((item) => item.name.trim().length > 0);
 
-  return { meta, items: dedupeItems(items), truncated, failedFiles, failedFileReasons, truncatedFiles };
+  const deduped = dedupeItems(items);
+  // Running + final totals — every uploaded file's contribution plus the
+  // merged grand total, both before and after cross-file dedup, so a
+  // multi-file RFQ's item count is always traceable back to which file(s)
+  // it came from without needing to reproduce the issue again.
+  console.log(`[normalize] RUNNING TOTAL: ${items.length} raw item(s) across ${succeeded.length}/${chunks.length} chunk(s)`);
+  console.log(`[normalize] FINAL: ${deduped.length} item(s) after dedup (from ${items.length} raw) across ${files.length} uploaded file(s)`);
+
+  return { meta, items: deduped, truncated, failedFiles, failedFileReasons, truncatedFiles };
 }
