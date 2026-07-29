@@ -69,7 +69,16 @@ export async function GET(request: NextRequest) {
     .maybeSingle();
   if (!rfq) return NextResponse.json({ error: "RFQ not found" }, { status: 404 });
 
-  const [{ data: rfqItems }, { data: draft }] = await Promise.all([
+  // Root cause of a real reported bug: once a quotation is sent, its row
+  // flips from 'draft' to 'sent' and stops matching the draft query below,
+  // so reopening "Import Existing RFQ" for that RFQ found no draft and
+  // silently reset the whole table to blank pricing — pricing already
+  // typed once for that RFQ was effectively gone. This always fetches the
+  // most recent SENT quotation alongside the draft query (can't
+  // conditionally skip it based on the draft's own result within the same
+  // Promise.all — that would be a circular reference); the result is only
+  // used below when there's no active draft.
+  const [{ data: rfqItems }, { data: draft }, { data: sentReplies }] = await Promise.all([
     supabase
       .from("rfq_items")
       .select("id, line_number, name, qty, unit, spec, brand")
@@ -81,6 +90,13 @@ export async function GET(request: NextRequest) {
       .eq("rfq_id", rfqId)
       .eq("status", "draft")
       .maybeSingle(),
+    supabase
+      .from("quotation_replies")
+      .select("id")
+      .eq("rfq_id", rfqId)
+      .eq("status", "sent")
+      .order("sent_at", { ascending: false })
+      .limit(1),
   ]);
 
   let draftItems: unknown[] = [];
@@ -93,10 +109,27 @@ export async function GET(request: NextRequest) {
     draftItems = data ?? [];
   }
 
+  // Pricing carried over from the most recently sent quotation for this
+  // RFQ — a starting point to edit/resend from, NOT the record itself
+  // (returned separately from `draft` so the client never mistakes it for
+  // an in-progress draft to overwrite; saving creates a fresh row, leaving
+  // the original sent quotation's history intact).
+  let lastSentItems: unknown[] = [];
+  const lastSentId = draft ? undefined : sentReplies?.[0]?.id;
+  if (lastSentId) {
+    const { data } = await supabase
+      .from("quotation_reply_items")
+      .select("*")
+      .eq("quotation_reply_id", lastSentId)
+      .order("line_number");
+    lastSentItems = data ?? [];
+  }
+
   return NextResponse.json({
     rfq,
     rfqItems: rfqItems ?? [],
     draft: draft ? { ...draft, items: draftItems } : null,
+    lastSentItems: lastSentId ? lastSentItems : null,
   });
 }
 
