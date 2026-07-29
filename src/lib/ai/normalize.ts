@@ -466,6 +466,22 @@ ${labeled}`,
 }
 
 const CHUNK_CHAR_LIMIT = 6000; // per-AI-call cap — keeps each call's expected item count (and output tokens) small enough to generate comfortably inside one attempt's timeout. This is what actually bounds latency for a large RFQ, not a bigger timeout number: a single call asked to extract everything from a big multi-file RFQ has to generate a proportionally huge JSON response, and token generation time scales with how much the model actually has to write.
+// A char-count cap alone silently assumes every source format has roughly
+// the same "items per character" density — true-ish for a prose-like PDF
+// line item ("2. Ball Valve 20mm Brass — Qty 20 Nos"), but false for a
+// flattened Excel/CSV export (flattenWorkbookToText in parsers/excel.ts):
+// one spreadsheet ROW = one text LINE there, and a dense supplier
+// pricelist can pack 100+ short rows into far fewer than CHUNK_CHAR_LIMIT
+// characters. Root cause of a real reported case: an Excel attachment
+// timed out on every retry+fallback attempt while a PDF in the same email
+// succeeded, because CHUNK_CHAR_LIMIT alone let its chunk end up with many
+// more actual line items than a PDF chunk of the same character size would
+// ever have — a proportionally huge items array to GENERATE, not just
+// read, which is what actually exhausted the per-attempt timeout. This
+// bounds line count too, independent of character count, so a dense
+// tabular file can no longer pack an outsized item count into one call
+// just because it's character-cheap.
+const MAX_LINES_PER_CHUNK = 60;
 const CHUNK_CONCURRENCY = 3; // parallel AI calls per RFQ — bounded so a many-chunk RFQ doesn't fire dozens of simultaneous OpenAI requests
 
 type LabeledChunk = { text: string; fileNames: string[] };
@@ -567,21 +583,60 @@ function chunkLabeledFiles(files: MultiFileInput[]): { chunks: LabeledChunk[]; t
     const cap = budget.get(f.fileName)!;
     if (cap < f.text.length) truncatedFiles.push(f.fileName);
     if (cap === 0) continue;
-    const body = f.text.slice(0, cap);
-
-    // First chunk of this file carries the header; if the file is small
-    // enough (the common case), this is its only chunk. A file too large
-    // for one call is split into further same-file chunks below, none of
-    // which need the header repeated — resolveSourceFile already resolves
-    // every chunk of a single-file split to that one file regardless.
-    const header = `--- FILE 1: ${f.fileName} ---\n`;
-    const firstBody = body.slice(0, Math.max(0, CHUNK_CHAR_LIMIT - header.length));
-    chunks.push({ text: header + firstBody, fileNames: [f.fileName] });
-    for (let i = firstBody.length; i < body.length; i += CHUNK_CHAR_LIMIT) {
-      chunks.push({ text: body.slice(i, i + CHUNK_CHAR_LIMIT), fileNames: [f.fileName] });
-    }
+    chunks.push(...splitFileIntoChunks(f.fileName, f.text.slice(0, cap)));
   }
   return { chunks, truncatedFiles };
+}
+
+// Packs one file's text into one or more chunks, splitting on line
+// boundaries wherever possible (never mid-row for tabular data) and
+// stopping a chunk whenever EITHER CHUNK_CHAR_LIMIT or MAX_LINES_PER_CHUNK
+// is hit, whichever comes first — this is what actually bounds a dense
+// file's per-call item count; see MAX_LINES_PER_CHUNK's comment for the
+// real case this fixes. The common case (small file, few lines) still
+// produces exactly one chunk. First chunk of this file carries the header;
+// resolveSourceFile resolves every chunk of a single-file split to that
+// one file regardless, so later chunks don't need it repeated.
+function splitFileIntoChunks(fileName: string, body: string): LabeledChunk[] {
+  const header = `--- FILE 1: ${fileName} ---\n`;
+  const chunks: LabeledChunk[] = [];
+  let current = "";
+  let lineCount = 0;
+  let isFirstChunk = true;
+
+  const limit = () => CHUNK_CHAR_LIMIT - (isFirstChunk ? header.length : 0);
+
+  function flush() {
+    if (!current) return;
+    chunks.push({ text: (isFirstChunk ? header : "") + current, fileNames: [fileName] });
+    current = "";
+    lineCount = 0;
+    isFirstChunk = false;
+  }
+
+  for (let line of body.split("\n")) {
+    // A single line longer than an entire chunk's own budget (rare — real
+    // Excel/CSV rows and PDF paragraphs don't usually hit this) falls back
+    // to raw character slicing for just that line, since there's no line
+    // boundary left to respect within it.
+    while (line.length > limit()) {
+      flush();
+      current = line.slice(0, limit());
+      flush();
+      line = line.slice(limit());
+    }
+    const candidate = current ? `${current}\n${line}` : line;
+    if (current && (candidate.length > limit() || lineCount >= MAX_LINES_PER_CHUNK)) {
+      flush();
+      current = line;
+      lineCount = 1;
+    } else {
+      current = candidate;
+      lineCount++;
+    }
+  }
+  flush();
+  return chunks;
 }
 
 // Sanitizes any error from a single chunk's extraction attempt into a safe
