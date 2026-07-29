@@ -261,34 +261,122 @@ async function extractAttachments(
   return fetched.filter((a): a is FetchedEmail["attachments"][number] => a !== null);
 }
 
+// Base64-encodes an attachment body wrapped at the standard 76-char MIME
+// line length — most mail parsers tolerate unwrapped base64, but wrapping
+// is the actual RFC 2045 requirement and costs nothing to do correctly.
+function wrapBase64(b64: string): string {
+  return b64.replace(/.{76}/g, "$&\r\n");
+}
+
 export async function sendEmail({
   to,
   subject,
   body,
   fromName,
   refreshToken,
+  threadId,
+  inReplyTo,
+  references,
+  attachment,
 }: {
   to: string;
   subject: string;
   body: string;
   fromName?: string;
   refreshToken: string;
-}): Promise<void> {
+  // Gmail's own thread id to reply within. When provided together with
+  // `inReplyTo`, the new message lands in the buyer's existing thread
+  // instead of starting a fresh one — Gmail additionally requires the
+  // Subject to reference the original (a leading "Re:" is fine) for a
+  // threadId'd message to actually thread; callers are responsible for
+  // keeping the subject consistent with the original.
+  threadId?: string;
+  // The RFC "Message-ID" header of the message being replied to (angle-
+  // bracketed, e.g. "<abc@mail.gmail.com>") — this is NOT Gmail's own
+  // internal id (see fetchMessageById's comment above on why those two ids
+  // are deliberately kept separate; only the RFC header value belongs in
+  // In-Reply-To/References). Omit to send a normal, non-threaded email —
+  // the only behavior this function had before threading support existed.
+  inReplyTo?: string;
+  references?: string;
+  attachment?: { filename: string; mimeType: string; buffer: Buffer };
+}): Promise<{ messageId: string; threadId: string }> {
   const token = await getAccessToken(refreshToken);
 
-  const fromLine = fromName ? `From: ${fromName}\r\n` : "";
-  const raw = [
-    fromLine,
+  const headerLines = [
+    fromName ? `From: ${fromName}\r\n` : "",
     `To: ${to}\r\n`,
     `Subject: ${subject}\r\n`,
+    inReplyTo  ? `In-Reply-To: ${inReplyTo}\r\n` : "",
+    references ? `References: ${references}\r\n` : "",
     `MIME-Version: 1.0\r\n`,
-    `Content-Type: text/plain; charset=UTF-8\r\n`,
-    `\r\n`,
-    body,
   ].join("");
 
+  let raw: string;
+  if (attachment) {
+    // multipart/mixed: one text/plain part (the body) + one attachment
+    // part, base64-encoded. Boundary just needs to be a string that can't
+    // plausibly appear in the body/attachment content.
+    const boundary = `procurai_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    raw = [
+      headerLines,
+      `Content-Type: multipart/mixed; boundary="${boundary}"\r\n`,
+      `\r\n`,
+      `--${boundary}\r\n`,
+      `Content-Type: text/plain; charset=UTF-8\r\n`,
+      `\r\n`,
+      `${body}\r\n`,
+      `\r\n`,
+      `--${boundary}\r\n`,
+      `Content-Type: ${attachment.mimeType}; name="${attachment.filename}"\r\n`,
+      `Content-Disposition: attachment; filename="${attachment.filename}"\r\n`,
+      `Content-Transfer-Encoding: base64\r\n`,
+      `\r\n`,
+      wrapBase64(attachment.buffer.toString("base64")),
+      `\r\n`,
+      `--${boundary}--`,
+    ].join("");
+  } else {
+    raw = [
+      headerLines,
+      `Content-Type: text/plain; charset=UTF-8\r\n`,
+      `\r\n`,
+      body,
+    ].join("");
+  }
+
   const encoded = Buffer.from(raw).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  await gmailPost("/messages/send", token, { raw: encoded });
+  const requestBody: Record<string, unknown> = { raw: encoded };
+  // Only a threadId provided together with a correctly-threaded raw
+  // message actually lands in that thread — passing threadId alone
+  // without In-Reply-To/References would still create a new thread from
+  // Gmail's own thread-matching heuristics, so callers should always pass
+  // inReplyTo/references alongside it (see rfq-reply/send/route.ts).
+  if (threadId) requestBody.threadId = threadId;
+
+  const res = await gmailPost("/messages/send", token, requestBody) as { id: string; threadId: string };
+  return { messageId: res.id, threadId: res.threadId };
+}
+
+// Fetches just the RFC "Message-ID" header of an original inbound message,
+// identified by GMAIL'S OWN internal id (e.g. rfqs.gmail_message_id) — the
+// only id this app persists for an imported RFQ. That internal id is
+// deliberately NOT usable as an In-Reply-To/References value itself (see
+// fetchMessageById's comment on why Gmail's id is stored instead of the
+// Message-ID header); this fetches the real header on demand, at send
+// time, so a threaded reply can be built. Returns null (never throws) on
+// any failure — callers treat that as "can't thread this reply," and fall
+// back to a normal new email exactly like every send before this existed.
+export async function getOriginalMessageIdHeader(gmailMessageId: string, refreshToken: string): Promise<string | null> {
+  try {
+    const token = await getAccessToken(refreshToken);
+    const msg = await gmailGet(`/messages/${gmailMessageId}?format=metadata&metadataHeaders=Message-ID`, token) as {
+      payload?: { headers?: { name: string; value: string }[] };
+    };
+    return headerVal(msg.payload?.headers ?? [], "Message-ID") || null;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchMessageById(id: string, token: string): Promise<FetchedEmail> {

@@ -77,3 +77,67 @@ export function exportItemsToPdf(rfq: ExportRfq, items: ExportItem[]) {
 
   doc.save(`${rfq.rfq_code}-items.pdf`);
 }
+
+export type QuotationPdfItem = {
+  line_number: number; name: string; qty: number | null; unit: string | null;
+  unit_price: number | null; discount_percent: number; line_total: number;
+  brand_offered: string | null; lead_time: string | null;
+};
+
+export type QuotationPdfHeader = {
+  rfq_code?: string | null; buyer_name: string | null; supplier_name?: string | null;
+  currency: string; subtotal: number; tax_percent: number; tax_amount: number;
+  grand_total: number; validity_days?: number | null; payment_terms?: string | null;
+};
+
+// Same layout family as exportItemsToPdf above, but returns the PDF as a
+// Blob (jsPDF's own doc.output("blob")) instead of triggering a browser
+// download — used to attach a quotation as a real file on the reply email,
+// which needs the bytes uploaded to storage and handed to a server route,
+// not a client-side save-to-disk.
+export function buildQuotationPdfBlob(header: QuotationPdfHeader, items: QuotationPdfItem[]): Blob {
+  const doc = new jsPDF({ orientation: "landscape" });
+  doc.setFontSize(14);
+  doc.text(`Quotation${header.rfq_code ? ` — ${header.rfq_code}` : ""}`, 14, 16);
+  doc.setFontSize(10);
+  const subtitle = [
+    header.buyer_name ? `Buyer: ${header.buyer_name}` : null,
+    header.supplier_name ? `Supplier: ${header.supplier_name}` : null,
+  ].filter(Boolean).join("   |   ");
+  if (subtitle) doc.text(subtitle, 14, 23);
+
+  autoTable(doc, {
+    startY: 28,
+    head: [["#", "Item", "Qty", "Unit", "Unit Price", "Discount %", "Brand Offered", "Lead Time", "Line Total"]],
+    body: items.map((i) => [
+      i.line_number,
+      i.name,
+      i.qty ?? "",
+      i.unit ?? "",
+      i.unit_price != null ? `${header.currency} ${i.unit_price}` : "",
+      i.discount_percent ? `${i.discount_percent}%` : "",
+      i.brand_offered ?? "",
+      i.lead_time ?? "",
+      `${header.currency} ${i.line_total.toLocaleString("en-IN")}`,
+    ]),
+    styles: { fontSize: 8 },
+    headStyles: { fillColor: [37, 99, 235] },
+  });
+
+  const finalY = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
+  doc.setFontSize(10);
+  doc.text(`Subtotal: ${header.currency} ${header.subtotal.toLocaleString("en-IN")}`, 14, finalY);
+  if (header.tax_percent) {
+    doc.text(`Tax (${header.tax_percent}%): ${header.currency} ${header.tax_amount.toLocaleString("en-IN")}`, 14, finalY + 6);
+  }
+  doc.setFontSize(12);
+  doc.text(`Grand Total: ${header.currency} ${header.grand_total.toLocaleString("en-IN")}`, 14, finalY + (header.tax_percent ? 14 : 8));
+  doc.setFontSize(9);
+  const terms = [
+    header.validity_days ? `Valid for ${header.validity_days} days` : null,
+    header.payment_terms ? `Payment: ${header.payment_terms}` : null,
+  ].filter(Boolean).join("   |   ");
+  if (terms) doc.text(terms, 14, finalY + (header.tax_percent ? 22 : 16));
+
+  return doc.output("blob");
+}

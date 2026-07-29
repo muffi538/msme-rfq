@@ -12,7 +12,7 @@ export default async function RfqsPage() {
 
   // Only show RFQs that have actually been processed — pending ones stay in
   // the email inbox until the user clicks "Process it".
-  const [{ data: rfqs }, { data: outgoingRows }, logsResult] = await Promise.all([
+  const [{ data: rfqs }, { data: outgoingRows }, logsResult, quotationRepliesResult] = await Promise.all([
     supabase
       .from("rfqs")
       .select("id, rfq_code, buyer_name, buyer_email, status, priority, file_type, created_at")
@@ -25,8 +25,14 @@ export default async function RfqsPage() {
       .select("id, buyer_email, supplier_name, quote_summary, email_subject, email_body, sent_at")
       .eq("user_id", user.id)
       .order("sent_at", { ascending: false }),
+    supabase
+      .from("quotation_replies")
+      .select("id, rfq_id, status, buyer_email, supplier_name, email_subject, email_body, grand_total, sent_at")
+      .eq("user_id", user.id)
+      .eq("status", "sent"),
   ]);
   const buyerLogs = logsResult.error ? [] : (logsResult.data ?? []);
+  const quotationReplies = quotationRepliesResult.error ? [] : (quotationRepliesResult.data ?? []);
 
   return (
     <>
@@ -49,6 +55,7 @@ export default async function RfqsPage() {
           rfqs={rfqs ?? []}
           outgoingRows={outgoingRows ?? []}
           buyerLogs={buyerLogs ?? []}
+          quotationReplies={quotationReplies ?? []}
         />
 
       </main>

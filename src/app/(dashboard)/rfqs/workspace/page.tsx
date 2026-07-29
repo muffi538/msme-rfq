@@ -25,7 +25,7 @@ function deriveBadge(tab: TabState | undefined): BadgeStatus {
   if (tab.status === "error") return "Error";
   const d = tab.data!;
   if (d.outgoing.length === 0) return "Ready";
-  const steps = computeWorkflowSteps(d.outgoingStats, d.buyerLog);
+  const steps = computeWorkflowSteps(d.outgoingStats, !!d.quotationReply || !!d.buyerLog, d.rfq.status);
   if (isWorkflowComplete(steps)) return "Completed";
   if (d.outgoingStats.sent > 0) return "Sent";
   return "Reviewed";
@@ -196,6 +196,8 @@ function WorkspaceInner() {
                 outgoingItems={tab.data!.outgoingItems}
                 outgoingStats={tab.data!.outgoingStats}
                 buyerLog={tab.data!.buyerLog}
+                quotationReply={tab.data!.quotationReply}
+                quotationItems={tab.data!.quotationItems}
                 itemImages={tab.data!.itemImages}
                 files={tab.data!.files}
                 onDirtyChange={(d) => setDirty((prev) => ({ ...prev, [id]: d }))}
