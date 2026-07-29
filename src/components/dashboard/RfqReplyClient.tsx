@@ -36,11 +36,6 @@ type StagedFile = { file: File; previewUrl: string | null };
 
 export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs?: ImportableRfq[] }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Suppresses the auto price-sync effect (below) exactly once, right after
-  // loading/resuming an RFQ — otherwise the very first render after import
-  // would immediately "sync" and could stomp a resumed draft's manually
-  // customized email text with the regenerated template.
-  const skipNextBodySyncRef = useRef(false);
   const supabase = createClient();
 
   // ── Input state ──
@@ -177,19 +172,18 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
   // modes call an AI extraction endpoint (parseQuote in extract/route.ts)
   // to compose their email since they're generating text FROM an unread
   // document; here the item list is already fully known (it's the RFQ's
-  // own rfq_items), so there's nothing to extract — just format it. Fully
-  // editable before send either way (this function only seeds the field).
-  function buildDefaultQuotationEmail(rfq: LinkedRfq, tableItems: QuotationTableItem[]) {
-    const lines = tableItems.map((it, i) => {
-      const price = it.unitPrice != null ? `₹${it.unitPrice}` : "TBD";
-      const qty = it.qty != null ? `${it.qty}${it.unit ? ` ${it.unit}` : ""}` : "";
-      return `${i + 1}. ${it.name}${qty ? ` — Qty: ${qty}` : ""} — Rate: ${price}`;
-    }).join("\n");
-    const { grandTotal } = computeQuotationTotals(tableItems, headerDiscountPercent, taxPercent);
+  // own rfq_items), so there's nothing to extract — just a short cover
+  // note. Deliberately carries NO computed pricing (no item list, no
+  // total) — the PDF attached at send time is the single source of truth
+  // for pricing, built fresh from live state; a number embedded in this
+  // text would only be able to go stale the moment a price changes
+  // afterward, which is exactly the bug this replaced (the body used to
+  // list every item's rate and go stale the instant the table was edited).
+  function buildDefaultQuotationEmail(rfq: LinkedRfq) {
     const greeting = rfq.buyer_name ? `Dear ${rfq.buyer_name},` : "Dear Sir/Madam,";
     return {
       subject: `Quotation for RFQ ${rfq.rfq_code}`,
-      body: `${greeting}\n\nPlease find our quotation for RFQ ${rfq.rfq_code} below:\n\n${lines}\n\nGrand Total: ₹${grandTotal.toLocaleString("en-IN")}\n\nPlease let us know if you have any questions or would like to proceed.\n\nWarm regards`,
+      body: `${greeting}\n\nPlease find attached our quotation for RFQ ${rfq.rfq_code}, with pricing for every item requested.\n\nPlease let us know if you have any questions or would like to proceed.\n\nWarm regards`,
     };
   }
 
@@ -205,10 +199,19 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
           id: string; tax_percent: number; discount_percent: number; email_subject: string | null; email_body: string | null;
           items: { item_id: string | null; line_number: number; name: string; qty: number | null; unit: string | null; spec: string | null; brand_offered: string | null; unit_price: number | null; discount_percent: number; lead_time: string | null; delivery_time: string | null; remarks: string | null }[];
         } | null;
+        // Pricing carried over from the RFQ's most recently SENT quotation
+        // (see /api/rfq-reply/quotation's GET route) — only present when
+        // there's no active draft. Pre-fills the table from what was
+        // priced last time instead of resetting to blank, but is NOT
+        // treated as the draft itself: quotationReplyId stays null, so
+        // saving/sending creates a fresh row rather than mutating the
+        // already-sent record.
+        lastSentItems: { item_id: string | null; line_number: number; name: string; qty: number | null; unit: string | null; spec: string | null; brand_offered: string | null; unit_price: number | null; discount_percent: number; lead_time: string | null; delivery_time: string | null; remarks: string | null }[] | null;
       };
 
-      const tableItems: QuotationTableItem[] = data.draft
-        ? data.draft.items.map((it) => ({
+      const sourceItems = data.draft?.items ?? data.lastSentItems;
+      const tableItems: QuotationTableItem[] = sourceItems
+        ? sourceItems.map((it) => ({
             _id: it.item_id ?? `row-${it.line_number}`,
             itemId: it.item_id, lineNumber: it.line_number, name: it.name, qty: it.qty, unit: it.unit,
             spec: it.spec, brandOffered: it.brand_offered, unitPrice: it.unit_price,
@@ -220,7 +223,6 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
             discountPercent: 0, leadTime: null, deliveryTime: null, remarks: null,
           }));
 
-      skipNextBodySyncRef.current = true;
       setLinkedRfq(data.rfq);
       setQuotationItems(tableItems);
       setQuotationReplyId(data.draft?.id ?? null);
@@ -231,7 +233,7 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
         setSubject(data.draft.email_subject ?? "");
         setBody(data.draft.email_body ?? "");
       } else {
-        const drafted = buildDefaultQuotationEmail(data.rfq, tableItems);
+        const drafted = buildDefaultQuotationEmail(data.rfq);
         setSubject(drafted.subject);
         setBody(drafted.body);
       }
@@ -239,40 +241,13 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
       setImportModalOpen(false);
       setStep("review");
       if (data.draft) toast.success("Resumed your saved draft for this RFQ");
+      else if (data.lastSentItems) toast.success("Loaded pricing from the last quotation you sent for this RFQ — edit and resend.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not load this RFQ");
     } finally {
       setImportLoading(false);
     }
   }
-
-  // Keeps the email body's item-list + grand total in sync with the
-  // pricing table automatically — root cause of a real reported bug: the
-  // body was only ever built ONCE, at import time, before any price had
-  // been entered, so it permanently showed "Rate: TBD" no matter what the
-  // user typed into the table afterward, right up through send. Only
-  // replaces the "1. ... Grand Total: ₹..." span it can recognize (the
-  // exact shape buildDefaultQuotationEmail produces), so any greeting/
-  // closing text the user added around it survives untouched; if that span
-  // isn't found (a heavily hand-rewritten body), it's appended instead of
-  // silently doing nothing.
-  useEffect(() => {
-    if (inputMode !== "import" || !linkedRfq || step !== "review") return;
-    if (skipNextBodySyncRef.current) { skipNextBodySyncRef.current = false; return; }
-
-    const itemLines = quotationItems.map((it, i) => {
-      const price = it.unitPrice != null ? `₹${it.unitPrice}` : "TBD";
-      const qty = it.qty != null ? `${it.qty}${it.unit ? ` ${it.unit}` : ""}` : "";
-      return `${i + 1}. ${it.name}${qty ? ` — Qty: ${qty}` : ""} — Rate: ${price}`;
-    }).join("\n");
-    const { grandTotal } = computeQuotationTotals(quotationItems, headerDiscountPercent, taxPercent);
-    const replacement = `${itemLines}\n\nGrand Total: ₹${grandTotal.toLocaleString("en-IN")}`;
-
-    setBody((prev) => {
-      const next = prev.replace(/1\.[\s\S]*?Grand Total: ₹[\d,]+(?:\.\d+)?/, replacement);
-      return next !== prev ? next : `${prev}\n\n${replacement}`;
-    });
-  }, [quotationItems, taxPercent, headerDiscountPercent, linkedRfq, inputMode, step]);
 
   async function saveQuotationDraft(): Promise<string | null> {
     if (!linkedRfq) return null;
@@ -326,8 +301,10 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
       if (!id) { setSending(false); return; }
 
       // Best-effort attachment — a PDF-generation or upload failure must
-      // never block the email itself from sending (pricing is already in
-      // the body text either way).
+      // never block the email itself from sending. The send route always
+      // falls back to a plain-text price list when there's no attachment
+      // (see /api/rfq-reply/quotation/send), so the buyer still gets full
+      // pricing either way; these toasts just surface WHY early.
       let attachmentPath: string | null = null;
       try {
         const { data: { user } } = await supabase.auth.getUser();
@@ -350,9 +327,6 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
           }
         }
       } catch {
-        // A PDF-generation failure must never block the email itself from
-        // sending (pricing is already in the body text either way) — but
-        // the user should still know it didn't attach, not just wonder.
         toast.warning("Could not generate the quotation PDF — sending without it.");
       }
 
@@ -368,8 +342,11 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
       const json = await res.json() as { sentAt?: string; threaded?: boolean; attached?: boolean };
       setSent(true);
       setSentAt(json.sentAt ?? new Date().toISOString());
-      if (attachmentPath && !json.attached) {
-        toast.warning("Sent, but the PDF couldn't be attached — pricing is still in the email body.");
+      if (!json.attached) {
+        // The send route always falls back to including an item-by-item
+        // price list in the email text when the PDF didn't attach — the
+        // buyer still gets full pricing either way, just not as a PDF.
+        toast.warning("Sent — the PDF couldn't be attached, so pricing was included in the email text instead.");
       } else {
         toast.success(json.threaded ? "Buyer notified — replied within the original thread" : "Buyer notified successfully");
       }

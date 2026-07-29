@@ -83,8 +83,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Best-effort attachment — a storage/download hiccup should never block
-  // the buyer from getting the quotation itself; the email still sends
-  // (with pricing in the body), just without the attached PDF.
+  // the buyer from getting the quotation itself.
   let attachment: { filename: string; mimeType: string; buffer: Buffer } | undefined;
   if (attachmentPath) {
     const { data: blob, error: downloadError } = await supabase.storage.from("rfq-files").download(attachmentPath);
@@ -99,9 +98,32 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // The body sent from the client is a short cover note with no pricing in
+  // it — the PDF above is the actual pricing document. This route is the
+  // only place that knows, for certain, whether that PDF actually ended up
+  // attached (generation/upload can fail client-side too, but a storage
+  // download failure can only be discovered here) — so if it didn't, a
+  // plain-text price breakdown is appended here, server-side, right before
+  // sending, rather than ever letting an email go out with neither an
+  // attachment nor any pricing in it at all.
+  const { data: replyItems } = await supabase
+    .from("quotation_reply_items")
+    .select("name, qty, unit, unit_price, remarks")
+    .eq("quotation_reply_id", quotationReplyId)
+    .order("line_number");
+  let outgoingBody = body;
+  if (!attachment && replyItems && replyItems.length > 0) {
+    const lines = replyItems.map((it, i) => {
+      const price = it.unit_price != null ? `₹${it.unit_price}` : "TBD";
+      const qty = it.qty != null ? `${it.qty}${it.unit ? ` ${it.unit}` : ""}` : "";
+      return `${i + 1}. ${it.name}${qty ? ` — Qty: ${qty}` : ""} — Rate: ${price}`;
+    }).join("\n");
+    outgoingBody = `${body}\n\n${lines}`;
+  }
+
   try {
     const sendResult = await sendEmail({
-      to, subject, body,
+      to, subject, body: outgoingBody,
       fromName: companyName,
       refreshToken: gmailToken,
       threadId,
@@ -111,13 +133,16 @@ export async function POST(request: NextRequest) {
     });
 
     const sentAt = new Date().toISOString();
+    // Persists outgoingBody (what was ACTUALLY sent, including any
+    // fallback price list appended above) — not the short cover note the
+    // client submitted — so the record accurately reflects the real email.
     const { error: updateError } = await supabase
       .from("quotation_replies")
       .update({
         status: "sent",
         sent_at: sentAt,
         email_subject: subject,
-        email_body: body,
+        email_body: outgoingBody,
         gmail_message_id: sendResult.messageId,
         gmail_thread_id: sendResult.threadId,
       })
@@ -132,11 +157,6 @@ export async function POST(request: NextRequest) {
     // Dual-write to buyer_reply_logs so anything still reading it directly
     // (or a pre-migration integration) keeps working — quotation_replies is
     // the source of truth going forward, this is a compatibility mirror.
-    const { data: replyItems } = await supabase
-      .from("quotation_reply_items")
-      .select("name, qty, unit, unit_price, remarks")
-      .eq("quotation_reply_id", quotationReplyId)
-      .order("line_number");
     const { error: logError_ } = await supabase.from("buyer_reply_logs").insert({
       user_id:       user.id,
       buyer_email:   to.trim(),
@@ -148,7 +168,7 @@ export async function POST(request: NextRequest) {
         })),
       },
       email_subject: subject,
-      email_body:    body,
+      email_body:    outgoingBody,
       sent_at:       sentAt,
     });
     if (logError_) logError("[rfq-reply/quotation/send] buyer_reply_logs mirror insert failed", logError_);
