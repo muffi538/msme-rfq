@@ -36,6 +36,11 @@ type StagedFile = { file: File; previewUrl: string | null };
 
 export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs?: ImportableRfq[] }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Suppresses the auto price-sync effect (below) exactly once, right after
+  // loading/resuming an RFQ — otherwise the very first render after import
+  // would immediately "sync" and could stomp a resumed draft's manually
+  // customized email text with the regenerated template.
+  const skipNextBodySyncRef = useRef(false);
   const supabase = createClient();
 
   // ── Input state ──
@@ -215,6 +220,7 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
             discountPercent: 0, leadTime: null, deliveryTime: null, remarks: null,
           }));
 
+      skipNextBodySyncRef.current = true;
       setLinkedRfq(data.rfq);
       setQuotationItems(tableItems);
       setQuotationReplyId(data.draft?.id ?? null);
@@ -239,6 +245,34 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
       setImportLoading(false);
     }
   }
+
+  // Keeps the email body's item-list + grand total in sync with the
+  // pricing table automatically — root cause of a real reported bug: the
+  // body was only ever built ONCE, at import time, before any price had
+  // been entered, so it permanently showed "Rate: TBD" no matter what the
+  // user typed into the table afterward, right up through send. Only
+  // replaces the "1. ... Grand Total: ₹..." span it can recognize (the
+  // exact shape buildDefaultQuotationEmail produces), so any greeting/
+  // closing text the user added around it survives untouched; if that span
+  // isn't found (a heavily hand-rewritten body), it's appended instead of
+  // silently doing nothing.
+  useEffect(() => {
+    if (inputMode !== "import" || !linkedRfq || step !== "review") return;
+    if (skipNextBodySyncRef.current) { skipNextBodySyncRef.current = false; return; }
+
+    const itemLines = quotationItems.map((it, i) => {
+      const price = it.unitPrice != null ? `₹${it.unitPrice}` : "TBD";
+      const qty = it.qty != null ? `${it.qty}${it.unit ? ` ${it.unit}` : ""}` : "";
+      return `${i + 1}. ${it.name}${qty ? ` — Qty: ${qty}` : ""} — Rate: ${price}`;
+    }).join("\n");
+    const { grandTotal } = computeQuotationTotals(quotationItems, headerDiscountPercent, taxPercent);
+    const replacement = `${itemLines}\n\nGrand Total: ₹${grandTotal.toLocaleString("en-IN")}`;
+
+    setBody((prev) => {
+      const next = prev.replace(/1\.[\s\S]*?Grand Total: ₹[\d,]+(?:\.\d+)?/, replacement);
+      return next !== prev ? next : `${prev}\n\n${replacement}`;
+    });
+  }, [quotationItems, taxPercent, headerDiscountPercent, linkedRfq, inputMode, step]);
 
   async function saveQuotationDraft(): Promise<string | null> {
     if (!linkedRfq) return null;
@@ -309,10 +343,17 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
           );
           const path = `${user.id}/quotations/${id}.pdf`;
           const { error: uploadError } = await supabase.storage.from("rfq-files").upload(path, blob, { upsert: true, contentType: "application/pdf" });
-          if (!uploadError) attachmentPath = path;
+          if (uploadError) {
+            toast.warning("Could not attach the quotation PDF — sending without it.");
+          } else {
+            attachmentPath = path;
+          }
         }
       } catch {
-        // Attachment is a nice-to-have — proceed without it.
+        // A PDF-generation failure must never block the email itself from
+        // sending (pricing is already in the body text either way) — but
+        // the user should still know it didn't attach, not just wonder.
+        toast.warning("Could not generate the quotation PDF — sending without it.");
       }
 
       const res = await fetch("/api/rfq-reply/quotation/send", {
@@ -324,10 +365,14 @@ export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs
         const err = await res.json() as { error?: string };
         throw new Error(err.error ?? "Send failed");
       }
-      const json = await res.json() as { sentAt?: string; threaded?: boolean };
+      const json = await res.json() as { sentAt?: string; threaded?: boolean; attached?: boolean };
       setSent(true);
       setSentAt(json.sentAt ?? new Date().toISOString());
-      toast.success(json.threaded ? "Buyer notified — replied within the original thread" : "Buyer notified successfully");
+      if (attachmentPath && !json.attached) {
+        toast.warning("Sent, but the PDF couldn't be attached — pricing is still in the email body.");
+      } else {
+        toast.success(json.threaded ? "Buyer notified — replied within the original thread" : "Buyer notified successfully");
+      }
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to send email");
     } finally {
