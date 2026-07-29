@@ -153,7 +153,7 @@ export async function POST(request: NextRequest) {
     });
     if (logError_) logError("[rfq-reply/quotation/send] buyer_reply_logs mirror insert failed", logError_);
 
-    return NextResponse.json({ ok: true, sentAt, threaded: !!threadId });
+    return NextResponse.json({ ok: true, sentAt, threaded: !!threadId, attached: !!attachment });
   } catch (err: unknown) {
     logError("[rfq-reply/quotation/send] send failed", err);
     return NextResponse.json(
