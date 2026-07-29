@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Loader2, ClipboardPaste, Upload, FileText, ImageIcon,
-  Sparkles, Send, CheckCircle2, X, Pencil, RotateCcw, Plus,
+  Sparkles, Send, CheckCircle2, X, Pencil, RotateCcw, Plus, FolderOpen, Save,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ExtractedQuote, QuoteItem } from "@/app/api/rfq-reply/extract/route";
@@ -16,8 +16,16 @@ import { RfqWorkflowTracker } from "@/components/dashboard/RfqWorkflowTracker";
 import { RfqLifecycleExpand } from "@/components/dashboard/RfqLifecycleExpand";
 import { WORKFLOW_STEPS, type WorkflowStepView } from "@/lib/rfq-lifecycle";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { ImportRfqModal, type ImportableRfq } from "@/components/dashboard/ImportRfqModal";
+import { QuotationItemsTable, type QuotationTableItem, computeQuotationTotals } from "@/components/dashboard/QuotationItemsTable";
+import { buildQuotationPdfBlob } from "@/lib/exportRfqItems";
+import { createClient } from "@/lib/supabase/client";
 
 type Step = "input" | "extracting" | "review";
+
+type LinkedRfq = {
+  id: string; rfq_code: string; buyer_name: string | null; buyer_email: string | null; status: string;
+};
 
 // A quotation can arrive as several WhatsApp screenshots (a long price
 // list split across screens) — must match MAX_FILES in
@@ -26,11 +34,12 @@ const MAX_FILES = 6;
 
 type StagedFile = { file: File; previewUrl: string | null };
 
-export default function RfqReplyClient() {
+export default function RfqReplyClient({ importableRfqs = [] }: { importableRfqs?: ImportableRfq[] }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const supabase = createClient();
 
   // ── Input state ──
-  const [inputMode, setInputMode]     = useState<"paste" | "upload" | "text">("paste");
+  const [inputMode, setInputMode]     = useState<"paste" | "upload" | "text" | "import">("paste");
   const [files, setFiles]             = useState<StagedFile[]>([]);
   const [textInput, setTextInput]     = useState("");
 
@@ -38,6 +47,17 @@ export default function RfqReplyClient() {
   const [step, setStep]               = useState<Step>("input");
   const [quote, setQuote]             = useState<ExtractedQuote | null>(null);
   const [items, setItems]             = useState<QuoteItem[]>([]);
+
+  // ── "Import Existing RFQ" state — a real rfq_id-linked quotation, distinct
+  // from the AI-extracted `quote`/`items` above used by the other 3 modes. ──
+  const [importModalOpen, setImportModalOpen]   = useState(false);
+  const [importLoading, setImportLoading]       = useState(false);
+  const [linkedRfq, setLinkedRfq]                 = useState<LinkedRfq | null>(null);
+  const [quotationReplyId, setQuotationReplyId]   = useState<string | null>(null);
+  const [quotationItems, setQuotationItems]       = useState<QuotationTableItem[]>([]);
+  const [taxPercent, setTaxPercent]               = useState(0);
+  const [headerDiscountPercent, setHeaderDiscountPercent] = useState(0);
+  const [savingDraft, setSavingDraft]             = useState(false);
 
   // ── Email compose state ──
   const [toEmail, setToEmail]         = useState("");
@@ -135,6 +155,11 @@ export default function RfqReplyClient() {
     setStep("input");
     setQuote(null);
     setItems([]);
+    setLinkedRfq(null);
+    setQuotationReplyId(null);
+    setQuotationItems([]);
+    setTaxPercent(0);
+    setHeaderDiscountPercent(0);
     setToEmail("");
     setSubject("");
     setBody("");
@@ -143,12 +168,185 @@ export default function RfqReplyClient() {
     setSentDetailsOpen(false);
   }
 
+  // Deterministic, editable email draft for an imported RFQ — the other 3
+  // modes call an AI extraction endpoint (parseQuote in extract/route.ts)
+  // to compose their email since they're generating text FROM an unread
+  // document; here the item list is already fully known (it's the RFQ's
+  // own rfq_items), so there's nothing to extract — just format it. Fully
+  // editable before send either way (this function only seeds the field).
+  function buildDefaultQuotationEmail(rfq: LinkedRfq, tableItems: QuotationTableItem[]) {
+    const lines = tableItems.map((it, i) => {
+      const price = it.unitPrice != null ? `₹${it.unitPrice}` : "TBD";
+      const qty = it.qty != null ? `${it.qty}${it.unit ? ` ${it.unit}` : ""}` : "";
+      return `${i + 1}. ${it.name}${qty ? ` — Qty: ${qty}` : ""} — Rate: ${price}`;
+    }).join("\n");
+    const { grandTotal } = computeQuotationTotals(tableItems, headerDiscountPercent, taxPercent);
+    const greeting = rfq.buyer_name ? `Dear ${rfq.buyer_name},` : "Dear Sir/Madam,";
+    return {
+      subject: `Quotation for RFQ ${rfq.rfq_code}`,
+      body: `${greeting}\n\nPlease find our quotation for RFQ ${rfq.rfq_code} below:\n\n${lines}\n\nGrand Total: ₹${grandTotal.toLocaleString("en-IN")}\n\nPlease let us know if you have any questions or would like to proceed.\n\nWarm regards`,
+    };
+  }
+
+  async function handleImportSelect(rfqId: string) {
+    setImportLoading(true);
+    try {
+      const res = await fetch(`/api/rfq-reply/quotation?rfqId=${rfqId}`);
+      if (!res.ok) throw new Error("Could not load this RFQ");
+      const data = await res.json() as {
+        rfq: LinkedRfq & { gmail_message_id: string | null; gmail_thread_id: string | null };
+        rfqItems: { id: string; line_number: number; name: string; qty: number | null; unit: string | null; spec: string | null; brand: string | null }[];
+        draft: {
+          id: string; tax_percent: number; discount_percent: number; email_subject: string | null; email_body: string | null;
+          items: { item_id: string | null; line_number: number; name: string; qty: number | null; unit: string | null; spec: string | null; brand_offered: string | null; unit_price: number | null; discount_percent: number; lead_time: string | null; delivery_time: string | null; remarks: string | null }[];
+        } | null;
+      };
+
+      const tableItems: QuotationTableItem[] = data.draft
+        ? data.draft.items.map((it) => ({
+            _id: it.item_id ?? `row-${it.line_number}`,
+            itemId: it.item_id, lineNumber: it.line_number, name: it.name, qty: it.qty, unit: it.unit,
+            spec: it.spec, brandOffered: it.brand_offered, unitPrice: it.unit_price,
+            discountPercent: it.discount_percent, leadTime: it.lead_time, deliveryTime: it.delivery_time, remarks: it.remarks,
+          }))
+        : data.rfqItems.map((it) => ({
+            _id: it.id, itemId: it.id, lineNumber: it.line_number, name: it.name, qty: it.qty, unit: it.unit,
+            spec: it.spec, brandOffered: it.brand, unitPrice: null,
+            discountPercent: 0, leadTime: null, deliveryTime: null, remarks: null,
+          }));
+
+      setLinkedRfq(data.rfq);
+      setQuotationItems(tableItems);
+      setQuotationReplyId(data.draft?.id ?? null);
+      setTaxPercent(data.draft?.tax_percent ?? 0);
+      setHeaderDiscountPercent(data.draft?.discount_percent ?? 0);
+      setToEmail(data.rfq.buyer_email ?? "");
+      if (data.draft?.email_subject || data.draft?.email_body) {
+        setSubject(data.draft.email_subject ?? "");
+        setBody(data.draft.email_body ?? "");
+      } else {
+        const drafted = buildDefaultQuotationEmail(data.rfq, tableItems);
+        setSubject(drafted.subject);
+        setBody(drafted.body);
+      }
+      setInputMode("import");
+      setImportModalOpen(false);
+      setStep("review");
+      if (data.draft) toast.success("Resumed your saved draft for this RFQ");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not load this RFQ");
+    } finally {
+      setImportLoading(false);
+    }
+  }
+
+  async function saveQuotationDraft(): Promise<string | null> {
+    if (!linkedRfq) return null;
+    setSavingDraft(true);
+    try {
+      const res = await fetch("/api/rfq-reply/quotation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: quotationReplyId ?? undefined,
+          rfqId: linkedRfq.id,
+          source: "imported",
+          buyerEmail: toEmail || linkedRfq.buyer_email || "",
+          buyerName: linkedRfq.buyer_name,
+          emailSubject: subject,
+          emailBody: body,
+          taxPercent,
+          discountPercent: headerDiscountPercent,
+          items: quotationItems.map((it) => ({
+            itemId: it.itemId, lineNumber: it.lineNumber, name: it.name, qty: it.qty, unit: it.unit,
+            spec: it.spec, brandOffered: it.brandOffered, unitPrice: it.unitPrice,
+            discountPercent: it.discountPercent, leadTime: it.leadTime, deliveryTime: it.deliveryTime, remarks: it.remarks,
+          })),
+        }),
+      });
+      if (!res.ok) throw new Error("Could not save draft");
+      const data = await res.json() as { id: string };
+      setQuotationReplyId(data.id);
+      return data.id;
+    } catch {
+      toast.error("Couldn't save draft — please try again");
+      return null;
+    } finally {
+      setSavingDraft(false);
+    }
+  }
+
+  async function handleSaveDraftClick() {
+    const id = await saveQuotationDraft();
+    if (id) toast.success("Draft saved — you can come back to it any time from Import Existing RFQ.");
+  }
+
+  async function handleSendQuotation() {
+    if (!linkedRfq || !toEmail || !subject || !body) {
+      toast.error("Recipient email, subject and body are required");
+      return;
+    }
+    setSending(true);
+    try {
+      const id = await saveQuotationDraft();
+      if (!id) { setSending(false); return; }
+
+      // Best-effort attachment — a PDF-generation or upload failure must
+      // never block the email itself from sending (pricing is already in
+      // the body text either way).
+      let attachmentPath: string | null = null;
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const { grandTotal, subtotal, taxAmount } = computeQuotationTotals(quotationItems, headerDiscountPercent, taxPercent);
+          const blob = buildQuotationPdfBlob(
+            { rfq_code: linkedRfq.rfq_code, buyer_name: linkedRfq.buyer_name, currency: "INR", subtotal, tax_percent: taxPercent, tax_amount: taxAmount, grand_total: grandTotal },
+            quotationItems.map((it) => ({
+              line_number: it.lineNumber, name: it.name, qty: it.qty, unit: it.unit, unit_price: it.unitPrice,
+              discount_percent: it.discountPercent, line_total: (it.qty ?? 0) * (it.unitPrice ?? 0) * (1 - it.discountPercent / 100),
+              brand_offered: it.brandOffered, lead_time: it.leadTime,
+            }))
+          );
+          const path = `${user.id}/quotations/${id}.pdf`;
+          const { error: uploadError } = await supabase.storage.from("rfq-files").upload(path, blob, { upsert: true, contentType: "application/pdf" });
+          if (!uploadError) attachmentPath = path;
+        }
+      } catch {
+        // Attachment is a nice-to-have — proceed without it.
+      }
+
+      const res = await fetch("/api/rfq-reply/quotation/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quotationReplyId: id, to: toEmail, subject, body, attachmentPath }),
+      });
+      if (!res.ok) {
+        const err = await res.json() as { error?: string };
+        throw new Error(err.error ?? "Send failed");
+      }
+      const json = await res.json() as { sentAt?: string; threaded?: boolean };
+      setSent(true);
+      setSentAt(json.sentAt ?? new Date().toISOString());
+      toast.success(json.threaded ? "Buyer notified — replied within the original thread" : "Buyer notified successfully");
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to send email");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  // A standalone/ad-hoc reply (Screenshot, Upload File, Paste Text — no
+  // linked RFQ) has no real outgoing-supplier data or rfqs.status to
+  // derive from, so this stays a local stand-in rather than the shared
+  // computeWorkflowSteps — "Under Evaluation"/"Purchase Order" are always
+  // pending here since there's no RFQ record to advance.
   function replyWorkflowSteps(): WorkflowStepView[] {
-    const flags = {
+    const flags: Record<string, boolean> = {
       inquiry: true,
       supplier_sent: true,
-      quote_received: step === "review" || sent,
-      buyer_notified: sent,
+      quotation_sent: step === "review" || sent,
+      under_evaluation: false,
+      po_received: false,
     };
     const order = WORKFLOW_STEPS.map((s) => s.id);
     const allComplete = order.every((id) => flags[id as keyof typeof flags]);
@@ -313,9 +511,10 @@ export default function RfqReplyClient() {
           {/* Mode tabs */}
           <div className="flex border-b border-border">
             {([
-              { mode: "paste",  label: "Screenshot / Image", icon: ClipboardPaste },
-              { mode: "upload", label: "Upload File",         icon: Upload },
-              { mode: "text",   label: "Paste Text",          icon: FileText },
+              { mode: "paste",  label: "Screenshot / Image",  icon: ClipboardPaste },
+              { mode: "upload", label: "Upload File",          icon: Upload },
+              { mode: "text",   label: "Paste Text",           icon: FileText },
+              { mode: "import", label: "Import Existing RFQ",  icon: FolderOpen },
             ] as const).map(({ mode, label, icon: Icon }) => (
               <button
                 key={mode}
@@ -324,6 +523,7 @@ export default function RfqReplyClient() {
                   files.forEach((sf) => { if (sf.previewUrl) URL.revokeObjectURL(sf.previewUrl); });
                   setFiles([]);
                   setTextInput("");
+                  if (mode === "import") setImportModalOpen(true);
                 }}
                 className={cn(
                   "flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors border-b-2",
@@ -447,25 +647,53 @@ export default function RfqReplyClient() {
               </div>
             )}
 
-            <Button
-              onClick={handleExtract}
-              disabled={!canExtract || step === "extracting"}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold h-11"
-            >
-              {step === "extracting" ? (
-                <><Loader2 className="w-4 h-4 animate-spin mr-2" />Extracting with AI…</>
-              ) : (
-                <><Sparkles className="w-4 h-4 mr-2" />Extract & Draft Email</>
-              )}
-            </Button>
+            {/* ── Import Existing RFQ mode — no free text/file input; the
+                modal (opened by the tab click, or the button below if it
+                was dismissed) picks an RFQ and jumps straight to review. ── */}
+            {inputMode === "import" && (
+              <div
+                onClick={() => setImportModalOpen(true)}
+                className="border-2 border-dashed border-border rounded-xl p-10 flex flex-col items-center justify-center gap-3 cursor-pointer hover:border-blue-400 hover:bg-blue-50/30 dark:hover:bg-blue-950/10 transition-colors"
+              >
+                {importLoading ? (
+                  <Loader2 className="w-10 h-10 text-muted-foreground/50 animate-spin" />
+                ) : (
+                  <FolderOpen className="w-10 h-10 text-muted-foreground/50" />
+                )}
+                <p className="font-medium text-muted-foreground">Browse RFQs already in Procur.AI</p>
+                <p className="text-sm text-muted-foreground/60">Items, quantities, units and specs load automatically — just enter pricing</p>
+              </div>
+            )}
+
+            {inputMode !== "import" && (
+              <Button
+                onClick={handleExtract}
+                disabled={!canExtract || step === "extracting"}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold h-11"
+              >
+                {step === "extracting" ? (
+                  <><Loader2 className="w-4 h-4 animate-spin mr-2" />Extracting with AI…</>
+                ) : (
+                  <><Sparkles className="w-4 h-4 mr-2" />Extract & Draft Email</>
+                )}
+              </Button>
+            )}
           </div>
         </div>
+      )}
+
+      {importModalOpen && (
+        <ImportRfqModal
+          rfqs={importableRfqs}
+          onSelect={handleImportSelect}
+          onClose={() => setImportModalOpen(false)}
+        />
       )}
 
       {/* ══════════════════════════════════
           STEP 2 — REVIEW & SEND
       ══════════════════════════════════ */}
-      {step === "review" && quote && (
+      {step === "review" && quote && inputMode !== "import" && (
         <>
           {/* Extracted items table */}
           <div className="bg-card border border-border rounded-2xl overflow-hidden">
@@ -652,6 +880,120 @@ export default function RfqReplyClient() {
 
                 <Button
                   onClick={handleSend}
+                  disabled={sending || !toEmail || !subject || !body}
+                  className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold h-11"
+                >
+                  {sending ? (
+                    <><Loader2 className="w-4 h-4 animate-spin mr-2" />Sending…</>
+                  ) : (
+                    <><Send className="w-4 h-4 mr-2" />Send Email to Buyer</>
+                  )}
+                </Button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ══════════════════════════════════
+          STEP 2 (Import mode) — QUOTATION TABLE & SEND
+      ══════════════════════════════════ */}
+      {step === "review" && inputMode === "import" && linkedRfq && (
+        <>
+          <div className="bg-card border border-border rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-border flex items-center justify-between">
+              <div>
+                <h2 className="font-semibold text-card-foreground">Quotation for {linkedRfq.rfq_code}</h2>
+                <p className="text-sm text-muted-foreground mt-0.5">{linkedRfq.buyer_name ?? "—"}</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleSaveDraftClick}
+                  disabled={savingDraft}
+                  className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground border border-border rounded-lg px-3 py-1.5 hover:bg-accent transition-colors disabled:opacity-50"
+                >
+                  {savingDraft ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  Save Draft
+                </button>
+                <button
+                  onClick={reset}
+                  className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Start over
+                </button>
+              </div>
+            </div>
+            <div className="p-4">
+              <QuotationItemsTable
+                items={quotationItems}
+                onItemsChange={setQuotationItems}
+                taxPercent={taxPercent}
+                onTaxPercentChange={setTaxPercent}
+                discountPercent={headerDiscountPercent}
+                onDiscountPercentChange={setHeaderDiscountPercent}
+              />
+            </div>
+          </div>
+
+          {/* Email compose */}
+          <div className="bg-card border border-border rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-border">
+              <h2 className="font-semibold text-card-foreground">Compose Email to Buyer</h2>
+            </div>
+
+            {sent ? (
+              <div className="px-6 py-8 space-y-4">
+                <div className="flex flex-col items-center gap-2 text-center">
+                  <CheckCircle2 className="w-10 h-10 text-green-500" />
+                  <p className="text-lg font-semibold text-card-foreground">Completed · Buyer notified</p>
+                  <p className="text-sm text-muted-foreground">
+                    <b>{toEmail}</b>
+                    {sentAt && (
+                      <> · {new Date(sentAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</>
+                    )}
+                  </p>
+                </div>
+                <Button variant="outline" onClick={reset} className="w-full">
+                  Send another reply
+                </Button>
+              </div>
+            ) : (
+              <div className="p-6 space-y-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="import-to">To <span className="text-destructive">*</span></Label>
+                  <Input
+                    id="import-to"
+                    type="email"
+                    placeholder="buyer@example.com"
+                    value={toEmail}
+                    onChange={(e) => setToEmail(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="import-subject">Subject <span className="text-destructive">*</span></Label>
+                  <Input
+                    id="import-subject"
+                    value={subject}
+                    onChange={(e) => setSubject(e.target.value)}
+                    placeholder="Quotation for Your Enquiry"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="import-body">Email body <span className="text-destructive">*</span></Label>
+                  <Textarea
+                    id="import-body"
+                    value={body}
+                    onChange={(e) => setBody(e.target.value)}
+                    className="min-h-64 text-sm font-mono resize-y"
+                  />
+                  <p className="text-xs text-muted-foreground">Edit freely before sending. Sent via your connected Gmail account — replies within the original thread when possible.</p>
+                </div>
+
+                <Button
+                  onClick={handleSendQuotation}
                   disabled={sending || !toEmail || !subject || !body}
                   className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold h-11"
                 >

@@ -34,9 +34,11 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
     })
   );
 
-  // outgoingItems depends on outgoing's ids; buyerLog depends on rfq.buyer_email —
-  // neither depends on the other, so run them together.
-  const [{ data: outgoingItems }, buyerLog] = await Promise.all([
+  // outgoingItems depends on outgoing's ids; buyerLog depends on rfq.buyer_email;
+  // quotationReplies is the real rfq_id-linked replacement for buyerLog's
+  // email-string matching (see matchQuotationReply in rfq-lifecycle.ts) —
+  // none of the three depend on each other, so run them together.
+  const [{ data: outgoingItems }, buyerLog, { data: quotationReplies }] = await Promise.all([
     supabase
       .from("outgoing_rfq_items")
       .select("outgoing_rfq_id, item_id")
@@ -51,12 +53,30 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
           .maybeSingle()
           .then((r) => r.data)
       : Promise.resolve(null),
+    supabase
+      .from("quotation_replies")
+      .select("id, rfq_id, status, buyer_email, supplier_name, email_subject, email_body, grand_total, sent_at")
+      .eq("rfq_id", id)
+      .eq("status", "sent")
+      .order("sent_at", { ascending: false }),
   ]);
 
   const outgoingStats = {
     total: (outgoing ?? []).length,
     sent:  (outgoing ?? []).filter((o) => o.status === "sent").length,
   };
+
+  // Most recent sent quotation reply linked to THIS rfq — unambiguous,
+  // unlike buyerLog's email matching. Load its line items too, since
+  // RfqLifecycleExpand shows full pricing detail for the linked case.
+  const latestQuotationReply = (quotationReplies ?? [])[0] ?? null;
+  const { data: quotationItems } = latestQuotationReply
+    ? await supabase
+        .from("quotation_reply_items")
+        .select("name, qty, unit, unit_price, brand_offered")
+        .eq("quotation_reply_id", latestQuotationReply.id)
+        .order("line_number")
+    : { data: [] };
 
   return (
     <>
@@ -68,6 +88,8 @@ export default async function RfqDetailPage({ params }: { params: Promise<{ id: 
         outgoingItems={outgoingItems ?? []}
         outgoingStats={outgoingStats}
         buyerLog={buyerLog}
+        quotationReply={latestQuotationReply}
+        quotationItems={quotationItems ?? []}
         itemImages={itemImages}
         files={files ?? []}
       />

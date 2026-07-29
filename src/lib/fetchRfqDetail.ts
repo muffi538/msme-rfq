@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { BuyerReplyLog } from "@/lib/rfq-lifecycle";
+import type { BuyerReplyLog, QuotationReplySummary } from "@/lib/rfq-lifecycle";
 
 type RfqImageRow = {
   id: string; item_id: string | null; file_url: string;
@@ -33,7 +33,7 @@ export async function fetchRfqDetail(supabase: SupabaseClient, id: string) {
     })
   );
 
-  const [{ data: outgoingItems }, buyerLog] = await Promise.all([
+  const [{ data: outgoingItems }, buyerLog, { data: quotationReplies }] = await Promise.all([
     supabase
       .from("outgoing_rfq_items")
       .select("outgoing_rfq_id, item_id")
@@ -48,12 +48,27 @@ export async function fetchRfqDetail(supabase: SupabaseClient, id: string) {
           .maybeSingle()
           .then((r: { data: BuyerReplyLog | null }) => r.data)
       : Promise.resolve(null as BuyerReplyLog | null),
+    supabase
+      .from("quotation_replies")
+      .select("id, rfq_id, status, buyer_email, supplier_name, email_subject, email_body, grand_total, sent_at")
+      .eq("rfq_id", id)
+      .eq("status", "sent")
+      .order("sent_at", { ascending: false }),
   ]);
 
   const outgoingStats = {
     total: (outgoing ?? []).length,
     sent:  (outgoing ?? []).filter((o: { status: string }) => o.status === "sent").length,
   };
+
+  const latestQuotationReply: QuotationReplySummary | null = (quotationReplies ?? [])[0] ?? null;
+  const { data: quotationItems } = latestQuotationReply
+    ? await supabase
+        .from("quotation_reply_items")
+        .select("name, qty, unit, unit_price, brand_offered")
+        .eq("quotation_reply_id", latestQuotationReply.id)
+        .order("line_number")
+    : { data: [] };
 
   return {
     rfq,
@@ -62,6 +77,8 @@ export async function fetchRfqDetail(supabase: SupabaseClient, id: string) {
     outgoingItems: outgoingItems ?? [],
     outgoingStats,
     buyerLog,
+    quotationReply: latestQuotationReply,
+    quotationItems: quotationItems ?? [],
     itemImages,
     files: files ?? [],
   };

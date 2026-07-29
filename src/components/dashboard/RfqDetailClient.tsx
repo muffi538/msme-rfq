@@ -19,9 +19,11 @@ import { ImageLightbox } from "@/components/dashboard/ImageLightbox";
 import {
   type BuyerReplyLog,
   type OutgoingStats,
+  type QuotationReplySummary,
   computeWorkflowSteps,
   isWorkflowComplete,
 } from "@/lib/rfq-lifecycle";
+import type { QuotationReplyItemView } from "@/components/dashboard/RfqLifecycleExpand";
 import { exportItemsToExcel, exportItemsToCsv, exportItemsToPdf } from "@/lib/exportRfqItems";
 import { normalizePhone, buildWaUrl, isValidWhatsappGroupLink } from "@/lib/whatsapp";
 import { BUILT_IN_CATEGORIES as PRESET_CATEGORIES } from "@/lib/categories";
@@ -40,11 +42,14 @@ const COLOUR_OPTIONS = [
 const COLOUR_NONE = "__NONE__";
 
 const statusStyle: Record<string, string> = {
-  draft:       "bg-gray-100 text-gray-600",
-  approved:    "bg-blue-100 text-blue-700",
-  sent:        "bg-green-100 text-green-700",
-  failed:      "bg-red-100 text-red-700",
-  no_supplier: "bg-yellow-100 text-yellow-700",
+  draft:             "bg-gray-100 text-gray-600",
+  approved:          "bg-blue-100 text-blue-700",
+  sent:              "bg-green-100 text-green-700",
+  failed:            "bg-red-100 text-red-700",
+  no_supplier:       "bg-yellow-100 text-yellow-700",
+  quotation_sent:    "bg-purple-100 text-purple-700",
+  under_evaluation:  "bg-amber-100 text-amber-700",
+  po_received:       "bg-emerald-100 text-emerald-800",
 };
 
 type Item = {
@@ -386,8 +391,8 @@ function SupplierSplitCard({
 }
 
 export default function RfqDetailClient({
-  rfq, items: initialItems, outgoing: initialOutgoing, outgoingItems,
-  outgoingStats, buyerLog, itemImages: initialItemImages, files, onDirtyChange,
+  rfq: initialRfq, items: initialItems, outgoing: initialOutgoing, outgoingItems,
+  outgoingStats, buyerLog, quotationReply, quotationItems, itemImages: initialItemImages, files, onDirtyChange,
 }: {
   rfq: Rfq;
   items: Item[];
@@ -395,6 +400,10 @@ export default function RfqDetailClient({
   outgoingItems: OutgoingItem[];
   outgoingStats: OutgoingStats;
   buyerLog: BuyerReplyLog | null;
+  // Real rfq_id-linked quotation (see matchQuotationReply) — preferred over
+  // buyerLog's email-string matching wherever both are available.
+  quotationReply?: QuotationReplySummary | null;
+  quotationItems?: QuotationReplyItemView[];
   itemImages: ItemImage[];
   // Optional (defaults to []) so this component doesn't hard-require every
   // caller to fetch rfq_files — a legacy single-blob RFQ genuinely has none.
@@ -404,8 +413,10 @@ export default function RfqDetailClient({
   // Optional and unused by the single-RFQ page.
   onDirtyChange?: (dirty: boolean) => void;
 }) {
+  const [rfq, setRfq]             = useState<Rfq>(initialRfq);
   const [items, setItems]         = useState<Item[]>(initialItems);
   const [outgoing, setOutgoing]   = useState<OutgoingRfq[]>(initialOutgoing);
+  const [advancingStatus, setAdvancingStatus] = useState(false);
   const [itemImages, setItemImages] = useState<ItemImage[]>(initialItemImages);
   const [lightboxImage, setLightboxImage] = useState<ItemImage | null>(null);
   const [splitting, setSplitting] = useState(false);
@@ -425,8 +436,33 @@ export default function RfqDetailClient({
     onDirtyChange?.(dirtyMessageIds.current.size > 0);
   }
 
-  const workflowSteps = computeWorkflowSteps(outgoingStats, buyerLog);
+  const quotationSent = !!quotationReply || !!buyerLog;
+  const workflowSteps = computeWorkflowSteps(outgoingStats, quotationSent, rfq.status);
   const workflowComplete = isWorkflowComplete(workflowSteps);
+
+  // Manual, forward-only lifecycle checkpoints past "Quotation Sent" — this
+  // app has no way to detect that a buyer is evaluating a quote or has cut
+  // a real purchase order, so both are explicit user-reported actions, not
+  // inferred from any automated signal.
+  async function advanceStatus(next: "under_evaluation" | "po_received") {
+    const previous = rfq.status;
+    setAdvancingStatus(true);
+    setRfq((r) => ({ ...r, status: next }));
+    try {
+      const res = await fetch(`/api/rfqs/${rfq.id}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: next }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      toast.success(next === "under_evaluation" ? "Marked as Under Evaluation" : "Marked as Purchase Order Received");
+    } catch {
+      setRfq((r) => ({ ...r, status: previous }));
+      toast.error("Couldn't update status — please try again");
+    } finally {
+      setAdvancingStatus(false);
+    }
+  }
 
   // Group send modal
   const [groupModal, setGroupModal] = useState<{ outgoingId: string; groupLink: string; message: string; supplierName: string } | null>(null);
@@ -813,25 +849,47 @@ export default function RfqDetailClient({
           <div className="space-y-2 min-w-0 flex-1">
             <RfqWorkflowTracker steps={workflowSteps} showLabels />
             {workflowComplete ? (
-              <p className="text-sm font-medium text-green-700">Completed · Buyer notified</p>
+              <p className="text-sm font-medium text-green-700">Completed · Purchase order received</p>
             ) : (
               <p className="text-sm text-gray-500">
                 Current step: <span className="font-medium text-gray-700">{workflowSteps.find((s) => s.state === "current")?.label}</span>
               </p>
             )}
           </div>
-          <button
-            type="button"
-            onClick={() => setLifecycleOpen((o) => !o)}
-            className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 shrink-0"
-          >
-            {lifecycleOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-            {lifecycleOpen ? "Hide details" : "Lifecycle details"}
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {rfq.status === "quotation_sent" && (
+              <button
+                type="button"
+                disabled={advancingStatus}
+                onClick={() => advanceStatus("under_evaluation")}
+                className="text-xs font-medium text-blue-600 hover:text-blue-800 border border-blue-200 rounded-lg px-2.5 py-1.5 hover:bg-blue-50 transition-colors disabled:opacity-50"
+              >
+                Mark Under Evaluation
+              </button>
+            )}
+            {rfq.status === "under_evaluation" && (
+              <button
+                type="button"
+                disabled={advancingStatus}
+                onClick={() => advanceStatus("po_received")}
+                className="text-xs font-medium text-green-700 hover:text-green-900 border border-green-200 rounded-lg px-2.5 py-1.5 hover:bg-green-50 transition-colors disabled:opacity-50"
+              >
+                Mark Purchase Order Received
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setLifecycleOpen((o) => !o)}
+              className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800"
+            >
+              {lifecycleOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+              {lifecycleOpen ? "Hide details" : "Lifecycle details"}
+            </button>
+          </div>
         </div>
         {lifecycleOpen && (
           <div className="pt-3 border-t border-gray-100">
-            <RfqLifecycleExpand buyerLog={buyerLog} />
+            <RfqLifecycleExpand buyerLog={buyerLog} quotationReply={quotationReply} quotationItems={quotationItems} />
           </div>
         )}
         <div className="flex flex-wrap gap-6 pt-1 border-t border-gray-50">

@@ -7,10 +7,12 @@ import { RfqWorkflowTracker } from "@/components/dashboard/RfqWorkflowTracker";
 import { RfqLifecycleExpand } from "@/components/dashboard/RfqLifecycleExpand";
 import {
   type BuyerReplyLog,
+  type QuotationReplySummary,
   aggregateOutgoingByRfq,
   computeWorkflowSteps,
   isWorkflowComplete,
   matchBuyerReplyLog,
+  matchQuotationReply,
 } from "@/lib/rfq-lifecycle";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -45,10 +47,12 @@ export default function RfqsClient({
   rfqs: initial,
   outgoingRows,
   buyerLogs,
+  quotationReplies = [],
 }: {
   rfqs: Rfq[];
   outgoingRows: { rfq_id: string; status: string }[];
   buyerLogs: BuyerReplyLog[];
+  quotationReplies?: QuotationReplySummary[];
 }) {
   const [rfqs,          setRfqs]          = useState<Rfq[]>(initial);
   const [search,        setSearch]        = useState("");
@@ -279,7 +283,8 @@ export default function RfqsClient({
               {filtered.map((rfq) => {
                 const stats = outgoingByRfq[rfq.id] ?? { total: 0, sent: 0 };
                 const buyerLog = matchBuyerReplyLog(rfq.buyer_email, buyerLogs);
-                const steps = computeWorkflowSteps(stats, buyerLog);
+                const quotationReply = matchQuotationReply(rfq.id, quotationReplies);
+                const steps = computeWorkflowSteps(stats, !!quotationReply || !!buyerLog, rfq.status);
                 const complete = isWorkflowComplete(steps);
                 const isOpen = expanded.has(rfq.id);
 
@@ -351,7 +356,7 @@ export default function RfqsClient({
                     {isOpen && (
                       <tr className="bg-gray-50/60">
                         <td colSpan={6} className="px-4 py-2 border-t border-gray-100">
-                          <RfqLifecycleExpand buyerLog={buyerLog} />
+                          <RfqLifecycleExpand buyerLog={buyerLog} quotationReply={quotationReply} />
                         </td>
                       </tr>
                     )}
