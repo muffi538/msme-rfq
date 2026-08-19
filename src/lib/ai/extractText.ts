@@ -1,3 +1,5 @@
+import { friendlyOpenAiErrorMessage, isInsufficientQuota } from "@/lib/ai/openaiErrors";
+
 // Relocated from the upload route so both the PDF-parse fallback and image
 // OCR (single- and multi-file upload, plus the process route) can share one
 // implementation. Originally never checked res.ok — an OpenAI error
@@ -5,6 +7,18 @@
 // which made it look like "this file has no text" instead of "OCR failed,"
 // and meant any retry wrapper around this call had nothing to actually
 // catch. Now throws on failure so callers can tell the difference and retry.
+//
+// Thrown as an OcrError (not a bare Error) so callers can tell an
+// account-out-of-credits failure — never worth retrying — apart from a
+// genuinely transient one, and so the message shown to the end user is the
+// clean, translated one, not OpenAI's raw JSON error body.
+export class OcrError extends Error {
+  constructor(message: string, public retryable: boolean) {
+    super(message);
+    this.name = "OcrError";
+  }
+}
+
 export async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Promise<string> {
   const base64 = buffer.toString("base64");
   const isPdf  = mimeType.includes("pdf");
@@ -44,8 +58,11 @@ export async function extractTextViaOpenAI(buffer: Buffer, mimeType: string): Pr
   const requestId = res.headers.get("x-request-id");
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText);
-    console.log(`[extractTextViaOpenAI] FAILED status=${res.status} requestId=${requestId} durationMs=${Date.now() - startedAt} mime=${mimeType} bytes=${buffer.length}`);
-    throw new Error(`OpenAI vision error (${res.status}): ${errText}`);
+    console.log(`[extractTextViaOpenAI] FAILED status=${res.status} requestId=${requestId} durationMs=${Date.now() - startedAt} mime=${mimeType} bytes=${buffer.length} body=${errText.slice(0, 500)}`);
+    // The raw errText (OpenAI's own JSON error body) stays in the log line
+    // above for debugging — it must never reach the thrown message, which
+    // ends up displayed verbatim to a non-technical end user.
+    throw new OcrError(friendlyOpenAiErrorMessage(res.status, errText), !isInsufficientQuota(res.status, errText));
   }
   const json = await res.json();
   const content = json.choices?.[0]?.message?.content;
