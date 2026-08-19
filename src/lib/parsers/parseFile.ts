@@ -2,8 +2,13 @@ import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { parseCsv } from "@/lib/parsers/csv";
 import { parseDocx } from "@/lib/parsers/docx";
-import { extractTextViaOpenAI } from "@/lib/ai/extractText";
+import { extractTextViaOpenAI, OcrError } from "@/lib/ai/extractText";
 import { withRetry } from "@/lib/retry";
+
+// An OcrError explicitly marked non-retryable (e.g. the OpenAI account is
+// out of credits) will fail identically on a retry — don't spend the
+// job's time budget on a second attempt guaranteed to hit the same wall.
+const isOcrRetryable = (err: unknown) => !(err instanceof OcrError) || err.retryable;
 
 // Shared by the multi-file RFQ upload flow and the Gmail attachment
 // pipeline — one place that knows how to recognize and parse every
@@ -56,7 +61,7 @@ export async function parseOneFile(name: string, type: FileType, buffer: Buffer,
           // process route), and OCR's own 45s-per-attempt timeout means two
           // retries alone could eat ~135s, more than the whole job's budget.
           console.log(`[parseOneFile] PDF parser failed for "${name}" (${err instanceof Error ? err.message : "unknown error"}), START OCR fallback`);
-          const text = await withRetry(() => extractTextViaOpenAI(buffer, "application/pdf"), { retries: 1, label: `PDF OCR for "${name}"` });
+          const text = await withRetry(() => extractTextViaOpenAI(buffer, "application/pdf"), { retries: 1, label: `PDF OCR for "${name}"`, isRetryable: isOcrRetryable });
           console.log(`[parseOneFile] OCR COMPLETE file="${name}"`);
           return { ...base, text, usedOcr: true };
         }
@@ -69,7 +74,7 @@ export async function parseOneFile(name: string, type: FileType, buffer: Buffer,
         // See the PDF-fallback comment above — one retry, not two, to stay
         // within the process job's overall deadline.
         console.log(`[parseOneFile] START OCR file="${name}"`);
-        const text = await withRetry(() => extractTextViaOpenAI(buffer, mime || "image/jpeg"), { retries: 1, label: `image OCR for "${name}"` });
+        const text = await withRetry(() => extractTextViaOpenAI(buffer, mime || "image/jpeg"), { retries: 1, label: `image OCR for "${name}"`, isRetryable: isOcrRetryable });
         console.log(`[parseOneFile] OCR COMPLETE file="${name}"`);
         return { ...base, text, usedOcr: true };
       }

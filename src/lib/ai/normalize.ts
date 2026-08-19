@@ -3,6 +3,7 @@ import { logError } from "@/lib/logError";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { raceWithDeadline, JobTimeoutError } from "@/lib/timeout";
 import { BUILT_IN_CATEGORIES as CATEGORIES, DEFAULT_CATEGORY, type Category } from "@/lib/categories";
+import { friendlyOpenAiErrorMessage, isInsufficientQuota } from "@/lib/ai/openaiErrors";
 
 export type { Category };
 
@@ -648,7 +649,7 @@ function sanitizeAiError(err: unknown): AiExtractionError {
   if (err instanceof OpenAiError) {
     logError("[normalize] OpenAI API error", { status: err.status, body: err.message.slice(0, 2000) });
     return new AiExtractionError(
-      "The AI service is temporarily unavailable. Please try again in a few minutes.",
+      friendlyOpenAiErrorMessage(err.status, err.message),
       `OpenAI error (status ${err.status}): ${err.message}`
     );
   }
@@ -722,11 +723,15 @@ async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) 
         // errors (timeouts, connection resets), and invalid/malformed JSON
         // (a fresh generation often doesn't truncate at the same point) —
         // everything except a schema rejection (see below — falls back to
-        // a different mode instead of retrying the same rejected shape)
-        // and the explicitly-tagged non-retryable 4xx case.
+        // a different mode instead of retrying the same rejected shape),
+        // the explicitly-tagged non-retryable 4xx case, and an
+        // account-out-of-credits 429 (isInsufficientQuota) — that will fail
+        // identically on every attempt until billing is fixed, unlike a
+        // genuine rate limit, which is exactly what a bare 429 usually is.
         isRetryable: (err) =>
           !(err instanceof SchemaRejectedError)
-          && !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable),
+          && !(err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable)
+          && !(err instanceof OpenAiError && isInsufficientQuota(err.status, err.message)),
         onAttemptStart: (attempt) => onSubProgress?.(attempt / CHUNK_SUB_STEPS),
       }
     );
@@ -735,11 +740,15 @@ async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) 
   } catch (err) {
     if (err instanceof SchemaRejectedError) {
       logError("[normalize] OpenAI rejected the structured-output schema — falling back to json_object mode", err.message.slice(0, 1000));
-    } else if (err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable) {
+    } else if (
+      (err instanceof Error && (err as Error & { nonRetryable?: boolean }).nonRetryable)
+      || (err instanceof OpenAiError && isInsufficientQuota(err.status, err.message))
+    ) {
       // A genuinely non-retryable 4xx (bad API key, malformed request
-      // unrelated to the schema) would fail identically in json_object
-      // mode too — skip the fallback rather than spend more of the
-      // chunk's time budget on an attempt certain to fail the same way.
+      // unrelated to the schema), or an account out of billing credits,
+      // would fail identically in json_object mode too — skip the fallback
+      // rather than spend more of the chunk's time budget on an attempt
+      // certain to fail the same way.
       const sanitized = sanitizeAiError(err);
       logError(`[normalize] chunk (${fileNames.join(", ")}) failed (non-retryable, continuing with the rest)`, sanitized.detail);
       onSubProgress?.(1);
