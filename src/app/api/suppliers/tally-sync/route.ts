@@ -3,7 +3,7 @@ import { logError } from "@/lib/logError";
 import { createClient } from "@/lib/supabase/server";
 import { XMLParser } from "fast-xml-parser";
 import { mapWithConcurrency } from "@/lib/concurrency";
-import { normalizePhone, buildWaLink } from "@/lib/whatsapp";
+import { normalizePhone, buildWaLink, isValidWhatsappGroupLink } from "@/lib/whatsapp";
 import { validateSupplier, normalizeForMatch } from "@/lib/suppliers";
 
 // Tally XML request — fetches all ledgers under "Sundry Creditors" (suppliers)
@@ -36,12 +36,15 @@ type TallyLedger = {
 
 // Common shape both the Tally XML parser and the client-parsed Excel path
 // (see lib/parsers/supplierExcel.ts) upsert against. Every field except
-// name is optional/best-effort.
+// name is optional/best-effort. categories/brands/whatsappGroupLink are
+// Excel-only — Tally ledgers have no native concept of any of the three, so
+// the XML path (extractSuppliers below) never populates them.
 type ImportedSupplier = {
   name: string;
   company?: string;
   phone?: string;
   whatsapp?: string;
+  whatsappGroupLink?: string;
   email?: string;
   address?: string;
   city?: string;
@@ -49,6 +52,9 @@ type ImportedSupplier = {
   country?: string;
   contact?: string;
   gst?: string;
+  categories?: string[];
+  unmatchedCategories?: string[];
+  brands?: string[];
 };
 
 const IMPORT_CONCURRENCY = 5;
@@ -101,7 +107,10 @@ function extractSuppliers(xmlText: string): ImportedSupplier[] {
   return suppliers;
 }
 
-type ExistingSupplierRow = { id: string; name: string; whatsapp_number: string | null; email: string | null };
+type ExistingSupplierRow = {
+  id: string; name: string; whatsapp_number: string | null; email: string | null;
+  categories: string[] | null; brands: string[] | null;
+};
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -171,7 +180,7 @@ export async function POST(request: NextRequest) {
   // few hundred at a time.
   const { data: existingRows } = await supabase
     .from("suppliers")
-    .select("id, name, whatsapp_number, email")
+    .select("id, name, whatsapp_number, email, categories, brands")
     .eq("user_id", user.id) as { data: ExistingSupplierRow[] | null };
   const existing = existingRows ?? [];
 
@@ -188,6 +197,10 @@ export async function POST(request: NextRequest) {
 
   let imported = 0, updated = 0, skipped = 0, failed = 0;
   const errors: string[] = [];
+  // Category text present in the sheet but not recognized as one of the
+  // app's fixed categories — reported separately from `errors` since these
+  // rows still import fine, they just need the category assigned manually.
+  const categoryWarnings: string[] = [];
 
   type Row = Record<string, unknown>;
   const toInsert: Row[] = [];
@@ -217,14 +230,28 @@ export async function POST(request: NextRequest) {
       s.gst ? `GST: ${s.gst}` : null,
     ].filter(Boolean).join(" | ") || null;
 
+    if (s.unmatchedCategories && s.unmatchedCategories.length > 0) {
+      categoryWarnings.push(`"${name}": category "${s.unmatchedCategories.join(", ")}" not recognized — assign manually in Suppliers.`);
+    }
+
+    const whatsappGroupLink = s.whatsappGroupLink && isValidWhatsappGroupLink(s.whatsappGroupLink) ? s.whatsappGroupLink : null;
+    if (s.whatsappGroupLink && !whatsappGroupLink) {
+      categoryWarnings.push(`"${name}": "${s.whatsappGroupLink}" doesn't look like a valid WhatsApp group link — skipped.`);
+    }
+
     if (match) {
       // Update — fill in any newly-provided field, never blank out data the
       // existing record already has that this row simply didn't include.
+      // categories/brands are the one exception to "overwrite if provided":
+      // they're merged with what's already there instead, so a re-import
+      // can never silently wipe out categories the user assigned by hand
+      // after a previous import.
       const patch: Row = {};
       if (s.company) patch.company_name = s.company;
       if (s.contact) patch.contact_person = s.contact;
       if (s.email) patch.email = s.email;
       if (whatsappRaw) { patch.whatsapp_number = normalizedWhatsapp || whatsappRaw; patch.whatsapp_link = buildWaLink(whatsappRaw); }
+      if (whatsappGroupLink) patch.whatsapp_group_link = whatsappGroupLink;
       if (s.phone) patch.phone_number = s.phone;
       if (s.address) patch.address = s.address;
       if (s.city) patch.city = s.city;
@@ -232,6 +259,12 @@ export async function POST(request: NextRequest) {
       if (s.country) patch.country = s.country;
       if (s.gst) patch.gst_number = s.gst;
       if (notes) patch.notes = notes;
+      if (s.categories && s.categories.length > 0) {
+        patch.categories = [...new Set([...(match.categories ?? []), ...s.categories])];
+      }
+      if (s.brands && s.brands.length > 0) {
+        patch.brands = [...new Set([...(match.brands ?? []), ...s.brands])];
+      }
       toUpdate.push({ id: match.id, patch });
     } else if (claimedThisBatch.has(nameKey)) {
       skipped++;
@@ -245,14 +278,19 @@ export async function POST(request: NextRequest) {
         email:            s.email || null,
         whatsapp_number:  normalizedWhatsapp || whatsappRaw || null,
         whatsapp_link:    whatsappRaw ? buildWaLink(whatsappRaw) : null,
+        whatsapp_group_link: whatsappGroupLink,
         phone_number:     s.phone || null,
         address:          s.address || null,
         city:             s.city || null,
         state:            s.state || null,
         country:          s.country || null,
         gst_number:       s.gst || null,
-        categories:       [], // user assigns categories after import
-        brands:           [], // user assigns brands after import, same as categories
+        // Populated from the sheet's Category/Brand columns when present
+        // (see lib/parsers/supplierExcel.ts) — empty only when the sheet
+        // genuinely had no such column, in which case the user still
+        // assigns them manually afterward, same as before.
+        categories:       s.categories ?? [],
+        brands:           s.brands ?? [],
         active:           true,
         notes,
       });
@@ -294,5 +332,6 @@ export async function POST(request: NextRequest) {
     skipped,
     failed,
     errors: errors.slice(0, 20), // cap — a bad file could otherwise return thousands of error lines
+    categoryWarnings: categoryWarnings.slice(0, 20),
   });
 }

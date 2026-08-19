@@ -33,7 +33,7 @@ export default function TallyImportPage() {
   const [excelSuppliers, setExcelSuppliers] = useState<ParsedSupplier[] | null>(null);
   const [parsing, setParsing] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [result, setResult]   = useState<{ total: number; imported: number; updated: number; skipped: number; failed: number; errors: string[] } | null>(null);
+  const [result, setResult]   = useState<{ total: number; imported: number; updated: number; skipped: number; failed: number; errors: string[]; categoryWarnings: string[] } | null>(null);
   const [error, setError]     = useState("");
 
   async function handleImport() {
@@ -118,7 +118,8 @@ export default function TallyImportPage() {
               <h2 className="font-semibold text-gray-900 text-lg">Tally Supplier Sync</h2>
               <p className="text-gray-500 text-sm mt-1">
                 Import all suppliers from the <strong>Sundry Creditors</strong> group in Tally ERP.
-                Imports name, phone, and email automatically.
+                Imports name, phone, and email automatically — an uploaded Excel sheet also picks up
+                Category, Brand, and WhatsApp Group Link columns when present.
               </p>
             </div>
           </div>
@@ -223,7 +224,10 @@ export default function TallyImportPage() {
                   <p className="text-green-700 text-xs mt-2 mb-1">Preview (first 10):</p>
                   <ul className="text-green-700 text-xs space-y-0.5 font-mono">
                     {excelSuppliers.slice(0, 10).map((s, i) => (
-                      <li key={i}>• {s.name}</li>
+                      <li key={i}>
+                        • {s.name}
+                        {s.categories.length > 0 && <span className="text-green-600"> — {s.categories.join(", ")}</span>}
+                      </li>
                     ))}
                   </ul>
                 </div>
@@ -277,8 +281,14 @@ export default function TallyImportPage() {
                   {result.errors.map((e, i) => <li key={i}>• {e}</li>)}
                 </ul>
               )}
+              {result.categoryWarnings.length > 0 && (
+                <ul className="text-xs text-amber-700 mt-2 space-y-0.5">
+                  {result.categoryWarnings.map((w, i) => <li key={i}>• {w}</li>)}
+                </ul>
+              )}
               <p className="text-xs text-green-600 mt-2">
-                Now go to <strong>Suppliers</strong> to assign categories to each supplier.
+                Go to <strong>Suppliers</strong> to review — categories and brands from your sheet were
+                applied automatically; anything flagged above still needs assigning by hand.
               </p>
             </div>
           </div>

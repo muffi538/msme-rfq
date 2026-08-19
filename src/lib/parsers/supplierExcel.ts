@@ -1,4 +1,5 @@
 import * as XLSX from "xlsx";
+import { BUILT_IN_CATEGORIES } from "@/lib/categories";
 
 export type ParsedSupplier = {
   name: string;
@@ -7,11 +8,19 @@ export type ParsedSupplier = {
   email: string;
   phone: string;
   whatsapp: string;
+  whatsappGroupLink: string;
   gst: string;
   address: string;
   city: string;
   state: string;
   country: string;
+  categories: string[];
+  // Category text from the sheet that didn't match any known category (e.g.
+  // "Plumbing Items" vs. the canonical "SANITARY_PLUMBING") — surfaced back
+  // to the user rather than silently dropped, since a category that never
+  // matches a real value would never route this supplier any items anyway.
+  unmatchedCategories: string[];
+  brands: string[];
 };
 
 const NAME_HEADERS     = ["supplier", "supplier name", "party name", "ledger name", "name", "vendor", "vendor name", "particulars", "party"];
@@ -23,11 +32,14 @@ const EMAIL_HEADERS    = ["email", "email id", "e-mail", "email address"];
 // them distinct instead of one silently winning.
 const PHONE_HEADERS    = ["phone", "mobile", "mobile number", "contact number", "phone number"];
 const WHATSAPP_HEADERS = ["whatsapp", "whatsapp number", "whatsapp no"];
+const WHATSAPP_GROUP_HEADERS = ["whatsapp group", "whatsapp group link", "wa group", "wa group link", "group link"];
 const GST_HEADERS      = ["gst", "gstin", "gst no", "gst number"];
 const ADDRESS_HEADERS  = ["address"];
 const CITY_HEADERS     = ["city"];
 const STATE_HEADERS    = ["state"];
 const COUNTRY_HEADERS  = ["country"];
+const CATEGORY_HEADERS = ["category", "categories", "item category", "item categories", "product category", "supplier category"];
+const BRAND_HEADERS    = ["brand", "brands", "brand name", "brands supplied"];
 
 function normalize(h: unknown): string {
   return String(h ?? "").trim().toLowerCase();
@@ -36,6 +48,24 @@ function normalize(h: unknown): string {
 function findColumn(headerRow: unknown[], candidates: string[]): number {
   return headerRow.findIndex((h) => candidates.includes(normalize(h)));
 }
+
+// Splits one cell that may hold several values — a category/brand column is
+// commonly comma, semicolon, or pipe separated ("Power Tools, Hand Tools").
+function splitList(raw: string): string[] {
+  return raw.split(/[,;|]/).map((s) => s.trim()).filter(Boolean);
+}
+
+// Best-effort match against the app's fixed category set — a sheet will
+// realistically say "Power Tools" or "Sanitary & Plumbing", not the exact
+// enum key. Normalizes punctuation/spacing/case and checks for an exact
+// match; anything that doesn't match is reported back rather than stored,
+// since a category that can never equal an item's category would never
+// actually route this supplier any RFQ items (see split/route.ts's match).
+function normalizeCategory(raw: string): string | null {
+  const key = raw.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return BUILT_IN_CATEGORIES.includes(key) ? key : null;
+}
+
 
 /**
  * Parses a supplier/vendor list from an uploaded Excel file (.xlsx/.xls).
@@ -84,11 +114,14 @@ export async function parseSupplierExcel(file: File): Promise<ParsedSupplier[]> 
   const emailCol    = findColumn(headerRow, EMAIL_HEADERS);
   const phoneCol    = findColumn(headerRow, PHONE_HEADERS);
   const whatsappCol = findColumn(headerRow, WHATSAPP_HEADERS);
+  const whatsappGroupCol = findColumn(headerRow, WHATSAPP_GROUP_HEADERS);
   const gstCol      = findColumn(headerRow, GST_HEADERS);
   const addressCol  = findColumn(headerRow, ADDRESS_HEADERS);
   const cityCol     = findColumn(headerRow, CITY_HEADERS);
   const stateCol    = findColumn(headerRow, STATE_HEADERS);
   const countryCol  = findColumn(headerRow, COUNTRY_HEADERS);
+  const categoryCol = findColumn(headerRow, CATEGORY_HEADERS);
+  const brandCol    = findColumn(headerRow, BRAND_HEADERS);
 
   const cell = (row: unknown[], col: number) => (col >= 0 ? String(row[col] ?? "").trim() : "");
 
@@ -107,6 +140,15 @@ export async function parseSupplierExcel(file: File): Promise<ParsedSupplier[]> 
     seen.add(key);
 
     const phone = cell(row, phoneCol);
+
+    const rawCategories = splitList(cell(row, categoryCol));
+    const categories: string[] = [];
+    const unmatchedCategories: string[] = [];
+    for (const raw of rawCategories) {
+      const matched = normalizeCategory(raw);
+      if (matched) categories.push(matched); else unmatchedCategories.push(raw);
+    }
+
     suppliers.push({
       name,
       company: cell(row, companyCol),
@@ -117,11 +159,15 @@ export async function parseSupplierExcel(file: File): Promise<ParsedSupplier[]> 
       // dedicated WhatsApp column — the common case for a plain contact
       // list where one number serves both purposes.
       whatsapp: cell(row, whatsappCol) || phone,
+      whatsappGroupLink: cell(row, whatsappGroupCol),
       gst:      cell(row, gstCol),
       city:     cell(row, cityCol),
       state:    cell(row, stateCol),
       country:  cell(row, countryCol),
       address: cell(row, addressCol),
+      categories: [...new Set(categories)],
+      unmatchedCategories,
+      brands: [...new Set(splitList(cell(row, brandCol)))],
     });
   }
 
