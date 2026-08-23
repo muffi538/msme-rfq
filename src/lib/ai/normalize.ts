@@ -816,6 +816,7 @@ async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) 
   const openAiResult = await runOpenAiChunk(chunk, onSubProgress);
   if (openAiResult.ok) return { data: openAiResult.data, truncated: openAiResult.truncated, failed: false, fileNames };
 
+  let reason = openAiResult.sanitized.message;
   if (hasGeminiFallback()) {
     try {
       console.log(`[normalize] OpenAI exhausted for chunk (${fileNames.join(", ")}) — trying Gemini fallback`);
@@ -824,10 +825,18 @@ async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) 
       return { data, truncated: false, failed: false, fileNames };
     } catch (geminiErr) {
       logError(`[normalize] Gemini fallback also failed for chunk (${fileNames.join(", ")}) — reporting the original OpenAI failure`, geminiErr);
+      // Both providers failed — say so explicitly rather than always
+      // showing the OpenAI-only message, which looked identical whether
+      // Gemini wasn't configured, hadn't deployed yet, or was tried and
+      // failed for its own (different) reason. Gemini's own error messages
+      // are already short and safe to show (see gemini.ts — raw response
+      // bodies are only ever logged, never thrown).
+      const geminiMsg = geminiErr instanceof Error ? geminiErr.message : "unknown error";
+      reason = `${reason} (Backup AI provider also failed: ${geminiMsg})`;
     }
   }
 
-  return { data: null, truncated: false, failed: true, detail: openAiResult.sanitized.detail, reason: openAiResult.sanitized.message, fileNames };
+  return { data: null, truncated: false, failed: true, detail: openAiResult.sanitized.detail, reason, fileNames };
 }
 
 // `onProgress` reports real progress continuously, both across chunks AND
