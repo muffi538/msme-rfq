@@ -5,6 +5,7 @@ import { parseExcel } from "@/lib/parsers/excel";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { logError } from "@/lib/logError";
 import { mapWithConcurrency } from "@/lib/concurrency";
+import { friendlyOpenAiErrorMessage } from "@/lib/ai/openaiErrors";
 
 export const maxDuration = 60;
 
@@ -73,8 +74,8 @@ async function extractWithVision(base64: string, mimeType: string): Promise<stri
   // vanished instead of being retried or reported.
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText);
-    console.log(`[extractWithVision] FAILED status=${res.status} requestId=${requestId} durationMs=${Date.now() - startedAt} mime=${mimeType}`);
-    throw new Error(`OpenAI vision error (${res.status}): ${errText}`);
+    console.log(`[extractWithVision] FAILED status=${res.status} requestId=${requestId} durationMs=${Date.now() - startedAt} mime=${mimeType} body=${errText.slice(0, 500)}`);
+    throw new Error(friendlyOpenAiErrorMessage(res.status, errText));
   }
   const json = await res.json() as { choices: { message: { content: string } }[]; usage?: unknown };
   console.log(`[extractWithVision] COMPLETE requestId=${requestId} durationMs=${Date.now() - startedAt} mime=${mimeType} tokens=${JSON.stringify(json.usage ?? {})}`);
@@ -164,8 +165,8 @@ Do NOT include a subject line inside the body.`,
   const requestId = res.headers.get("x-request-id");
   if (!res.ok) {
     const err = await res.text();
-    console.log(`[rfq-reply/parseQuote] FAILED status=${res.status} requestId=${requestId} durationMs=${Date.now() - startedAt}`);
-    throw new Error(`OpenAI error: ${err}`);
+    console.log(`[rfq-reply/parseQuote] FAILED status=${res.status} requestId=${requestId} durationMs=${Date.now() - startedAt} body=${err.slice(0, 500)}`);
+    throw new Error(friendlyOpenAiErrorMessage(res.status, err));
   }
 
   const json = await res.json() as { choices?: { message: { content: string } }[]; usage?: unknown };

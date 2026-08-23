@@ -2,8 +2,37 @@ import { parsePdf } from "@/lib/parsers/pdf";
 import { parseExcel } from "@/lib/parsers/excel";
 import { parseCsv } from "@/lib/parsers/csv";
 import { parseDocx } from "@/lib/parsers/docx";
-import { extractTextViaOpenAI } from "@/lib/ai/extractText";
+import { extractTextViaOpenAI, OcrError } from "@/lib/ai/extractText";
+import { hasGeminiFallback, extractTextViaGemini } from "@/lib/ai/gemini";
 import { withRetry } from "@/lib/retry";
+import { logError } from "@/lib/logError";
+
+// An OcrError explicitly marked non-retryable (e.g. the OpenAI account is
+// out of credits) will fail identically on a retry — don't spend the
+// job's time budget on a second attempt guaranteed to hit the same wall.
+const isOcrRetryable = (err: unknown) => !(err instanceof OcrError) || err.retryable;
+
+// OCR via OpenAI (with its own retry policy), then — only if OpenAI is
+// fully exhausted AND GEMINI_API_KEY is configured — one Gemini attempt
+// before giving up. Installs without Gemini configured behave byte-
+// identically to before Gemini support existed: the original OpenAI error
+// propagates unchanged. Gemini's own failure, if it also fails, is only
+// logged — the OpenAI error is still the one thrown, since it's already
+// the more diagnostic, already-classified message.
+async function ocrWithFallback(buffer: Buffer, mimeType: string, label: string): Promise<string> {
+  try {
+    return await withRetry(() => extractTextViaOpenAI(buffer, mimeType), { retries: 1, label, isRetryable: isOcrRetryable });
+  } catch (openAiErr) {
+    if (!hasGeminiFallback()) throw openAiErr;
+    try {
+      console.log(`[parseFile] OpenAI OCR exhausted for ${label} — trying Gemini fallback`);
+      return await extractTextViaGemini(buffer, mimeType);
+    } catch (geminiErr) {
+      logError(`[parseFile] Gemini OCR fallback also failed for ${label} — reporting the original OpenAI failure`, geminiErr);
+      throw openAiErr;
+    }
+  }
+}
 
 // Shared by the multi-file RFQ upload flow and the Gmail attachment
 // pipeline — one place that knows how to recognize and parse every
@@ -56,7 +85,7 @@ export async function parseOneFile(name: string, type: FileType, buffer: Buffer,
           // process route), and OCR's own 45s-per-attempt timeout means two
           // retries alone could eat ~135s, more than the whole job's budget.
           console.log(`[parseOneFile] PDF parser failed for "${name}" (${err instanceof Error ? err.message : "unknown error"}), START OCR fallback`);
-          const text = await withRetry(() => extractTextViaOpenAI(buffer, "application/pdf"), { retries: 1, label: `PDF OCR for "${name}"` });
+          const text = await ocrWithFallback(buffer, "application/pdf", `PDF OCR for "${name}"`);
           console.log(`[parseOneFile] OCR COMPLETE file="${name}"`);
           return { ...base, text, usedOcr: true };
         }
@@ -69,7 +98,7 @@ export async function parseOneFile(name: string, type: FileType, buffer: Buffer,
         // See the PDF-fallback comment above — one retry, not two, to stay
         // within the process job's overall deadline.
         console.log(`[parseOneFile] START OCR file="${name}"`);
-        const text = await withRetry(() => extractTextViaOpenAI(buffer, mime || "image/jpeg"), { retries: 1, label: `image OCR for "${name}"` });
+        const text = await ocrWithFallback(buffer, mime || "image/jpeg", `image OCR for "${name}"`);
         console.log(`[parseOneFile] OCR COMPLETE file="${name}"`);
         return { ...base, text, usedOcr: true };
       }
