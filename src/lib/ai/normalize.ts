@@ -4,6 +4,7 @@ import { mapWithConcurrency } from "@/lib/concurrency";
 import { raceWithDeadline, JobTimeoutError } from "@/lib/timeout";
 import { BUILT_IN_CATEGORIES as CATEGORIES, DEFAULT_CATEGORY, type Category } from "@/lib/categories";
 import { friendlyOpenAiErrorMessage, isInsufficientQuota } from "@/lib/ai/openaiErrors";
+import { hasGeminiFallback, extractItemsViaGemini } from "@/lib/ai/gemini";
 
 export type { Category };
 
@@ -711,7 +712,18 @@ const FALLBACK_RETRY_OPTS = { retries: 0 } as const;
 // to done.
 const CHUNK_SUB_STEPS = 3;
 
-async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) => void): Promise<ChunkOutcome> {
+type OpenAiChunkResult =
+  | { ok: true; data: RawExtractionResponse; truncated: boolean }
+  | { ok: false; sanitized: AiExtractionError };
+
+// The complete OpenAI attempt for one chunk — primary structured-output
+// call, then (unless schema-rejected or the failure is one no retry could
+// ever fix) one json_object-mode fallback call. Pulled out of runChunk
+// unchanged from its previous form, purely so runChunk can add a Gemini
+// tier AFTER this is fully exhausted without touching a single line of
+// this OpenAI logic — the already-tuned, already-hardened path stays
+// completely undisturbed.
+async function runOpenAiChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) => void): Promise<OpenAiChunkResult> {
   const { text: labeled, fileNames } = chunk;
   try {
     const { data, truncated } = await withRetry(
@@ -736,7 +748,7 @@ async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) 
       }
     );
     onSubProgress?.(1);
-    return { data, truncated, failed: false, fileNames };
+    return { ok: true, data, truncated };
   } catch (err) {
     if (err instanceof SchemaRejectedError) {
       logError("[normalize] OpenAI rejected the structured-output schema — falling back to json_object mode", err.message.slice(0, 1000));
@@ -752,7 +764,7 @@ async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) 
       const sanitized = sanitizeAiError(err);
       logError(`[normalize] chunk (${fileNames.join(", ")}) failed (non-retryable, continuing with the rest)`, sanitized.detail);
       onSubProgress?.(1);
-      return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
+      return { ok: false, sanitized };
     }
     // Every other failure — including a plain timeout, which is the
     // production case that motivated this — also gets one fallback
@@ -767,7 +779,7 @@ async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) 
         }
       );
       onSubProgress?.(1);
-      return { data, truncated, failed: false, fileNames };
+      return { ok: true, data, truncated };
     } catch (fallbackErr) {
       // One chunk failing (after its own retries, across both modes) must
       // never take the whole RFQ down with it — same fault-isolation
@@ -785,9 +797,37 @@ async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) 
       const sanitized = sanitizeAiError(fallbackErr);
       logError(`[normalize] chunk (${fileNames.join(", ")}) failed even after json_object fallback (continuing with the rest)`, sanitized.detail);
       onSubProgress?.(1);
-      return { data: null, truncated: false, failed: true, detail: sanitized.detail, reason: sanitized.message, fileNames };
+      return { ok: false, sanitized };
     }
   }
+}
+
+// Adds a Gemini fallback tier on top of runOpenAiChunk, tried only after
+// OpenAI is fully exhausted (both its primary and, where applicable,
+// json_object-mode attempts) — and only when GEMINI_API_KEY is configured.
+// Installs without it behave byte-identically to before Gemini support
+// existed: runOpenAiChunk's own result is returned as-is. Gemini's own
+// failure (if it also fails, or isn't configured) never overrides the
+// original OpenAI failure reason shown to the user — that's still the
+// more informative, already-sanitized message; Gemini's failure is only
+// logged for debugging.
+async function runChunk(chunk: LabeledChunk, onSubProgress?: (fraction: number) => void): Promise<ChunkOutcome> {
+  const { fileNames } = chunk;
+  const openAiResult = await runOpenAiChunk(chunk, onSubProgress);
+  if (openAiResult.ok) return { data: openAiResult.data, truncated: openAiResult.truncated, failed: false, fileNames };
+
+  if (hasGeminiFallback()) {
+    try {
+      console.log(`[normalize] OpenAI exhausted for chunk (${fileNames.join(", ")}) — trying Gemini fallback`);
+      const data = await extractItemsViaGemini(chunk.text);
+      onSubProgress?.(1);
+      return { data, truncated: false, failed: false, fileNames };
+    } catch (geminiErr) {
+      logError(`[normalize] Gemini fallback also failed for chunk (${fileNames.join(", ")}) — reporting the original OpenAI failure`, geminiErr);
+    }
+  }
+
+  return { data: null, truncated: false, failed: true, detail: openAiResult.sanitized.detail, reason: openAiResult.sanitized.message, fileNames };
 }
 
 // `onProgress` reports real progress continuously, both across chunks AND
