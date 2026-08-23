@@ -29,7 +29,15 @@ async function ocrWithFallback(buffer: Buffer, mimeType: string, label: string):
       return await extractTextViaGemini(buffer, mimeType);
     } catch (geminiErr) {
       logError(`[parseFile] Gemini OCR fallback also failed for ${label} — reporting the original OpenAI failure`, geminiErr);
-      throw openAiErr;
+      // Both providers failed — say so explicitly rather than always
+      // showing the OpenAI-only message, which looked identical whether
+      // Gemini wasn't configured, hadn't deployed yet, or was tried and
+      // failed for its own (different) reason. Gemini's own error messages
+      // are already short and safe to show (see gemini.ts — raw response
+      // bodies are only ever logged, never thrown).
+      const openAiMsg = openAiErr instanceof Error ? openAiErr.message : "OCR failed";
+      const geminiMsg = geminiErr instanceof Error ? geminiErr.message : "unknown error";
+      throw new Error(`${openAiMsg} (Backup AI provider also failed: ${geminiMsg})`);
     }
   }
 }
