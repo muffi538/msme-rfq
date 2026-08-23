@@ -11,7 +11,7 @@ import { BUILT_IN_CATEGORIES as CATEGORIES } from "@/lib/categories";
 // GEMINI_API_KEY isn't set — installs that don't configure it behave
 // byte-identically to before Gemini support existed.
 
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-3.7-flash";
 const CATEGORIES_PROMPT_LIST = CATEGORIES.join(", ");
 
 export function hasGeminiFallback(): boolean {
