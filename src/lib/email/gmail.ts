@@ -1,5 +1,6 @@
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { withRetry } from "@/lib/retry";
+import { convert as convertHtmlToText } from "html-to-text";
 
 // Every Gmail/OAuth failure gets classified into one of these instead of a
 // generic Error — this is what lets callers show "Gmail disconnected,
@@ -193,14 +194,49 @@ function headerVal(headers: { name: string; value: string }[], name: string): st
   return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
 
+// Collects the plain-text and HTML alternatives of the body separately
+// (rather than returning the first one found) so extractBody below can
+// prefer text/plain when it exists, but still fall back to converting
+// text/html when it doesn't — a real gap previously: an email with only an
+// HTML part (no text/plain alternative, which is common for RFQs sent as
+// an HTML table rather than typed prose) returned an empty body, silently
+// dropping every item listed directly in the email.
+function collectBodyParts(payload: GmailPayload): { plain: string; html: string } {
+  let plain = "";
+  let html = "";
+  function walk(p: GmailPayload) {
+    if (!plain && p.mimeType === "text/plain" && p.body?.data) {
+      plain = decodeBase64(p.body.data).toString("utf-8");
+    } else if (!html && p.mimeType === "text/html" && p.body?.data) {
+      html = decodeBase64(p.body.data).toString("utf-8");
+    }
+    for (const part of p.parts ?? []) walk(part);
+  }
+  walk(payload);
+  return { plain, html };
+}
+
+// dataTable format keeps each row's cells aligned in columns (rather than
+// the default block format, which just runs all of a table's text together
+// with no column separation) — the whole point here is that an item name,
+// quantity and unit stay readably associated with each other for the
+// extraction AI downstream. wordwrap/maxColumnWidth are generous so a long
+// item name doesn't get hard-wrapped mid-cell.
+function htmlBodyToText(html: string): string {
+  return convertHtmlToText(html, {
+    wordwrap: false,
+    selectors: [
+      { selector: "table", format: "dataTable", options: { maxColumnWidth: 80 } },
+      { selector: "img", format: "skip" },
+      { selector: "a", options: { ignoreHref: true } },
+    ],
+  });
+}
+
 function extractBody(payload: GmailPayload): string {
-  if (payload.mimeType === "text/plain" && payload.body?.data) {
-    return decodeBase64(payload.body.data).toString("utf-8");
-  }
-  for (const part of payload.parts ?? []) {
-    const text = extractBody(part);
-    if (text) return text;
-  }
+  const { plain, html } = collectBodyParts(payload);
+  if (plain.trim()) return plain;
+  if (html.trim()) return htmlBodyToText(html);
   return "";
 }
 
