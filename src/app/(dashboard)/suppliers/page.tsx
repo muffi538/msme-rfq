@@ -438,10 +438,6 @@ export default function SuppliersPage() {
     : null;
 
   const filteredSuppliers = (() => {
-    // While editing one supplier, the list below the form should only show
-    // that supplier — not the whole table alongside it, which made it easy
-    // to lose track of which row the open form actually belonged to.
-    if (editingSupplier) return [editingSupplier];
     const q = search.trim().toLowerCase();
     if (!q) return suppliers;
     return suppliers.filter((s) =>
@@ -911,7 +907,11 @@ export default function SuppliersPage() {
           </div>
         )}
 
-        {/* Supplier list */}
+        {/* Supplier list — hidden entirely while editing one supplier, not
+           just filtered down to it, since that supplier's full info is
+           already shown (editable) in the form right above it; repeating
+           it as a lone row below was redundant, not clarifying. */}
+        {!editingSupplier && (
         <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
           {loading ? (
             <div className="py-16 text-center text-gray-400">Loading...</div>
@@ -1019,6 +1019,7 @@ export default function SuppliersPage() {
             </table>
           )}
         </div>
+        )}
       </main>
     </>
   );
