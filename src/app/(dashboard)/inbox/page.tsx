@@ -1380,7 +1380,9 @@ export default function InboxPage() {
                   {/* Content */}
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <p className="font-semibold text-card-foreground text-sm">{rfq.rfq_code}</p>
+                      <p className="font-semibold text-card-foreground text-sm truncate">
+                        {rfq.buyer_name ?? rfq.buyer_email ?? "Unknown sender"}
+                      </p>
                       {labels[rfq.id] && <LabelPill value={labels[rfq.id]} />}
                       {rfq.status === "failed" && !processing[rfq.id] && (
                         <span
@@ -1415,7 +1417,7 @@ export default function InboxPage() {
                       <p className="text-xs text-gray-500 mt-0.5 truncate">Cancelled. Tap &quot;Process it&quot; to try again.</p>
                     )}
                     <p className="text-sm text-muted-foreground truncate mt-0.5">
-                      {rfq.buyer_name ?? rfq.buyer_email ?? "Unknown sender"}
+                      {rfq.rfq_code}
                     </p>
                     <p className="text-xs text-muted-foreground/70 mt-0.5 flex items-center gap-1">
                       <Clock className="w-3 h-3" />
