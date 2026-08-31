@@ -921,15 +921,27 @@ export async function normalizeAndCategorizeMulti(
   }
 
   if (succeeded.length === 0) {
+    const failedResults = results.filter((r): r is ChunkOutcome & { failed: true } => r.failed);
     // Include the ACTUAL reason(s) each chunk failed, not just a count —
     // this was previously lost by the time it reached whichever caller's
     // catch block logs it, making a real cause (e.g. OpenAI rejecting the
     // schema itself) indistinguishable from every other failure mode.
-    const details = results.filter((r) => r.failed).map((r) => r.detail).join(" | ");
-    throw new AiExtractionError(
-      "We couldn't reliably read this document — please try again, or upload the file manually.",
-      `All ${chunks.length} extraction chunk(s) failed: ${details}`
-    );
+    const details = failedResults.map((r) => r.detail).join(" | ");
+    // The single-chunk case (the common one — most email-body-only RFQs
+    // and single-attachment RFQs never split into more than one chunk) has
+    // exactly one real reason available, and previously it was thrown away
+    // in favor of this same generic phrase no matter what it was — hiding
+    // genuinely diagnostic messages (an out-of-credits notice, or a Gemini
+    // fallback failure reason) behind a message that gave no indication
+    // whether retrying would ever help. Show the real reason whenever every
+    // failed chunk agrees on one; only fall back to the generic phrase when
+    // chunks failed for different reasons and no single message would be
+    // accurate for all of them.
+    const distinctReasons = [...new Set(failedResults.map((r) => r.reason))];
+    const userMessage = distinctReasons.length === 1
+      ? distinctReasons[0]
+      : "We couldn't reliably read this document — please try again, or upload the file manually.";
+    throw new AiExtractionError(userMessage, `All ${chunks.length} extraction chunk(s) failed: ${details}`);
   }
 
   // A chunk that failed outright is treated the same as a truncated one
