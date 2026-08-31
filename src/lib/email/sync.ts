@@ -243,7 +243,12 @@ async function importOneEmail(supabase: SupabaseClient, userId: string, session:
       if (filesError) logError("[gmail-sync] rfq_files insert failed", { messageId: email.messageId, error: filesError });
     }
 
-    try { await session.markAsRead(email.messageId); } catch { /* best-effort */ }
+    // Privacy rule: syncing/fetching a message must never count as reading
+    // it — only the user opening it does that — so this app must never
+    // mark a message read on its own. (The fallback backlog scan above no
+    // longer depends on this happening either, so removing it doesn't
+    // reintroduce the "same unread mail forever" problem that call used to
+    // prevent.)
 
     return { kind: "created", entry: { rfqCode, subject: email.subject, from: email.from, hasAttachment: supported.length > 0 } };
   } catch (err) {
@@ -412,18 +417,28 @@ async function syncGmailForUserInner(
     // manual "Fetch Now" click still does *something* useful quickly, so it
     // stays small on purpose.
     usedFallback = true;
-    // Ask for one more than the cap purely to detect whether more unread
-    // mail is waiting beyond this batch — only the first SYNC_BATCH_CAP are
-    // actually imported.
-    const rawIds = await session.listMessageIds("is:unread in:inbox", { maxResults: SYNC_BATCH_CAP + 1 });
-    const moreQueued = rawIds.length > SYNC_BATCH_CAP;
-    messageIds = rawIds.slice(0, SYNC_BATCH_CAP);
+    // Privacy rule: the app must never mark a message read just because it
+    // was synced — reading is something only the user does, by opening it.
+    // That means unread status can no longer double as the backlog "queue"
+    // the way it used to (import → mark read → drop out of "is:unread", so
+    // the same query naturally advanced to the next batch next time).
+    // Instead, scan a bounded window of unread mail and — exactly like the
+    // historyId path above — filter it against our own import history
+    // *before* slicing to the batch size, so already-imported ids (still
+    // unread in Gmail, since we no longer touch that flag) don't count
+    // against "is there more to do". Widened well past SYNC_BATCH_CAP so
+    // that filtered-out window still has enough real headroom left to find
+    // genuinely new mail. Still a bounded, best-effort scan, not a full
+    // backfill — that's still what the onboarding picker/"Fetch More
+    // History" are for, unchanged from before.
+    const FALLBACK_SCAN_LIMIT = 100;
+    const rawIds = await session.listMessageIds("is:unread in:inbox", { maxResults: FALLBACK_SCAN_LIMIT });
+    const { unseen } = await filterUnseenMessageIds(supabase, userId, rawIds);
+    const moreQueued = unseen.length > SYNC_BATCH_CAP;
+    messageIds = unseen.slice(0, SYNC_BATCH_CAP);
     if (moreQueued) {
       // Still catching up on unread backlog — don't establish a historyId
       // checkpoint yet, or the rest of the backlog would never be visited.
-      // Each import marks its message read, so the very same "is:unread"
-      // query naturally excludes it next time — no separate queue/offset
-      // needs tracking, the mailbox's own unread flag *is* the queue.
       // gmail_onboarded is still set so the cron doesn't wait on the
       // onboarding picker while this catch-up is in progress.
       await saveSettings(supabase, userId, [
