@@ -438,6 +438,10 @@ export default function SuppliersPage() {
     : null;
 
   const filteredSuppliers = (() => {
+    // While editing one supplier, the list below the form should only show
+    // that supplier — not the whole table alongside it, which made it easy
+    // to lose track of which row the open form actually belonged to.
+    if (editingSupplier) return [editingSupplier];
     const q = search.trim().toLowerCase();
     if (!q) return suppliers;
     return suppliers.filter((s) =>
