@@ -245,6 +245,38 @@ export default function InboxPage() {
   const [labels,       setLabels]       = useState<Record<string, RfqLabel>>({});
   const [deleteTarget, setDeleteTarget] = useState<PendingRfq | null>(null);
   const [deletingEmail, setDeletingEmail] = useState(false);
+  // Two-step "are you sure this is really an RFQ" gate in front of every
+  // "Process it" action (single or batch). Holds a plain action descriptor
+  // (not a stored callback) so advanceProcessConfirm below decides what to
+  // actually run — the action only ever fires after both confirmations,
+  // never on step 1 alone. Cancelling or declining at either step just
+  // closes the modal; nothing is processed.
+  type ProcessConfirmTarget =
+    | { kind: "single"; rfqId: string; label: string }
+    | { kind: "batch"; label: string };
+  const [processConfirm, setProcessConfirm] = useState<ProcessConfirmTarget | null>(null);
+  const [processConfirmStep, setProcessConfirmStep] = useState<1 | 2>(1);
+
+  function requestProcessConfirm(target: ProcessConfirmTarget) {
+    setProcessConfirm(target);
+    setProcessConfirmStep(1);
+  }
+  function cancelProcessConfirm() {
+    setProcessConfirm(null);
+    setProcessConfirmStep(1);
+  }
+  function advanceProcessConfirm() {
+    if (!processConfirm) return;
+    if (processConfirmStep === 1) {
+      setProcessConfirmStep(2);
+      return;
+    }
+    const target = processConfirm;
+    setProcessConfirm(null);
+    setProcessConfirmStep(1);
+    if (target.kind === "single") handleProcess(target.rfqId);
+    else handleBatchProcess();
+  }
   const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set());
   // Checkboxes (and the "select all" one) are hidden by default — only shown
   // once this is toggled on via the trash-icon button in the pending-list
@@ -966,6 +998,41 @@ export default function InboxPage() {
 
   return (
     <>
+      {/* Two-step "process as RFQ" confirmation modal */}
+      {processConfirm && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-card border border-border rounded-2xl shadow-xl p-6 max-w-sm w-full space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-amber-100 dark:bg-amber-950/40 rounded-full flex items-center justify-center flex-shrink-0">
+                <AlertTriangle className="w-5 h-5 text-amber-600" />
+              </div>
+              <div>
+                <p className="font-semibold text-card-foreground">
+                  {processConfirmStep === 1
+                    ? "Are you sure this is an RFQ and not something else?"
+                    : "Are you absolutely sure you want to process this as an RFQ?"}
+                </p>
+                <p className="text-sm text-muted-foreground mt-0.5">{processConfirm.label}</p>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <Button
+                onClick={advanceProcessConfirm}
+                className="flex-1 bg-[#1847F5] hover:bg-[#0f35d4] text-white"
+              >
+                {processConfirmStep === 1 ? "Yes, continue" : "Yes, process it"}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={cancelProcessConfirm}
+                className="flex-1"
+              >
+                {processConfirmStep === 1 ? "No" : "Cancel"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Remove-from-dashboard confirmation modal */}
       {deleteTarget && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
@@ -1460,7 +1527,7 @@ export default function InboxPage() {
                         )}
                         <Button
                           size="sm"
-                          onClick={() => handleProcess(rfq.id)}
+                          onClick={() => requestProcessConfirm({ kind: "single", rfqId: rfq.id, label: rfq.rfq_code })}
                           disabled={processing[rfq.id] || labels[rfq.id] === "spam"}
                           className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.3)]"
                         >
@@ -1621,7 +1688,10 @@ export default function InboxPage() {
               </Button>
               <Button
                 size="sm"
-                onClick={() => handleBatchProcess()}
+                onClick={() => requestProcessConfirm({
+                  kind: "batch",
+                  label: `${batchSelected.size} selected email${batchSelected.size > 1 ? "s" : ""}`,
+                })}
                 className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full"
               >
                 <Sparkles className="w-3 h-3" /> Process Selected ({batchSelected.size})
