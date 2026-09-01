@@ -8,6 +8,7 @@ import { normalizeAndCategorizeMulti, AiExtractionError, type MultiFileInput } f
 import { matchImageToItem } from "@/lib/ai/matchImages";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { createJob, updateJob, findActiveJobForRfq } from "@/lib/jobs";
+import { getGmailRefreshToken, fetchContentNow } from "@/lib/email/sync";
 import { withRetry } from "@/lib/retry";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { raceWithDeadline } from "@/lib/timeout";
@@ -594,21 +595,31 @@ export async function POST(
     return NextResponse.json({ error: "Too many processing requests. Please wait a few minutes and try again." }, { status: 429 });
   }
 
-  const { data: rfq } = await supabase.from("rfqs").select("id, status, updated_at").eq("id", id).maybeSingle();
+  const { data: rfq } = await supabase.from("rfqs").select("id, status, updated_at, gmail_message_id").eq("id", id).maybeSingle();
   if (!rfq) return NextResponse.json({ error: "RFQ not found" }, { status: 404 });
 
   // Privacy rule: this email was still unread when synced, so its content
-  // was never fetched — nothing exists yet to process. It'll flip to
-  // "pending" (and become processable) on its own once the user reads it
-  // in Gmail and the next sync notices — see recheckAwaitingRead in
-  // lib/email/sync.ts. Reject explicitly here rather than falling through
-  // to "no text found", which would be a confusing message for a state
-  // that isn't actually a failure.
+  // was never fetched — nothing exists yet to process. Normally it flips
+  // to "pending" on its own once the user reads it in Gmail and the next
+  // sync notices (recheckAwaitingRead in lib/email/sync.ts). But clicking
+  // "Process it" here is itself a deliberate, explicit user action — the
+  // privacy rule is about the app never doing this on its own in the
+  // background, not about blocking the user from choosing to read a
+  // specific email right now — so fetch it on demand instead of forcing
+  // them to leave the app and read it in Gmail first.
   if (rfq.status === "awaiting_read") {
-    return NextResponse.json(
-      { error: "This email hasn't been read yet. Read it in Gmail first — it'll be ready to process on the next sync." },
-      { status: 409 }
-    );
+    if (!rfq.gmail_message_id) {
+      return NextResponse.json({ error: "This email is missing its Gmail reference and can't be fetched." }, { status: 409 });
+    }
+    const refreshToken = await getGmailRefreshToken(supabase, user.id);
+    if (!refreshToken) {
+      return NextResponse.json({ error: "Gmail isn't connected. Reconnect Gmail, then try again." }, { status: 409 });
+    }
+    const result = await fetchContentNow(supabase, user.id, refreshToken, rfq.id, rfq.gmail_message_id);
+    if (!result.ok) {
+      return NextResponse.json({ error: `Could not read this email from Gmail: ${result.error}` }, { status: 502 });
+    }
+    rfq.status = "pending";
   }
 
   // Idempotency guard — if this RFQ already has a job in flight (a

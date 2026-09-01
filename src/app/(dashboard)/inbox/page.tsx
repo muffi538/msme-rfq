@@ -1432,7 +1432,7 @@ export default function InboxPage() {
                       type="checkbox"
                       className="w-4 h-4 rounded accent-orange-500 cursor-pointer flex-shrink-0"
                       checked={batchSelected.has(rfq.id)}
-                      disabled={batchRunning || processing[rfq.id] || rfq.status === "awaiting_read"}
+                      disabled={batchRunning || processing[rfq.id]}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => {
                         setBatchSelected((prev) => {
@@ -1475,7 +1475,7 @@ export default function InboxPage() {
                       {rfq.status === "awaiting_read" && (
                         <span
                           className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-700 border border-amber-200"
-                          title="Unread in Gmail — its content isn't fetched until you read it there"
+                          title="Still unread in Gmail — its content hasn't been fetched yet"
                         >
                           <Mail className="w-3 h-3" /> Unread in Gmail
                         </span>
@@ -1492,7 +1492,9 @@ export default function InboxPage() {
                       <p className="text-xs text-gray-500 mt-0.5 truncate">Cancelled. Tap &quot;Process it&quot; to try again.</p>
                     )}
                     {rfq.status === "awaiting_read" && (
-                      <p className="text-xs text-amber-600 mt-0.5 truncate">Read this email in Gmail — it will be ready to process automatically once you do.</p>
+                      <p className="text-xs text-amber-600 mt-0.5 truncate">
+                        Still unread in Gmail — it will be picked up automatically once you read it there, or tap &quot;Process it&quot; to read and process it now.
+                      </p>
                     )}
                     <p className="text-sm text-muted-foreground truncate mt-0.5">
                       {rfq.rfq_code}
@@ -1539,15 +1541,13 @@ export default function InboxPage() {
                         <Button
                           size="sm"
                           onClick={() => requestProcessConfirm({ kind: "single", rfqId: rfq.id, label: rfq.rfq_code })}
-                          disabled={processing[rfq.id] || labels[rfq.id] === "spam" || rfq.status === "awaiting_read"}
-                          title={rfq.status === "awaiting_read" ? "Read this email in Gmail first" : undefined}
+                          disabled={processing[rfq.id] || labels[rfq.id] === "spam"}
+                          title={rfq.status === "awaiting_read" ? "Still unread in Gmail — this will read and process it now" : undefined}
                           className="bg-[#1847F5] hover:bg-[#0f35d4] text-white gap-1.5 h-8 text-xs rounded-full shadow-[0_2px_8px_rgba(24,71,245,0.3)] disabled:opacity-50"
                         >
                           {processing[rfq.id]
                             ? <ProcessingIndicator progress={processProgress[rfq.id]} startedAt={processStartedAtRef.current[rfq.id]} />
-                            : rfq.status === "awaiting_read"
-                              ? <>Unread<Mail className="w-3 h-3" /></>
-                              : <>Process it<ArrowRight className="w-3 h-3" /></>}
+                            : <>Process it<ArrowRight className="w-3 h-3" /></>}
                         </Button>
                       </>
                     )}
