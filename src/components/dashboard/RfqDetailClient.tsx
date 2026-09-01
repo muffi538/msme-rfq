@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import {
   Loader2, Split, Send, CheckCircle, AlertTriangle,
   MessageCircle, Mail, Package, Pencil, Copy, ExternalLink, Users,
-  ChevronDown, ChevronUp, ChevronRight, ImageOff, Download, FileSpreadsheet, FileText,
+  ChevronDown, ChevronUp, ChevronRight, ImageOff, Download, FileSpreadsheet, FileText, Trash2,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -415,6 +415,7 @@ export default function RfqDetailClient({
 }) {
   const [rfq, setRfq]             = useState<Rfq>(initialRfq);
   const [items, setItems]         = useState<Item[]>(initialItems);
+  const [deletingItemId, setDeletingItemId] = useState<string | null>(null);
   const [outgoing, setOutgoing]   = useState<OutgoingRfq[]>(initialOutgoing);
   const [advancingStatus, setAdvancingStatus] = useState(false);
   const [itemImages, setItemImages] = useState<ItemImage[]>(initialItemImages);
@@ -537,6 +538,32 @@ export default function RfqDetailClient({
       setItems((prev) => prev.map((i) => i.id === itemId ? { ...i, notes: previous } : i));
       toast.error("Couldn't save remark — please try again");
       throw new Error("Save failed"); // let the caller (e.g. the lightbox) know so it can keep its modal open
+    }
+  }
+
+  // --- Delete a wrongly-extracted item. Native confirm() matches the same
+  // one-off destructive-action pattern used elsewhere in the app (e.g.
+  // removing a custom category on the Suppliers page) — a full modal would
+  // be overkill for a single-row delete. Optimistic removal with revert on
+  // failure, same as the other item-field updates above. ---
+  async function deleteItem(itemId: string, itemName: string) {
+    if (!confirm(`Delete "${itemName}"? This can't be undone.`)) return;
+    const previous = items;
+    setDeletingItemId(itemId);
+    setItems((prev) => prev.filter((i) => i.id !== itemId));
+    try {
+      const res = await fetch(`/api/rfqs/${rfq.id}/item`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId }),
+      });
+      if (!res.ok) throw new Error("Delete failed");
+      toast.success(`"${itemName}" deleted`);
+    } catch {
+      setItems(previous);
+      toast.error("Couldn't delete item — please try again");
+    } finally {
+      setDeletingItemId(null);
     }
   }
 
@@ -1000,6 +1027,7 @@ export default function RfqDetailClient({
                   <th className="px-4 py-3">Colour</th>
                   <th className="px-4 py-3">Category</th>
                   <th className="px-4 py-3">Confidence</th>
+                  <th className="px-4 py-3 w-8"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
@@ -1081,6 +1109,19 @@ export default function RfqDetailClient({
                         <span className="text-xs text-gray-400">{Math.round(overallConfidence * 100)}%</span>
                         {item.flagged && <AlertTriangle className="w-3 h-3 text-yellow-500" />}
                       </div>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <button
+                        type="button"
+                        onClick={() => deleteItem(item.id, item.name)}
+                        disabled={deletingItemId === item.id}
+                        title="Delete this item"
+                        className="w-7 h-7 flex items-center justify-center rounded-full text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {deletingItemId === item.id
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <Trash2 className="w-3.5 h-3.5" />}
+                      </button>
                     </td>
                   </tr>
                   );

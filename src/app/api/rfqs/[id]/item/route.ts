@@ -33,3 +33,25 @@ export async function PATCH(request: NextRequest) {
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });
 }
+
+// DELETE /api/rfqs/[id]/item — removes a single wrongly-extracted item.
+// Related rows clean up on their own via FK constraints: outgoing split
+// lines cascade-delete with the item, item photos are detached
+// (item_id set to null, kept as unassigned) rather than deleted.
+export async function DELETE(request: NextRequest) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const body = await request.json() as { itemId?: string };
+  const { itemId } = body;
+  if (!itemId) return NextResponse.json({ error: "itemId is required" }, { status: 400 });
+
+  const { error } = await supabase
+    .from("rfq_items")
+    .delete()
+    .eq("id", itemId);
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ ok: true });
+}
