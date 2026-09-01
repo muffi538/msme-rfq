@@ -397,6 +397,48 @@ async function recheckAwaitingRead(supabase: SupabaseClient, userId: string, ses
   }
 }
 
+// On-demand escape hatch for a single "awaiting_read" RFQ, triggered by an
+// explicit user action ("Process anyway" in the Inbox) rather than the
+// passive recheckAwaitingRead pass above. The privacy rule is about the
+// app never reading an unread email's content on its own in the
+// background — it was never meant to block the user from deliberately
+// choosing, in the moment, to read a specific email right now. Same
+// content-population logic as everywhere else (computeContentFields /
+// insertContentFiles), just triggered on demand for one message instead
+// of waiting for the next sync to notice it's been read.
+export async function fetchContentNow(
+  supabase: SupabaseClient,
+  userId: string,
+  refreshToken: string,
+  rfqId: string,
+  gmailMessageId: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const session = await createGmailSession(refreshToken);
+    const [email] = await session.fetchMessages([gmailMessageId]);
+    if (!email) {
+      return { ok: false, error: "Could not find this email in Gmail — it may have been deleted or moved." };
+    }
+
+    const fields = computeContentFields(email);
+    const { error, count } = await supabase
+      .from("rfqs")
+      .update({ file_name: fields.fileName, file_type: fields.fileType, raw_text: fields.rawText, status: "pending" }, { count: "exact" })
+      .eq("id", rfqId)
+      .eq("status", "awaiting_read");
+    if (error) return { ok: false, error: error.message };
+    // Row already moved on (e.g. the background recheck won the race) —
+    // not a failure, just nothing left for this call to do.
+    if (!count) return { ok: true };
+
+    await insertContentFiles(supabase, userId, rfqId, email, fields);
+    return { ok: true };
+  } catch (err) {
+    logError("[gmail-sync] fetchContentNow failed", { rfqId, gmailMessageId, error: err });
+    return { ok: false, error: err instanceof Error ? err.message : "Could not fetch this email from Gmail." };
+  }
+}
+
 // Filter → check read status → fetch full content ONLY for what's already
 // read → insert, in that order. Privacy rule: a full Gmail fetch (body +
 // attachments) never happens for a message we already have (unchanged),
