@@ -415,6 +415,65 @@ export async function getOriginalMessageIdHeader(gmailMessageId: string, refresh
   }
 }
 
+// Lightweight companion to FetchedEmail — headers + read status only, no
+// body/attachments. Privacy rule: syncing must not fetch or store an
+// unread message's content at all, only enough metadata to list it
+// (sender/subject/date/unread status) — this is what makes that possible
+// without a `format=full` download.
+export type MessageMeta = {
+  messageId: string;
+  threadId:  string;
+  subject:   string;
+  from:      string;
+  fromEmail: string;
+  date:      Date;
+  unread:    boolean;
+};
+
+async function fetchMessageMeta(id: string, token: string): Promise<MessageMeta> {
+  const msg = await gmailGet(`/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`, token) as {
+    id: string;
+    threadId: string;
+    labelIds?: string[];
+    payload?: { headers?: { name: string; value: string }[] };
+    internalDate: string;
+  };
+
+  const headers = msg.payload?.headers ?? [];
+  const subject = headerVal(headers, "Subject") || "(no subject)";
+  const fromRaw = headerVal(headers, "From");
+
+  const emailMatch = fromRaw.match(/<(.+?)>/) ?? fromRaw.match(/(\S+@\S+)/);
+  const nameMatch  = fromRaw.match(/^(.+?)\s*</);
+  const fromEmail  = emailMatch?.[1] ?? fromRaw;
+  const fromName   = nameMatch?.[1]?.replace(/"/g, "") ?? fromEmail;
+
+  return {
+    messageId: msg.id,
+    threadId:  msg.threadId,
+    subject,
+    from:      fromName,
+    fromEmail,
+    date:      new Date(Number(msg.internalDate)),
+    unread:    (msg.labelIds ?? []).includes("UNREAD"),
+  };
+}
+
+async function fetchMessagesMeta(token: string, ids: string[], concurrency = 5): Promise<MessageMeta[]> {
+  if (ids.length === 0) return [];
+  const results = await mapWithConcurrency(ids, concurrency, async (id) => {
+    try {
+      return await fetchMessageMeta(id, token);
+    } catch (err) {
+      // Same reasoning as fetchMessages — a message can vanish between the
+      // list/history call that found its id and this follow-up GET.
+      if (err instanceof Error && /\(404\)/.test(err.message)) return null;
+      throw err;
+    }
+  });
+  return results.filter((m): m is MessageMeta => m !== null);
+}
+
 async function fetchMessageById(id: string, token: string): Promise<FetchedEmail> {
   const msg = await gmailGet(`/messages/${id}?format=full`, token) as {
     id: string;
@@ -594,6 +653,7 @@ async function markAsRead(messageId: string, token: string): Promise<void> {
 export type GmailSession = {
   listMessageIds(query: string, opts?: { maxResults?: number; maxPages?: number }): Promise<string[]>;
   fetchMessages(ids: string[], concurrency?: number): Promise<FetchedEmail[]>;
+  fetchMessagesMeta(ids: string[], concurrency?: number): Promise<MessageMeta[]>;
   getProfile(): Promise<{ historyId: string; emailAddress: string }>;
   listHistorySince(startHistoryId: string): Promise<{ expired: true } | { expired: false; messageIds: string[]; historyId: string }>;
   markAsRead(messageId: string): Promise<void>;
@@ -609,6 +669,7 @@ export async function createGmailSession(refreshToken: string): Promise<GmailSes
   return {
     listMessageIds: (query, opts) => listMessageIds(token, query, opts),
     fetchMessages:  (ids, concurrency) => fetchMessages(token, ids, concurrency),
+    fetchMessagesMeta: (ids, concurrency) => fetchMessagesMeta(token, ids, concurrency),
     getProfile:     () => getProfile(token),
     listHistorySince: (startHistoryId) => listHistorySince(token, startHistoryId),
     markAsRead:     (messageId) => markAsRead(messageId, token),

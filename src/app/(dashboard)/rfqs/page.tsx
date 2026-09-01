@@ -10,14 +10,15 @@ export default async function RfqsPage() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  // Only show RFQs that have actually been processed — pending ones stay in
+  // Only show RFQs that have actually been processed — pending ones (and
+  // awaiting_read ones, which don't even have content fetched yet) stay in
   // the email inbox until the user clicks "Process it".
   const [{ data: rfqs }, { data: outgoingRows }, logsResult, quotationRepliesResult] = await Promise.all([
     supabase
       .from("rfqs")
       .select("id, rfq_code, buyer_name, buyer_email, status, priority, file_type, created_at")
       .eq("user_id", user.id)
-      .not("status", "in", "(pending,needs_processing)")
+      .not("status", "in", "(pending,needs_processing,awaiting_read)")
       .order("created_at", { ascending: false }),
     supabase.from("outgoing_rfqs").select("rfq_id, status").eq("user_id", user.id),
     supabase

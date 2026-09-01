@@ -597,6 +597,20 @@ export async function POST(
   const { data: rfq } = await supabase.from("rfqs").select("id, status, updated_at").eq("id", id).maybeSingle();
   if (!rfq) return NextResponse.json({ error: "RFQ not found" }, { status: 404 });
 
+  // Privacy rule: this email was still unread when synced, so its content
+  // was never fetched — nothing exists yet to process. It'll flip to
+  // "pending" (and become processable) on its own once the user reads it
+  // in Gmail and the next sync notices — see recheckAwaitingRead in
+  // lib/email/sync.ts. Reject explicitly here rather than falling through
+  // to "no text found", which would be a confusing message for a state
+  // that isn't actually a failure.
+  if (rfq.status === "awaiting_read") {
+    return NextResponse.json(
+      { error: "This email hasn't been read yet. Read it in Gmail first — it'll be ready to process on the next sync." },
+      { status: 409 }
+    );
+  }
+
   // Idempotency guard — if this RFQ already has a job in flight (a
   // double-click, or two tabs on the same row), don't kick off a second
   // concurrent run that would race the first one writing rfq_items for the
