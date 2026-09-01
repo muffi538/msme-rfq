@@ -5,8 +5,8 @@
 // one createGmailSession per call so the OAuth token is only exchanged once.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { logError } from "@/lib/logError";
-import { createGmailSession, GmailApiError, type FetchedEmail, type GmailSession } from "@/lib/email/gmail";
-import { detectFileType } from "@/lib/parsers/parseFile";
+import { createGmailSession, GmailApiError, type FetchedEmail, type GmailSession, type MessageMeta } from "@/lib/email/gmail";
+import { detectFileType, type FileType } from "@/lib/parsers/parseFile";
 import { generateRfqCode } from "@/lib/rfq";
 import { withRetry } from "@/lib/retry";
 import { mapWithConcurrency } from "@/lib/concurrency";
@@ -126,6 +126,95 @@ type EmailOutcome =
   | { kind: "deduped" }
   | { kind: "failed"; error: string };
 
+// Pure — no I/O — so both a fresh "read" import and the awaiting-read
+// backfill pass compute the exact same fields from a FetchedEmail the
+// exact same way, instead of two copies that could drift apart.
+type ContentFields = {
+  fileName: string;
+  fileType: string | null;
+  rawText: string;
+  hasBodyText: boolean;
+  supported: { att: FetchedEmail["attachments"][number]; type: FileType }[];
+};
+
+function computeContentFields(email: FetchedEmail): ContentFields {
+  const supported = email.attachments
+    .map((att) => ({ att, type: detectFileType(att.filename, att.mimeType) }))
+    .filter((a): a is { att: typeof email.attachments[number]; type: NonNullable<typeof a.type> } => a.type !== null);
+
+  const hasBodyText = email.bodyText.trim().length > 0;
+
+  let rawText  = "";
+  let fileType: string | null = null;
+  const fileName = supported.length > 0 ? supported[0].att.filename : "(email body)";
+
+  if (supported.length === 0 && hasBodyText) {
+    // No attachments — the legacy single-blob path (rfqs.raw_text) handles
+    // this directly; no rfq_files rows needed at all.
+    rawText  = email.bodyText;
+    fileType = "text";
+  } else if (supported.length > 0) {
+    fileType = supported.length === 1 ? supported[0].type : "mixed";
+  }
+
+  return { fileName, fileType, rawText, hasBodyText, supported };
+}
+
+// Uploads attachments + inserts the rfq_files rows (attachments + email
+// body) for an rfqs row that already exists. Shared by a fresh "read"
+// import (right after its own rfqs insert, below) and the awaiting-read
+// backfill pass (recheckAwaitingRead, further down) — both need the
+// identical rfq_files-population step, just triggered at different times.
+async function insertContentFiles(
+  supabase: SupabaseClient, userId: string, rfqId: string, email: FetchedEmail, fields: ContentFields
+): Promise<void> {
+  if (fields.supported.length === 0) return;
+
+  const uploadedRows = await mapWithConcurrency(fields.supported, 3, async ({ att, type }, i) => {
+    // The index guarantees uniqueness even when two attachments in the
+    // SAME email share an identical filename (confirmed reproducible: a
+    // real test with two "photo.jpg" attachments uploaded concurrently
+    // landed on the exact same Date.now() millisecond, so the second
+    // upload hit Supabase Storage's upsert:false collision check and
+    // failed — that attachment's file_url ended up null, and it later
+    // failed processing with the misleading "Could not find the stored
+    // file" error instead of ever being read).
+    const path = `${userId}/${Date.now()}-${i}-${att.filename}`;
+    try {
+      await withRetry(
+        async () => {
+          const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, att.buffer, { upsert: false });
+          if (storageError) throw storageError;
+        },
+        { retries: 2, label: `upload "${att.filename}"` }
+      );
+      return { rfq_id: rfqId, user_id: userId, file_name: att.filename, file_url: path, file_type: type, raw_text: null, status: "pending" };
+    } catch (err) {
+      logError("[gmail-sync] attachment upload failed", { messageId: email.messageId, filename: att.filename, error: err });
+      return { rfq_id: rfqId, user_id: userId, file_name: att.filename, file_url: null, file_type: type, raw_text: null, status: "pending" };
+    }
+  });
+
+  // The email's own body text is a real, independent source of RFQ
+  // content in its own right — e.g. line items typed directly into the
+  // email with a product photo attached separately — and was previously
+  // silently dropped whenever there was also at least one attachment.
+  // Insert it as its own rfq_files row — already parsed (we already have
+  // the text, no download/parse step needed) — so the multi-file
+  // extraction pipeline treats it as a genuine additional source instead
+  // of losing it entirely.
+  const bodyRow = fields.hasBodyText
+    ? [{
+        rfq_id: rfqId, user_id: userId, file_name: "(email body)",
+        file_url: null, file_type: "text", raw_text: email.bodyText,
+        status: "parsed", error: null,
+      }]
+    : [];
+
+  const { error: filesError } = await supabase.from("rfq_files").insert([...uploadedRows, ...bodyRow]);
+  if (filesError) logError("[gmail-sync] rfq_files insert failed", { messageId: email.messageId, error: filesError });
+}
+
 // Every step that can transiently fail (rfq_code generation, the insert
 // itself) is retried; and the whole function is wrapped in a catch-all so
 // that ANY unexpected failure here — retried out or not — resolves to a
@@ -133,26 +222,13 @@ type EmailOutcome =
 // runs these concurrently via Promise.all, so one worker throwing would
 // reject the whole batch and abort every other email still in flight,
 // including ones that would have succeeded — exactly what must not happen.
+//
+// Only ever called for a message already confirmed read (see
+// fetchAndImport) — an unread one goes through importUnreadMeta instead,
+// which never fetches or stores its body/attachments at all.
 async function importOneEmail(supabase: SupabaseClient, userId: string, session: GmailSession, email: FetchedEmail): Promise<EmailOutcome> {
   try {
-    const supported = email.attachments
-      .map((att) => ({ att, type: detectFileType(att.filename, att.mimeType) }))
-      .filter((a): a is { att: typeof email.attachments[number]; type: NonNullable<typeof a.type> } => a.type !== null);
-
-    const hasBodyText = email.bodyText.trim().length > 0;
-
-    let rawText  = "";
-    let fileType: string | null = null;
-    const fileName = supported.length > 0 ? supported[0].att.filename : "(email body)";
-
-    if (supported.length === 0 && hasBodyText) {
-      // No attachments — the legacy single-blob path (rfqs.raw_text) handles
-      // this directly; no rfq_files rows needed at all.
-      rawText  = email.bodyText;
-      fileType = "text";
-    } else if (supported.length > 0) {
-      fileType = supported.length === 1 ? supported[0].type : "mixed";
-    }
+    const fields = computeContentFields(email);
 
     const rfqCode = await withRetry(
       () => generateRfqCode(supabase, userId),
@@ -168,9 +244,9 @@ async function importOneEmail(supabase: SupabaseClient, userId: string, session:
             rfq_code:         rfqCode,
             buyer_name:       email.from,
             buyer_email:      email.fromEmail,
-            file_name:        fileName,
-            file_type:        fileType,
-            raw_text:         rawText,
+            file_name:        fields.fileName,
+            file_type:        fields.fileType,
+            raw_text:         fields.rawText,
             status:           "pending",
             priority:         /urgent|asap|priority/i.test(email.subject) ? "urgent" : "normal",
             created_at:       email.date.toISOString(),
@@ -195,53 +271,7 @@ async function importOneEmail(supabase: SupabaseClient, userId: string, session:
       return { kind: "failed", error: insertError?.message ?? "insert returned no row" };
     }
 
-    if (supported.length > 0) {
-      const uploadedRows = await mapWithConcurrency(supported, 3, async ({ att, type }, i) => {
-        // The index guarantees uniqueness even when two attachments in the
-        // SAME email share an identical filename (confirmed reproducible: a
-        // real test with two "photo.jpg" attachments uploaded concurrently
-        // landed on the exact same Date.now() millisecond, so the second
-        // upload hit Supabase Storage's upsert:false collision check and
-        // failed — that attachment's file_url ended up null, and it later
-        // failed processing with the misleading "Could not find the stored
-        // file" error instead of ever being read).
-        const path = `${userId}/${Date.now()}-${i}-${att.filename}`;
-        try {
-          await withRetry(
-            async () => {
-              const { error: storageError } = await supabase.storage.from("rfq-files").upload(path, att.buffer, { upsert: false });
-              if (storageError) throw storageError;
-            },
-            { retries: 2, label: `upload "${att.filename}"` }
-          );
-          return { rfq_id: rfq.id, user_id: userId, file_name: att.filename, file_url: path, file_type: type, raw_text: null, status: "pending" };
-        } catch (err) {
-          logError("[gmail-sync] attachment upload failed", { messageId: email.messageId, filename: att.filename, error: err });
-          return { rfq_id: rfq.id, user_id: userId, file_name: att.filename, file_url: null, file_type: type, raw_text: null, status: "pending" };
-        }
-      });
-
-      // The email's own body text is a real, independent source of RFQ
-      // content in its own right — e.g. line items typed directly into the
-      // email with a product photo attached separately — and was
-      // previously silently dropped whenever there was also at least one
-      // attachment: this whole branch only handled attachments, and the
-      // body-text branch above only fires when supported.length === 0, so
-      // it never ran. Insert it as its own rfq_files row — already parsed
-      // (we already have the text, no download/parse step needed) — so the
-      // multi-file extraction pipeline treats it as a genuine additional
-      // source instead of losing it entirely.
-      const bodyRow = hasBodyText
-        ? [{
-            rfq_id: rfq.id, user_id: userId, file_name: "(email body)",
-            file_url: null, file_type: "text", raw_text: email.bodyText,
-            status: "parsed", error: null,
-          }]
-        : [];
-
-      const { error: filesError } = await supabase.from("rfq_files").insert([...uploadedRows, ...bodyRow]);
-      if (filesError) logError("[gmail-sync] rfq_files insert failed", { messageId: email.messageId, error: filesError });
-    }
+    await insertContentFiles(supabase, userId, rfq.id, email, fields);
 
     // Privacy rule: syncing/fetching a message must never count as reading
     // it — only the user opening it does that — so this app must never
@@ -250,51 +280,130 @@ async function importOneEmail(supabase: SupabaseClient, userId: string, session:
     // reintroduce the "same unread mail forever" problem that call used to
     // prevent.)
 
-    return { kind: "created", entry: { rfqCode, subject: email.subject, from: email.from, hasAttachment: supported.length > 0 } };
+    return { kind: "created", entry: { rfqCode, subject: email.subject, from: email.from, hasAttachment: fields.supported.length > 0 } };
   } catch (err) {
     logError("[gmail-sync] importOneEmail failed unexpectedly", { messageId: email.messageId, error: err });
     return { kind: "failed", error: err instanceof Error ? err.message : "unknown error" };
   }
 }
 
-// Inserts already-filtered candidates. The batch pre-filter upstream
-// handles the common dedup case; the unique index on gmail_message_id is
-// the backstop if two syncs still race on the same message between the
-// filter and insert.
-async function importCandidateEmails(
-  supabase: SupabaseClient,
-  userId: string,
-  session: GmailSession,
-  candidates: FetchedEmail[],
-  onProgress?: (processed: number, total: number) => void
-): Promise<Omit<SyncResult, "usedFallback">> {
-  if (candidates.length === 0) return { ...EMPTY };
+// Privacy rule: an email that's still unread must not have its body or
+// attachments fetched/stored at all — only enough metadata to list it.
+// Inserts a placeholder rfqs row with status "awaiting_read": visible in
+// the UI (sender/subject/date) but with no content and no "Process it"
+// option, since there's nothing yet to process. recheckAwaitingRead
+// (below) is what later notices this message has been read and backfills
+// its real content — this function itself never fetches a body.
+async function importUnreadMeta(supabase: SupabaseClient, userId: string, meta: MessageMeta): Promise<EmailOutcome> {
+  try {
+    const rfqCode = await withRetry(
+      () => generateRfqCode(supabase, userId),
+      { retries: 2, label: `generate rfq code for "${meta.subject}"` }
+    );
 
-  let processed = 0;
-  const outcomes = await mapWithConcurrency(
-    candidates,
-    EMAIL_IMPORT_CONCURRENCY,
-    (email) => importOneEmail(supabase, userId, session, email),
-    () => onProgress?.(++processed, candidates.length)
-  );
+    const { data: rfq, error: insertError } = await withRetry(
+      async () => {
+        const res = await supabase
+          .from("rfqs")
+          .insert({
+            user_id:          userId,
+            rfq_code:         rfqCode,
+            buyer_name:       meta.from,
+            buyer_email:      meta.fromEmail,
+            file_name:        null,
+            file_type:        null,
+            raw_text:         null,
+            status:           "awaiting_read",
+            priority:         /urgent|asap|priority/i.test(meta.subject) ? "urgent" : "normal",
+            created_at:       meta.date.toISOString(),
+            gmail_message_id: meta.messageId,
+            gmail_thread_id:  meta.threadId,
+          })
+          .select("id")
+          .single();
+        if (res.error && (res.error as { code?: string }).code !== UNIQUE_VIOLATION) throw res.error;
+        return res;
+      },
+      { retries: 2, label: `insert awaiting-read rfq for "${meta.subject}"` }
+    );
 
-  let created = 0;
-  let deduped = 0;
-  let insertFailed = 0;
-  let lastInsertError: string | null = null;
-  const results: SyncResult["results"] = [];
+    if (insertError || !rfq) {
+      if ((insertError as { code?: string } | null)?.code === UNIQUE_VIOLATION) return { kind: "deduped" };
+      logError("[gmail-sync] awaiting-read rfq insert failed", { messageId: meta.messageId, error: insertError });
+      return { kind: "failed", error: insertError?.message ?? "insert returned no row" };
+    }
 
-  for (const outcome of outcomes) {
-    if (outcome.kind === "created") { created++; results.push(outcome.entry); }
-    else if (outcome.kind === "deduped") deduped++;
-    else { insertFailed++; lastInsertError = outcome.error; }
+    return { kind: "created", entry: { rfqCode, subject: meta.subject, from: meta.from, hasAttachment: false } };
+  } catch (err) {
+    logError("[gmail-sync] importUnreadMeta failed unexpectedly", { messageId: meta.messageId, error: err });
+    return { kind: "failed", error: err instanceof Error ? err.message : "unknown error" };
   }
-
-  return { created, fetched: candidates.length, deduped, insertFailed, lastInsertError, results };
 }
 
-// Filter → fetch full content → insert, in that order, so a full Gmail
-// fetch (body + attachments) never happens for a message we already have.
+// Bounded — matches the "small scan, not a full backfill" philosophy
+// already used elsewhere in this file (SYNC_BATCH_CAP, FALLBACK_SCAN_LIMIT)
+// rather than an unbounded scan of however many awaiting-read placeholders
+// have piled up. Any left over just get picked up on a later sync.
+const AWAITING_READ_RECHECK_LIMIT = 50;
+
+// Runs on every regular sync (see syncGmailForUserInner) alongside the
+// normal new-mail import: rechecks a bounded batch of this user's
+// "awaiting_read" placeholders (emails that were unread when first seen)
+// to see whether the user has since read them directly in Gmail. Any that
+// have are backfilled with their real content now. This — together with
+// fetchAndImport below — is the only place that ever fetches an email's
+// body/attachments, and only ever for a message Gmail itself currently
+// reports as read. Best-effort: a failure here is logged, never thrown,
+// so it can't take down the main sync it rides alongside.
+async function recheckAwaitingRead(supabase: SupabaseClient, userId: string, session: GmailSession): Promise<void> {
+  try {
+    const { data: waiting } = await supabase
+      .from("rfqs")
+      .select("id, gmail_message_id")
+      .eq("user_id", userId)
+      .eq("status", "awaiting_read")
+      .order("created_at", { ascending: true })
+      .limit(AWAITING_READ_RECHECK_LIMIT);
+
+    const rows = (waiting ?? []).filter((r): r is { id: string; gmail_message_id: string } => !!r.gmail_message_id);
+    if (rows.length === 0) return;
+
+    const metas = await session.fetchMessagesMeta(rows.map((r) => r.gmail_message_id));
+    const nowReadIds = new Set(metas.filter((m) => !m.unread).map((m) => m.messageId));
+    const toBackfill = rows.filter((r) => nowReadIds.has(r.gmail_message_id));
+    if (toBackfill.length === 0) return;
+
+    const fullEmails = await session.fetchMessages(toBackfill.map((r) => r.gmail_message_id));
+    const rfqIdByMessageId = new Map(toBackfill.map((r) => [r.gmail_message_id, r.id]));
+
+    await mapWithConcurrency(fullEmails, EMAIL_IMPORT_CONCURRENCY, async (email) => {
+      const rfqId = rfqIdByMessageId.get(email.messageId);
+      if (!rfqId) return;
+      const fields = computeContentFields(email);
+      // Guard on status still being "awaiting_read" — if something else
+      // already touched this row between the read above and here, don't
+      // clobber it.
+      const { error, count } = await supabase
+        .from("rfqs")
+        .update({ file_name: fields.fileName, file_type: fields.fileType, raw_text: fields.rawText, status: "pending" }, { count: "exact" })
+        .eq("id", rfqId)
+        .eq("status", "awaiting_read");
+      if (error) { logError("[gmail-sync] awaiting-read backfill update failed", { rfqId, error }); return; }
+      if (!count) return; // row already moved on — don't add rfq_files to a row we no longer own the transition for
+      await insertContentFiles(supabase, userId, rfqId, email, fields);
+    });
+  } catch (err) {
+    logError("[gmail-sync] recheckAwaitingRead failed (non-fatal, will retry next sync)", err);
+  }
+}
+
+// Filter → check read status → fetch full content ONLY for what's already
+// read → insert, in that order. Privacy rule: a full Gmail fetch (body +
+// attachments) never happens for a message we already have (unchanged),
+// AND never happens for one that's still unread — those get a
+// metadata-only placeholder via importUnreadMeta instead, and only ever
+// get their content fetched later, by recheckAwaitingRead, once Gmail
+// itself reports them as read.
 async function fetchAndImport(
   supabase: SupabaseClient,
   userId: string,
@@ -303,9 +412,38 @@ async function fetchAndImport(
   onProgress?: (processed: number, total: number) => void
 ): Promise<Omit<SyncResult, "usedFallback">> {
   const { unseen, alreadySeen } = await filterUnseenMessageIds(supabase, userId, ids);
-  const candidates = await session.fetchMessages(unseen);
-  const imported = await importCandidateEmails(supabase, userId, session, candidates, onProgress);
-  return { ...imported, fetched: ids.length, deduped: imported.deduped + alreadySeen };
+  if (unseen.length === 0) return { ...EMPTY, fetched: ids.length, deduped: alreadySeen };
+
+  const metas = await session.fetchMessagesMeta(unseen);
+  const readMetas = metas.filter((m) => !m.unread);
+  const unreadMetas = metas.filter((m) => m.unread);
+
+  const fullEmails = readMetas.length > 0
+    ? await session.fetchMessages(readMetas.map((m) => m.messageId))
+    : [];
+
+  let processed = 0;
+  const total = fullEmails.length + unreadMetas.length;
+  const report = () => onProgress?.(++processed, total);
+
+  const [readOutcomes, unreadOutcomes] = await Promise.all([
+    mapWithConcurrency(fullEmails, EMAIL_IMPORT_CONCURRENCY, (email) => importOneEmail(supabase, userId, session, email), report),
+    mapWithConcurrency(unreadMetas, EMAIL_IMPORT_CONCURRENCY, (meta) => importUnreadMeta(supabase, userId, meta), report),
+  ]);
+
+  let created = 0;
+  let deduped = 0;
+  let insertFailed = 0;
+  let lastInsertError: string | null = null;
+  const results: SyncResult["results"] = [];
+
+  for (const outcome of [...readOutcomes, ...unreadOutcomes]) {
+    if (outcome.kind === "created") { created++; results.push(outcome.entry); }
+    else if (outcome.kind === "deduped") deduped++;
+    else { insertFailed++; lastInsertError = outcome.error; }
+  }
+
+  return { created, fetched: ids.length, deduped: deduped + alreadySeen, insertFailed, lastInsertError, results };
 }
 
 // "Fetch Now" (manual) and the every-2-minute cron both call this. Cron
@@ -359,6 +497,15 @@ async function syncGmailForUserInner(
   onProgress?: (processed: number, total: number) => void
 ): Promise<SyncResult> {
   const session = await createGmailSession(refreshToken);
+
+  // Runs concurrently with the rest of this sync (touches entirely
+  // different rows — previously-created "awaiting_read" placeholders, not
+  // whatever new mail this sync is about to find) — kicked off here so its
+  // own Gmail API calls overlap with the main sync's instead of adding to
+  // its latency, awaited at the end so a caller polling for "sync done"
+  // sees its effects too.
+  const recheckPromise = recheckAwaitingRead(supabase, userId, session);
+
   const lastHistoryId = await getSetting(supabase, userId, "gmail_last_history_id");
 
   let messageIds: string[] = [];
@@ -455,6 +602,7 @@ async function syncGmailForUserInner(
   // If there's genuinely nothing new, this returns instantly — no full
   // message fetch is even attempted for an empty id list.
   const imported = await fetchAndImport(supabase, userId, session, messageIds, onProgress);
+  await recheckPromise;
   return { ...imported, usedFallback };
 }
 

@@ -16,12 +16,15 @@ export async function GET() {
 
   // "failed" and "cancelled" RFQs stay here too (not silently dropped) so
   // the user can see and retry them instead of them disappearing after a
-  // failed or cancelled run.
+  // failed or cancelled run. "awaiting_read" ones too — an email that was
+  // unread when synced (privacy rule: its content is never fetched until
+  // then) still needs to show up here with just its metadata, even though
+  // there's nothing to process yet.
   const { data: rfqs } = await supabase
     .from("rfqs")
     .select("id, rfq_code, buyer_name, buyer_email, file_name, created_at, updated_at, status, process_error")
     .eq("user_id", user.id)
-    .in("status", ["pending", "needs_processing", "processing", "failed", "cancelled"])
+    .in("status", ["pending", "needs_processing", "processing", "failed", "cancelled", "awaiting_read"])
     .eq("hidden_from_dashboard", false)
     .order("created_at", { ascending: false, nullsFirst: false });
 
